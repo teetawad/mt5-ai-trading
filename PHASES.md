@@ -280,6 +280,23 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 15 — Backtesting and Strategy Evaluation
+
+- [x] Historical-data backtesting
+- [x] Train/test time split
+- [x] Walk-forward validation
+- [x] Transaction fees and slippage
+- [x] Benchmark comparison
+- [x] Metrics: return, max drawdown, Sharpe ratio, win rate, profit factor
+- [x] Strategy parameter configuration
+- [x] Look-ahead bias prevention
+- [x] Data leakage prevention
+- [x] Reproducible tests
+- [x] PAPER execution boundary preserved
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass
