@@ -197,3 +197,44 @@ export async function getPaperPortfolio(requestId?: string): Promise<PaperPortfo
   }
   return res.json() as Promise<PaperPortfolioDTO>;
 }
+
+// ── Signals ───────────────────────────────────────────────────────────────────
+
+export type SignalSide = 'BUY' | 'SELL';
+export type SignalType = 'MARKET' | 'LIMIT';
+
+export interface SignalDTO {
+  signal_id: string;
+  strategy_name: string;
+  symbol: string;
+  side: SignalSide;
+  quantity: string;
+  signal_type: SignalType;
+  limit_price?: string;
+  reference_price: string;
+  confidence: number;
+  generated_at: string;
+  metadata: Record<string, string>;
+}
+
+export async function generateSignals(
+  strategyName?: string,
+  requestId?: string,
+): Promise<SignalDTO[]> {
+  const res = await engineFetch('/signals/generate', requestId, {
+    method: 'POST',
+    body: JSON.stringify({ strategy_name: strategyName ?? null }),
+  });
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<SignalDTO[]>;
+}
+
+export async function listStrategies(requestId?: string): Promise<string[]> {
+  const res = await engineFetch('/signals/strategies', requestId);
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<string[]>;
+}

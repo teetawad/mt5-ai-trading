@@ -129,13 +129,13 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 6 — Strategy Engine
 
-- [ ] `Strategy` interface
-- [ ] `Signal` schema
-- [ ] Example deterministic strategy (`MovingAverageCrossover` or similar)
-- [ ] Strategy registry
-- [ ] Strategy → Signal only (no execution access)
-- [ ] Architectural boundary tests (strategy cannot reach broker)
-- [ ] Tests
+- [x] `Strategy` interface
+- [x] `Signal` schema
+- [x] Example deterministic strategy (`MovingAverageCrossover` or similar)
+- [x] Strategy registry
+- [x] Strategy → Signal only (no execution access)
+- [x] Architectural boundary tests (strategy cannot reach broker)
+- [x] Tests (37 Python pass; Node client extended)
 - [ ] Owner review
 
 ---
