@@ -34,6 +34,12 @@ start "Trading Engine" cmd /k "cd /d ""%PROJECT_ROOT%services\trading-engine"" &
 echo Opening Frontend window...
 start "Trade Frontend" cmd /k "cd /d ""%PROJECT_ROOT%apps\web"" && npm run dev"
 
+echo Waiting a few seconds for services to start...
+timeout /t 5 /nobreak >nul
+
+echo Opening http://localhost:3000 in the default browser...
+start "" "http://localhost:3000"
+
 echo.
 echo Startup commands have been launched.
 echo Keep the opened CMD windows running. Press Ctrl+C inside each service window to stop it.
