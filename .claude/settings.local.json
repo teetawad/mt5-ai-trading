@@ -8,7 +8,18 @@
       "Bash(timeout 30 npx nuxt dev)",
       "Bash(git add *)",
       "Bash(git -C /c/Users/Teetawad/Desktop/trade add .)",
-      "Bash(git -C /c/Users/Teetawad/Desktop/trade status)"
+      "Bash(git -C /c/Users/Teetawad/Desktop/trade status)",
+      "Bash(git *)",
+      "Bash(docker info *)",
+      "Bash(docker context ls *)",
+      "Bash(docker --context default ps)",
+      "Bash(npm test *)",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(.venv/Scripts/pytest *)",
+      "Bash(.venv/Scripts/ruff check *)",
+      "Bash(.venv/Scripts/mypy . --ignore-missing-imports)",
+      "Bash(node -e \"const a = require\\('argon2'\\); console.log\\(Object.keys\\(a\\).join\\(', '\\)\\)\")",
+      "Bash(node *)"
     ]
   }
 }
