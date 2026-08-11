@@ -11,6 +11,7 @@ import {
   evaluateRisk,
   getMarketSnapshot,
   getPaperPortfolio,
+  submitOrder,
 } from '../services/trading-engine-client';
 
 vi.mock('../services/trading-engine-client', async () => {
@@ -22,6 +23,7 @@ vi.mock('../services/trading-engine-client', async () => {
     getMarketSnapshot: vi.fn(),
     getPaperPortfolio: vi.fn(),
     evaluateRisk: vi.fn(),
+    submitOrder: vi.fn(),
   };
 });
 
@@ -77,6 +79,21 @@ function mockEngine(result: 'PASS' | 'REJECT' = 'PASS') {
   vi.mocked(evaluateRisk).mockResolvedValue(
     result === 'PASS' ? riskResult('PASS') : riskResult('REJECT', ['MAX_ORDER_NOTIONAL']),
   );
+  vi.mocked(submitOrder).mockResolvedValue({
+    broker_order_id: 'broker-order-default',
+    status: 'FILLED',
+    fills: [
+      {
+        order_id: 'broker-order-default',
+        fill_id: `fill-${Date.now()}`,
+        quantity: '1.00000000',
+        price: '100.00000000',
+        fee: '1.00000000',
+        is_partial: false,
+        filled_at: '2024-01-15T10:31:00.000Z',
+      },
+    ],
+  });
 }
 
 function mockEngineSequence(...results: Array<'PASS' | 'REJECT'>) {
@@ -112,6 +129,12 @@ describe('Phase 8 route guards', () => {
   it('POST approve requires authentication', async () => {
     const app = createApp();
     const res = await request(app).post('/trade-proposals/proposal-1/approve').send({});
+    expect(res.status).toBe(401);
+  });
+
+  it('POST execute requires authentication', async () => {
+    const app = createApp();
+    const res = await request(app).post('/trade-proposals/proposal-1/execute').send({});
     expect(res.status).toBe(401);
   });
 
@@ -161,10 +184,15 @@ describe('Phase 8 signal to proposal workflow', () => {
     if (pool) {
       await pool.query('DELETE FROM audit_logs WHERE actor_id = $1', [OWNER_ID]);
       await pool.query("DELETE FROM risk_checks WHERE market_snapshot->>'symbol' = 'AAPL'");
+      await pool.query("DELETE FROM portfolio_snapshots WHERE snapshot_reason LIKE 'TRADE_EXECUTION_%'");
+      await pool.query("DELETE FROM fills WHERE order_id IN (SELECT id FROM orders WHERE symbol = 'AAPL')");
+      await pool.query("DELETE FROM orders WHERE symbol = 'AAPL'");
+      await pool.query("DELETE FROM executions WHERE proposal_id IN (SELECT id FROM trade_proposals WHERE symbol = 'AAPL')");
       await pool.query("DELETE FROM trade_approvals WHERE proposal_id IN (SELECT id FROM trade_proposals WHERE symbol = 'AAPL')");
       await pool.query("DELETE FROM risk_checks WHERE proposal_id IN (SELECT id FROM trade_proposals WHERE symbol = 'AAPL')");
       await pool.query("DELETE FROM trade_proposals WHERE symbol IN ('AAPL')");
       await pool.query("DELETE FROM signals WHERE symbol = 'AAPL'");
+      await pool.query("DELETE FROM positions WHERE symbol = 'AAPL'");
       await pool.query("DELETE FROM strategies WHERE name LIKE 'phase-8-%'");
       await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
       await pool.end();
@@ -445,5 +473,197 @@ describe('Phase 8 signal to proposal workflow', () => {
     expect(first.status).toBe(200);
     expect(second.status).toBe(409);
     expect(second.body.error).toBe('INVALID_STATE');
+  });
+
+  it.skipIf(SKIP)('POST execute submits an approved proposal to the paper broker and records fills', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: 'broker-order-execute-1',
+      status: 'FILLED',
+      fills: [
+        {
+          order_id: 'broker-order-execute-1',
+          fill_id: 'broker-fill-execute-1',
+          quantity: '12.00000000',
+          price: '101.00000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:31:00.000Z',
+        },
+      ],
+    });
+
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '12.00000000',
+        reason: 'phase 10 execute test',
+      });
+    const approved = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-approve-1' });
+
+    const res = await request(app)
+      .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-execute-1' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.proposal.status).toBe('FILLED');
+    expect(res.body.execution.status).toBe('FILLED');
+    expect(res.body.execution.idempotencyKey).toBe(`proposal:${approved.body.proposal.id}:attempt:1`);
+    expect(res.body.order.status).toBe('FILLED');
+    expect(res.body.order.filledQuantity).toBe('12.00000000');
+    expect(res.body.fills).toHaveLength(1);
+    expect(res.body.position.quantity).toBe('12.00000000');
+    expect(vi.mocked(submitOrder).mock.calls[0][0]).toMatchObject({
+      idempotency_key: `proposal:${approved.body.proposal.id}:attempt:1`,
+      symbol: 'AAPL',
+      side: 'BUY',
+      quantity: '12.00000000',
+      order_type: 'MARKET',
+    });
+  });
+
+  it.skipIf(SKIP)('POST execute is idempotent and does not submit duplicate paper orders', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: 'broker-order-idempotent-1',
+      status: 'FILLED',
+      fills: [
+        {
+          order_id: 'broker-order-idempotent-1',
+          fill_id: 'broker-fill-idempotent-1',
+          quantity: '13.00000000',
+          price: '100.00000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:31:00.000Z',
+        },
+      ],
+    });
+
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '13.00000000',
+        reason: 'phase 10 idempotent test',
+      });
+    const approved = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-approve-2' });
+
+    const first = await request(app)
+      .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-execute-2' });
+    const second = await request(app)
+      .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-execute-2-retry' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.idempotent).toBe(true);
+    expect(second.body.execution.id).toBe(first.body.execution.id);
+    expect(vi.mocked(submitOrder)).toHaveBeenCalledTimes(1);
+  });
+
+  it.skipIf(SKIP)('POST execute records paper broker rejections without fills', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: 'broker-order-reject-1',
+      status: 'REJECTED',
+      fills: [],
+      rejected_reason: 'Insufficient paper funds',
+    });
+
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '14.00000000',
+        reason: 'phase 10 rejection test',
+      });
+    const approved = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-approve-3' });
+
+    const res = await request(app)
+      .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-execute-3' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('EXECUTION_REJECTED');
+    expect(res.body.proposal.status).toBe('EXECUTION_REJECTED');
+    expect(res.body.execution.status).toBe('REJECTED');
+    expect(res.body.fills).toEqual([]);
+  });
+
+  it.skipIf(SKIP)('POST execute can recover from a transient broker submission error', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(submitOrder)
+      .mockRejectedValueOnce(new Error('paper broker unavailable'))
+      .mockResolvedValueOnce({
+        broker_order_id: 'broker-order-recovery-1',
+        status: 'FILLED',
+        fills: [
+          {
+            order_id: 'broker-order-recovery-1',
+            fill_id: 'broker-fill-recovery-1',
+            quantity: '15.00000000',
+            price: '102.00000000',
+            fee: '1.00000000',
+            is_partial: false,
+            filled_at: '2024-01-15T10:31:00.000Z',
+          },
+        ],
+      });
+
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '15.00000000',
+        reason: 'phase 10 recovery test',
+      });
+    const approved = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-approve-4' });
+
+    const failed = await request(app)
+      .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-execute-4' });
+    const recovered = await request(app)
+      .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-10-execute-4-retry' });
+
+    expect(failed.status).toBe(503);
+    expect(failed.body.proposal.status).toBe('EXECUTION_ERROR');
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.proposal.status).toBe('FILLED');
+    expect(recovered.body.execution.id).toBe(failed.body.execution.id);
+    expect(vi.mocked(submitOrder)).toHaveBeenCalledTimes(2);
   });
 });

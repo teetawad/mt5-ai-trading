@@ -8,6 +8,11 @@ import {
 } from '../db/repositories/trade-proposals';
 import { ProposalStatus } from '../db/types';
 import {
+  executeApprovedProposal,
+  NotFoundError as ExecutionNotFoundError,
+  ProposalExpiredError as ExecutionProposalExpiredError,
+} from '../services/trade-execution-service';
+import {
   approveProposal,
   cancelProposal,
   InvalidStateTransitionError,
@@ -16,6 +21,7 @@ import {
   rejectProposal,
   ValidationError,
 } from '../services/trade-proposal-service';
+import { TradingEngineError } from '../services/trading-engine-client';
 
 export const tradeProposalsRouter = Router();
 
@@ -233,6 +239,66 @@ tradeProposalsRouter.post('/:id/reject', requireOwner, async (req: Request, res:
         message: err.message,
         currentStatus: err.from,
       });
+      return;
+    }
+    throw err;
+  }
+});
+
+tradeProposalsRouter.post('/:id/execute', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const result = await executeApprovedProposal(getPool(), req.params.id, {
+      actorId: req.user!.sub,
+      actorEmail: req.user!.email,
+      requestId: approvalRequestId(req),
+    });
+
+    if (result.execution.status === 'ERROR') {
+      res.status(503).json({
+        error: 'EXECUTION_ERROR',
+        proposal: result.proposal,
+        execution: result.execution,
+        order: result.order,
+        fills: result.fills,
+      });
+      return;
+    }
+
+    if (result.execution.status === 'REJECTED') {
+      res.status(422).json({
+        error: 'EXECUTION_REJECTED',
+        proposal: result.proposal,
+        execution: result.execution,
+        order: result.order,
+        fills: result.fills,
+      });
+      return;
+    }
+
+    res.json(result);
+  } catch (err) {
+    if (err instanceof ExecutionNotFoundError) {
+      res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+      return;
+    }
+    if (err instanceof ExecutionProposalExpiredError) {
+      res.status(410).json({
+        error: 'PROPOSAL_EXPIRED',
+        message: err.message,
+        expiredAt: err.proposal.expiresAt.toISOString(),
+      });
+      return;
+    }
+    if (err instanceof InvalidStateTransitionError) {
+      res.status(409).json({
+        error: 'INVALID_STATE',
+        message: err.message,
+        currentStatus: err.from,
+      });
+      return;
+    }
+    if (err instanceof TradingEngineError) {
+      res.status(503).json({ error: 'SERVICE_UNAVAILABLE', message: err.message });
       return;
     }
     throw err;

@@ -9,6 +9,7 @@ import { marketDataRouter } from './routes/market-data';
 import { riskRouter } from './routes/risk';
 import { signalsRouter } from './routes/signals';
 import { tradeProposalsRouter } from './routes/trade-proposals';
+import { executionsRouter } from './routes/executions';
 
 export function createApp() {
   const app = express();
@@ -28,6 +29,7 @@ export function createApp() {
   app.use('/risk', riskRouter);
   app.use('/signals', signalsRouter);
   app.use('/trade-proposals', tradeProposalsRouter);
+  app.use('/executions', executionsRouter);
 
   return app;
 }

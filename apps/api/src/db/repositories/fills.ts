@@ -25,6 +25,17 @@ export async function findFillsByOrder(
   return rows.map(mapRow);
 }
 
+export async function findFillByBrokerFillId(
+  db: Pool | PoolClient,
+  brokerFillId: string,
+): Promise<Fill | null> {
+  const { rows } = await db.query(
+    'SELECT * FROM fills WHERE broker_fill_id = $1',
+    [brokerFillId],
+  );
+  return rows.length ? mapRow(rows[0]) : null;
+}
+
 export async function createFill(
   db: Pool | PoolClient,
   data: {

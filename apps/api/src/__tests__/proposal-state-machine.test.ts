@@ -19,6 +19,13 @@ describe('proposal state machine', () => {
     expect(() => assertValidProposalTransition('PENDING_APPROVAL', 'OWNER_REJECTED')).not.toThrow();
   });
 
+  it('allows paper execution transitions', () => {
+    expect(() => assertValidProposalTransition('APPROVED', 'SUBMITTING')).not.toThrow();
+    expect(() => assertValidProposalTransition('SUBMITTING', 'SUBMITTED')).not.toThrow();
+    expect(() => assertValidProposalTransition('SUBMITTED', 'FILLED')).not.toThrow();
+    expect(() => assertValidProposalTransition('EXECUTION_ERROR', 'SUBMITTING')).not.toThrow();
+  });
+
   it('rejects terminal-state cancellation', () => {
     expect(() => assertValidProposalTransition('RISK_REJECTED', 'CANCELLED')).toThrow(
       InvalidStateTransitionError,

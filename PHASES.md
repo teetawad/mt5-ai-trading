@@ -199,16 +199,16 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 10 — Paper Execution
 
-- [ ] Execution workflow
-- [ ] Idempotency (unique execution key + DB constraint)
-- [ ] PaperBroker submission
-- [ ] Order state updates
-- [ ] Fill recording
-- [ ] Portfolio updates
-- [ ] P&L calculation
-- [ ] Reconciliation logic
-- [ ] Failure recovery
-- [ ] Duplicate/retry tests
+- [x] Execution workflow
+- [x] Idempotency (unique execution key + DB constraint)
+- [x] PaperBroker submission
+- [x] Order state updates
+- [x] Fill recording
+- [x] Portfolio updates
+- [x] P&L calculation
+- [x] Reconciliation logic
+- [x] Failure recovery
+- [x] Duplicate/retry tests
 - [ ] Owner review
 
 ---

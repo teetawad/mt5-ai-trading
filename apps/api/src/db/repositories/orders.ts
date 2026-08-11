@@ -38,6 +38,17 @@ export async function findOrdersByExecution(
   return rows.map(mapRow);
 }
 
+export async function findOrderByExecution(
+  db: Pool | PoolClient,
+  executionId: string,
+): Promise<Order | null> {
+  const { rows } = await db.query(
+    'SELECT * FROM orders WHERE execution_id = $1 ORDER BY created_at LIMIT 1',
+    [executionId],
+  );
+  return rows.length ? mapRow(rows[0]) : null;
+}
+
 export async function createOrder(
   db: Pool | PoolClient,
   data: {

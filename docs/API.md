@@ -264,6 +264,7 @@ GET  /trade-proposals/:id          — proposal detail
 PATCH /trade-proposals/:id/cancel  — cancel a pre-approval proposal (owner only)
 POST /trade-proposals/:id/approve  — owner approves and risk-revalidates a proposal
 POST /trade-proposals/:id/reject   — owner rejects a proposal
+POST /trade-proposals/:id/execute  — submit an approved proposal to the paper broker
 ```
 
 ### GET /trade-proposals/:id
@@ -374,6 +375,57 @@ Response 200:
   "idempotent": false
 }
 ```
+
+### POST /trade-proposals/:id/execute
+
+Request:
+```json
+{
+  "requestId": "client-generated-uuid"
+}
+```
+
+Response 200:
+```json
+{
+  "proposal": { "id": "...", "status": "FILLED" },
+  "execution": {
+    "status": "FILLED",
+    "idempotencyKey": "proposal:{proposalId}:attempt:1",
+    "brokerOrderId": "paper-..."
+  },
+  "order": { "status": "FILLED", "filledQuantity": "10.00000000" },
+  "fills": [{ "quantity": "10.00000000", "price": "150.25" }],
+  "position": { "symbol": "AAPL", "quantity": "10.00000000" },
+  "idempotent": false
+}
+```
+
+Response 422:
+```json
+{
+  "error": "EXECUTION_REJECTED",
+  "proposal": { "id": "...", "status": "EXECUTION_REJECTED" },
+  "execution": { "status": "REJECTED", "errorMessage": "Insufficient paper funds" }
+}
+```
+
+Response 503:
+```json
+{
+  "error": "EXECUTION_ERROR",
+  "proposal": { "id": "...", "status": "EXECUTION_ERROR" },
+  "execution": { "status": "ERROR", "errorMessage": "Paper broker unavailable" }
+}
+```
+
+Notes:
+- The endpoint accepts no trading parameters. It loads the immutable proposal,
+  derives the execution idempotency key, and submits only to the paper broker.
+- Retrying the same proposal reuses the same execution key and cannot create a
+  duplicate broker order or duplicate fill records.
+- Filled orders update positions and create a portfolio snapshot for
+  reconciliation.
 
 ---
 

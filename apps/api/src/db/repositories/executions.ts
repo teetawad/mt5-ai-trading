@@ -25,6 +25,20 @@ export async function findExecutionById(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export async function listExecutions(
+  db: Pool | PoolClient,
+  limit = 20,
+  offset = 0,
+): Promise<Execution[]> {
+  const { rows } = await db.query(
+    `SELECT * FROM executions
+     ORDER BY created_at DESC
+     LIMIT $1 OFFSET $2`,
+    [limit, offset],
+  );
+  return rows.map(mapRow);
+}
+
 export async function findExecutionByIdempotencyKey(
   db: Pool | PoolClient,
   key: string,
