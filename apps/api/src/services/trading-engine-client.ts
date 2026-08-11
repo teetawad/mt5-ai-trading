@@ -5,6 +5,10 @@
  * If TRADING_ENGINE_URL is not set, every call throws a configuration error.
  */
 
+import { Pool, PoolClient } from 'pg';
+import { createRiskCheck } from '../db/repositories/risk-checks';
+import { RiskCheck } from '../db/types';
+
 export class TradingEngineError extends Error {
   constructor(
     message: string,
@@ -237,4 +241,108 @@ export async function listStrategies(requestId?: string): Promise<string[]> {
     throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
   }
   return res.json() as Promise<string[]>;
+}
+
+// ── Risk Engine ───────────────────────────────────────────────────────────────
+
+export type EvaluationStage = 'PRE_PROPOSAL' | 'PRE_EXECUTION';
+export type RuleOutcome = 'PASS' | 'REJECT';
+export type TradeSideRisk = 'BUY' | 'SELL';
+
+export interface ProposalInputDTO {
+  symbol: string;
+  side: TradeSideRisk;
+  quantity: string;
+  reference_price: string;
+  expires_at?: string;
+}
+
+export interface MarketInputDTO {
+  symbol: string;
+  price: string;
+  is_stale: boolean;
+  timestamp: string;
+}
+
+export interface PortfolioInputDTO {
+  cash: string;
+  positions: Record<string, string>;
+  equity: string;
+  daily_pnl: string;
+}
+
+export interface PendingProposalInputDTO {
+  symbol: string;
+  side: TradeSideRisk;
+}
+
+export interface RiskConfigDTO {
+  kill_switch_enabled?: boolean;
+  trading_mode?: string;
+  market_data_staleness_seconds?: number;
+  price_drift_threshold_pct?: string;
+  max_order_notional_usd?: string;
+  max_position_size_usd?: string;
+  max_portfolio_concentration_pct?: string;
+  max_open_positions?: number;
+  max_daily_loss_usd?: string;
+  proposal_ttl_seconds?: number;
+  trading_session_start?: string;
+  trading_session_end?: string;
+  cooldown_between_trades_seconds?: number;
+}
+
+export interface RiskEvaluationRequestDTO {
+  stage: EvaluationStage;
+  proposal: ProposalInputDTO;
+  market: MarketInputDTO;
+  portfolio: PortfolioInputDTO;
+  config?: RiskConfigDTO;
+  pending_proposals?: PendingProposalInputDTO[];
+  last_fill_times?: Record<string, string>;
+}
+
+export interface RiskResultDTO {
+  result: RuleOutcome;
+  stage: EvaluationStage;
+  rules_checked: string[];
+  failed_rules: string[];
+  reason: string | null;
+  market_snapshot: MarketInputDTO;
+  portfolio_snapshot: PortfolioInputDTO;
+  evaluated_at: string;
+}
+
+export async function evaluateRisk(
+  request: RiskEvaluationRequestDTO,
+  requestId?: string,
+): Promise<RiskResultDTO> {
+  const res = await engineFetch('/risk/evaluate', requestId, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<RiskResultDTO>;
+}
+
+export async function evaluateAndPersistRisk(
+  db: Pool | PoolClient,
+  request: RiskEvaluationRequestDTO,
+  ids: { signalId?: string | null; proposalId?: string | null } = {},
+  requestId?: string,
+): Promise<RiskCheck> {
+  const result = await evaluateRisk(request, requestId);
+  return createRiskCheck(db, {
+    signalId: ids.signalId ?? null,
+    proposalId: ids.proposalId ?? null,
+    stage: result.stage,
+    result: result.result,
+    rulesChecked: result.rules_checked,
+    failedRules: result.failed_rules,
+    reason: result.reason,
+    marketSnapshot: { ...result.market_snapshot },
+    portfolioSnapshot: { ...result.portfolio_snapshot },
+  });
 }

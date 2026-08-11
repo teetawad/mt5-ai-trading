@@ -80,7 +80,7 @@ npm run test
 npm run test:api
 
 # Python tests
-cd services/trading-engine && source .venv/Scripts/activate && pytest -v
+cd services/trading-engine && .venv/Scripts/python.exe -m pytest -v
 ```
 
 ## Lint & Typecheck
@@ -93,10 +93,10 @@ npm run lint
 npm run typecheck
 
 # Python lint
-cd services/trading-engine && source .venv/Scripts/activate && ruff check .
+cd services/trading-engine && .venv/Scripts/python.exe -m ruff check .
 
 # Python typecheck
-cd services/trading-engine && source .venv/Scripts/activate && mypy .
+cd services/trading-engine && .venv/Scripts/python.exe -m mypy .
 ```
 
 ## Environment Variables

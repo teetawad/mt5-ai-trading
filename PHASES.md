@@ -142,25 +142,25 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 7 — Risk Engine
 
-- [ ] `RiskEngine` interface
-- [ ] Risk rule: maximum order notional
-- [ ] Risk rule: maximum position size
-- [ ] Risk rule: maximum portfolio concentration
-- [ ] Risk rule: maximum open positions
-- [ ] Risk rule: maximum daily loss
-- [ ] Risk rule: available cash
-- [ ] Risk rule: duplicate/existing exposure
-- [ ] Risk rule: market data freshness
-- [ ] Risk rule: proposal expiration
-- [ ] Risk rule: price drift
-- [ ] Risk rule: kill switch
-- [ ] Risk rule: trading session status
-- [ ] Risk rule: cooldown between trades
-- [ ] Structured risk result output
-- [ ] Persist every risk evaluation
-- [ ] Kill switch implementation (server-side)
-- [ ] Risk configuration API
-- [ ] Extensive tests
+- [x] `RiskEngine` interface
+- [x] Risk rule: maximum order notional
+- [x] Risk rule: maximum position size
+- [x] Risk rule: maximum portfolio concentration
+- [x] Risk rule: maximum open positions
+- [x] Risk rule: maximum daily loss
+- [x] Risk rule: available cash
+- [x] Risk rule: duplicate/existing exposure
+- [x] Risk rule: market data freshness
+- [x] Risk rule: proposal expiration
+- [x] Risk rule: price drift
+- [x] Risk rule: kill switch
+- [x] Risk rule: trading session status
+- [x] Risk rule: cooldown between trades
+- [x] Structured risk result output
+- [x] Persist every risk evaluation
+- [x] Kill switch implementation (server-side)
+- [x] Risk configuration API
+- [x] Extensive tests
 - [ ] Owner review
 
 ---

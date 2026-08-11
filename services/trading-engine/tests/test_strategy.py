@@ -24,7 +24,6 @@ from strategy.registry import (
 )
 from strategy.signal import Signal, SignalSide, SignalType
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 STRATEGY_DIR = pathlib.Path(__file__).parent.parent / "strategy"

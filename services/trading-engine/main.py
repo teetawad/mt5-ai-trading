@@ -9,6 +9,7 @@ from market_data.registry import init_provider
 from routers.broker import router as broker_router
 from routers.health import router as health_router
 from routers.market_data import router as market_data_router
+from routers.risk import router as risk_router
 from routers.signals import router as signals_router
 from strategy.moving_average_crossover import MovingAverageCrossoverStrategy
 from strategy.registry import register_strategy
@@ -43,6 +44,7 @@ app.include_router(health_router)
 app.include_router(market_data_router)
 app.include_router(broker_router)
 app.include_router(signals_router)
+app.include_router(risk_router)
 
 
 @app.get("/")

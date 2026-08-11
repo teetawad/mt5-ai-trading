@@ -166,9 +166,41 @@ Response 200:
 ```
 GET /risk/settings         — current risk rule parameters
 PUT /risk/settings/:key    — update a risk parameter (owner only)
+GET /risk/kill-switch      — current kill switch state
+PUT /risk/kill-switch      — enable or disable paper trading approvals (owner only)
 GET /risk/checks           — list risk evaluations (paginated)
 GET /risk/checks/:id       — specific risk check detail
 ```
+
+### PUT /risk/settings/:key
+
+Only risk threshold/session keys are writable here. `trading_mode` is read-only
+and must remain `PAPER`.
+
+Request:
+```json
+{ "value": "10000.00" }
+```
+
+Integer settings use JSON numbers. Decimal settings use strings to preserve
+precision. Session settings use `"HH:MM"` UTC or `null`.
+
+### PUT /risk/kill-switch
+
+Request:
+```json
+{ "enabled": false }
+```
+
+Response 200:
+```json
+{
+  "enabled": false,
+  "updatedAt": "2024-01-15T10:30:00.000Z"
+}
+```
+
+Kill switch changes are owner-only and audit logged.
 
 ### GET /risk/checks/:id
 

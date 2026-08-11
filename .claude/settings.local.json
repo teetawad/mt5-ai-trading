@@ -19,7 +19,24 @@
       "Bash(.venv/Scripts/ruff check *)",
       "Bash(.venv/Scripts/mypy . --ignore-missing-imports)",
       "Bash(node -e \"const a = require\\('argon2'\\); console.log\\(Object.keys\\(a\\).join\\(', '\\)\\)\")",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -m pytest tests/test_broker.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_broker.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest -v)",
+      "Bash(.venv/Scripts/python.exe -m ruff check broker/ routers/broker.py)",
+      "Bash(.venv/Scripts/python.exe -m ruff check broker/ routers/broker.py --fix)",
+      "Bash(.venv/Scripts/python.exe -m mypy broker/ routers/broker.py)",
+      "Bash(.venv/Scripts/python.exe -m ruff check tests/test_broker.py main.py)",
+      "Bash(.venv/Scripts/python.exe -m mypy tests/test_broker.py main.py)",
+      "Bash(.venv/Scripts/python.exe -m ruff check tests/test_broker.py main.py --fix)",
+      "Bash(.venv/Scripts/python.exe -m mypy tests/test_market_data.py)",
+      "Bash(.venv/Scripts/python.exe -m mypy .)",
+      "Bash(npx tsc *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_strategy.py -v)",
+      "Bash(.venv/Scripts/python.exe -m ruff check strategy/ routers/signals.py main.py)",
+      "Bash(.venv/Scripts/python.exe -m mypy strategy/ routers/signals.py main.py)",
+      "Bash(.venv/Scripts/python.exe -m ruff check strategy/ routers/signals.py main.py --fix)",
+      "Bash(python -m pytest tests/test_risk.py -v)"
     ]
   }
 }

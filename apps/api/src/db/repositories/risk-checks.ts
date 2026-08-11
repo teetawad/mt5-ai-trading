@@ -36,6 +36,18 @@ export async function findRiskChecksByProposal(
   return rows.map(mapRow);
 }
 
+export async function listRiskChecks(
+  db: Pool | PoolClient,
+  limit = 20,
+  offset = 0,
+): Promise<RiskCheck[]> {
+  const { rows } = await db.query(
+    'SELECT * FROM risk_checks ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+    [limit, offset],
+  );
+  return rows.map(mapRow);
+}
+
 export async function createRiskCheck(
   db: Pool | PoolClient,
   data: {
