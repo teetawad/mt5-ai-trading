@@ -232,37 +232,37 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 12 — Failure Testing
 
-- [ ] Network timeout simulation
-- [ ] Duplicate request test
-- [ ] Database error test
-- [ ] PaperBroker unavailable test
-- [ ] Partial fill test
-- [ ] Application restart test
-- [ ] Simultaneous approval test
-- [ ] Stale market data test
-- [ ] Price movement test
-- [ ] Daily loss limit test
-- [ ] Kill switch test
-- [ ] All 20 required test scenarios pass
-- [ ] Final documentation review
+- [x] Network timeout simulation
+- [x] Duplicate request test
+- [x] Database error test
+- [x] PaperBroker unavailable test
+- [x] Partial fill test
+- [x] Application restart test
+- [x] Simultaneous approval test
+- [x] Stale market data test
+- [x] Price movement test
+- [x] Daily loss limit test
+- [x] Kill switch test
+- [x] All 20 required test scenarios pass
+- [x] Final documentation review
 - [ ] Owner MVP sign-off
 
 ---
 
 ## Paper MVP Definition of Done
 
-- [ ] All automated tests pass
-- [ ] Paper trading only (no real broker)
-- [ ] Strategy cannot execute trades
-- [ ] Risk checks cannot be bypassed
-- [ ] Owner approval cannot be bypassed
-- [ ] Approval performs risk revalidation
-- [ ] Duplicate approval cannot duplicate an order
-- [ ] Execution retry cannot duplicate an order
-- [ ] Proposal expiration works
-- [ ] Price drift validation works
-- [ ] Kill switch works
-- [ ] Paper portfolio and P&L reconcile correctly
-- [ ] Audit history complete
-- [ ] Failure/recovery tests pass
-- [ ] Documentation matches implementation
+- [x] All automated tests pass
+- [x] Paper trading only (no real broker)
+- [x] Strategy cannot execute trades
+- [x] Risk checks cannot be bypassed
+- [x] Owner approval cannot be bypassed
+- [x] Approval performs risk revalidation
+- [x] Duplicate approval cannot duplicate an order
+- [x] Execution retry cannot duplicate an order
+- [x] Proposal expiration works
+- [x] Price drift validation works
+- [x] Kill switch works
+- [x] Paper portfolio and P&L reconcile correctly
+- [x] Audit history complete
+- [x] Failure/recovery tests pass
+- [x] Documentation matches implementation

@@ -7,6 +7,7 @@ import { _clearDenylistForTest } from '../auth/denylist';
 import { closePool } from '../db/client';
 import { createStrategy } from '../db/repositories/strategies';
 import { getTestPool, setupTestDb } from './db/setup';
+import { executeApprovedProposal } from '../services/trade-execution-service';
 import {
   evaluateRisk,
   getMarketSnapshot,
@@ -615,7 +616,144 @@ describe('Phase 8 signal to proposal workflow', () => {
     expect(res.body.fills).toEqual([]);
   });
 
-  it.skipIf(SKIP)('POST execute can recover from a transient broker submission error', async () => {
+  it.skipIf(SKIP)('execution DB errors roll back proposal state and execution rows', async () => {
+    mockEngineSequence('PASS', 'PASS', 'PASS', 'PASS');
+    vi.mocked(submitOrder)
+      .mockResolvedValueOnce({
+        broker_order_id: 'broker-order-db-conflict',
+        status: 'FILLED',
+        fills: [
+          {
+            order_id: 'broker-order-db-conflict',
+            fill_id: 'broker-fill-db-conflict-1',
+            quantity: '15.00000000',
+            price: '100.00000000',
+            fee: '1.00000000',
+            is_partial: false,
+            filled_at: '2024-01-15T10:31:00.000Z',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        broker_order_id: 'broker-order-db-conflict',
+        status: 'FILLED',
+        fills: [
+          {
+            order_id: 'broker-order-db-conflict',
+            fill_id: 'broker-fill-db-conflict-2',
+            quantity: '17.00000000',
+            price: '100.00000000',
+            fee: '1.00000000',
+            is_partial: false,
+            filled_at: '2024-01-15T10:32:00.000Z',
+          },
+        ],
+      });
+
+    const first = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '15.00000000',
+        reason: 'phase 12 db rollback first',
+      });
+    const firstApproved = await request(app)
+      .post(`/trade-proposals/${first.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-12-db-approve-1' });
+    await executeApprovedProposal(pool, firstApproved.body.proposal.id, {
+      actorId: OWNER_ID,
+      actorEmail: 'phase8-owner@test.example.com',
+      requestId: 'phase-12-db-execute-1',
+    });
+
+    const second = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '17.00000000',
+        reason: 'phase 12 db rollback second',
+      });
+    const secondApproved = await request(app)
+      .post(`/trade-proposals/${second.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-12-db-approve-2' });
+
+    await expect(
+      executeApprovedProposal(pool, secondApproved.body.proposal.id, {
+        actorId: OWNER_ID,
+        actorEmail: 'phase8-owner@test.example.com',
+        requestId: 'phase-12-db-execute-2',
+      }),
+    ).rejects.toThrow();
+
+    const proposalRow = await pool.query('SELECT status FROM trade_proposals WHERE id = $1', [
+      secondApproved.body.proposal.id,
+    ]);
+    const executionRows = await pool.query('SELECT id FROM executions WHERE proposal_id = $1', [
+      secondApproved.body.proposal.id,
+    ]);
+    const fillRows = await pool.query("SELECT id FROM fills WHERE broker_fill_id = 'broker-fill-db-conflict-2'");
+
+    expect(proposalRow.rows[0].status).toBe('APPROVED');
+    expect(executionRows.rowCount).toBe(0);
+    expect(fillRows.rowCount).toBe(0);
+  });
+
+  it.skipIf(SKIP)('POST execute records partial fills without completing the proposal', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: 'broker-order-partial-1',
+      status: 'PARTIALLY_FILLED',
+      fills: [
+        {
+          order_id: 'broker-order-partial-1',
+          fill_id: 'broker-fill-partial-1',
+          quantity: '8.00000000',
+          price: '100.00000000',
+          fee: '1.00000000',
+          is_partial: true,
+          filled_at: '2024-01-15T10:31:00.000Z',
+        },
+      ],
+    });
+
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '16.00000000',
+        reason: 'phase 12 partial fill test',
+      });
+    const approved = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-12-approve-partial' });
+
+    const res = await request(app)
+      .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-12-execute-partial' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.proposal.status).toBe('PARTIALLY_FILLED');
+    expect(res.body.execution.status).toBe('PARTIALLY_FILLED');
+    expect(res.body.order.status).toBe('PARTIALLY_FILLED');
+    expect(res.body.order.filledQuantity).toBe('8.00000000');
+    expect(res.body.fills[0].fillType).toBe('PARTIAL');
+    expect(res.body.position.quantity).toBe('8.00000000');
+  });
+
+  it.skipIf(SKIP)('POST execute can recover after app restart from a transient broker submission error', async () => {
     mockEngineSequence('PASS', 'PASS');
     vi.mocked(submitOrder)
       .mockRejectedValueOnce(new Error('paper broker unavailable'))
@@ -654,7 +792,8 @@ describe('Phase 8 signal to proposal workflow', () => {
       .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
       .set('Authorization', `Bearer ${token()}`)
       .send({ requestId: 'phase-10-execute-4' });
-    const recovered = await request(app)
+    const restartedApp = createApp();
+    const recovered = await request(restartedApp)
       .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
       .set('Authorization', `Bearer ${token()}`)
       .send({ requestId: 'phase-10-execute-4-retry' });

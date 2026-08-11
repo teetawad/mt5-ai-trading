@@ -23,13 +23,13 @@ All 20 required scenarios must have automated tests before Paper MVP is declared
 - Risk check passes.
 - Verify proposal created with status `PENDING_APPROVAL`.
 - Verify all fields are populated correctly.
-- Verify audit event `PROPOSAL_CREATED` emitted.
+- Verify audit event `TRADE_PROPOSAL_CREATED` emitted.
 
 ### Scenario 2: Risk-rejected proposal
 - Trigger a signal that violates `MAX_ORDER_NOTIONAL`.
 - Verify no proposal is created.
 - Verify risk_check record exists with `result=REJECT` and correct `failedRules`.
-- Verify audit event `RISK_CHECKED` emitted with rejection reason.
+- Verify `TRADE_PROPOSAL_CREATED` audit data records the rejected proposal state and reason.
 
 ### Scenario 3: Expired proposal cannot be approved
 - Create a proposal with `expires_at = NOW() - 1 second`.
@@ -65,16 +65,16 @@ All 20 required scenarios must have automated tests before Paper MVP is declared
 ### Scenario 8: Double-click Approve
 - Create a `PENDING_APPROVAL` proposal.
 - Send two concurrent POST requests to `/trade-proposals/:id/approve`.
-- Verify exactly one execution is created.
-- Verify no duplicate fills.
-- Verify second request returns the original result (idempotent).
+- Verify exactly one approval record is created for the same `requestId`.
+- Verify no execution or fill is created by approval alone.
+- Verify the duplicate request returns the original approval result (idempotent).
 
 ### Scenario 9: Two simultaneous approval requests (different requestIds)
 - Create a `PENDING_APPROVAL` proposal.
 - Send two concurrent approval requests with different `requestId` values.
-- Verify only one succeeds (FILLED); the other gets `INVALID_STATE` (409).
-- Verify database has exactly one execution record.
-- Verify portfolio updated correctly (not doubled).
+- Verify only one approval succeeds; the other gets `INVALID_STATE` (409).
+- Verify execution remains a separate Phase 10 action.
+- Verify the proposal is not approved twice.
 
 ### Scenario 10: Duplicate execution retry
 - Create an execution with `idempotency_key = 'test-key-1'`.
@@ -95,7 +95,7 @@ All 20 required scenarios must have automated tests before Paper MVP is declared
 - Approve a valid proposal.
 - Verify proposal transitions to `EXECUTION_REJECTED`.
 - Verify no fill created.
-- Verify audit event `ORDER_REJECTED` emitted.
+- Verify `TRADE_EXECUTED` audit data records the broker rejection.
 
 ### Scenario 13: Partial fill
 - Configure PaperBroker to inject a 50% partial fill.
@@ -115,9 +115,9 @@ All 20 required scenarios must have automated tests before Paper MVP is declared
 ### Scenario 15: Kill switch prevents execution
 - Disable kill switch via API.
 - Approve a valid proposal.
-- Verify risk revalidation fails with `KILL_SWITCH` failed rule.
+- Verify approval risk revalidation fails with `KILL_SWITCH` failed rule.
 - Verify proposal transitions to `RISK_REJECTED_AFTER_APPROVAL`.
-- Verify audit event `KILL_SWITCH_BLOCKED_EXECUTION` emitted.
+- Verify `TRADE_PROPOSAL_APPROVAL_RISK_REJECTED` audit data records the blocked approval.
 
 ### Scenario 16: Unauthorized user cannot approve
 - Authenticate as a non-owner user (or unauthenticated).
@@ -142,15 +142,11 @@ All 20 required scenarios must have automated tests before Paper MVP is declared
 ### Scenario 19: Audit events are generated correctly
 - Execute a complete happy-path flow: signal → proposal → approve → fill.
 - Verify audit log contains, in order:
-  - `SIGNAL_CREATED`
-  - `RISK_CHECKED` (PRE_PROPOSAL, PASS)
-  - `PROPOSAL_CREATED`
-  - `PROPOSAL_APPROVED`
-  - `RISK_CHECKED` (PRE_EXECUTION, PASS)
-  - `EXECUTION_CREATED`
-  - `ORDER_SUBMITTED`
-  - `ORDER_FILLED`
+  - `TRADE_PROPOSAL_CREATED`
+  - `TRADE_PROPOSAL_APPROVED`
+  - `TRADE_EXECUTED`
 - Verify each event has: `event_type`, `actor_id`, `entity_id`, `request_id`, `timestamp`.
+- Verify persisted risk checks, execution rows, order rows, and fill rows provide the detailed event trail between audit records.
 - Verify no audit record is missing.
 
 ### Scenario 20: Strategy cannot bypass Risk Engine and Approval layer
