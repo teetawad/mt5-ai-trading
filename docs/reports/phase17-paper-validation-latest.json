@@ -1,0 +1,44 @@
+{
+  "phase": "17",
+  "generatedAt": "2026-08-11T11:32:29.322Z",
+  "tradingMode": "PAPER",
+  "overallStatus": "BLOCKED",
+  "symbol": "AAPL",
+  "checks": [
+    {
+      "name": "paper trading mode",
+      "status": "BLOCKED",
+      "detail": "Set BROKER_PROVIDER=alpaca_paper before Phase 17 validation."
+    },
+    {
+      "name": "alpaca market data provider",
+      "status": "BLOCKED",
+      "detail": "Set MARKET_DATA_PROVIDER=alpaca before Phase 17 validation."
+    },
+    {
+      "name": "database configured",
+      "status": "BLOCKED",
+      "detail": "DATABASE_URL is required to validate proposals, orders, fills, positions, and audit logs."
+    },
+    {
+      "name": "trading engine configured",
+      "status": "BLOCKED",
+      "detail": "TRADING_ENGINE_URL is required to validate real market data and Alpaca paper broker state."
+    },
+    {
+      "name": "alpaca paper credentials",
+      "status": "BLOCKED",
+      "detail": "Alpaca paper credentials must be provided through environment variables only."
+    },
+    {
+      "name": "live trading endpoint guard",
+      "status": "PASS",
+      "detail": "No live Alpaca trading endpoint is configured for paper trading."
+    },
+    {
+      "name": "paper order execution opt-in",
+      "status": "BLOCKED",
+      "detail": "Set PHASE17_ENABLE_PAPER_ORDERS=true to permit the validator to submit Alpaca paper orders."
+    }
+  ]
+}

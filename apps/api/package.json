@@ -15,7 +15,8 @@
     "db:migrate": "tsx src/db/migrate-cli.ts",
     "db:migrate:test": "TEST_DATABASE_URL=${TEST_DATABASE_URL} tsx src/db/migrate-cli.ts",
     "db:reset": "tsx src/db/reset-cli.ts",
-    "bootstrap:owner": "tsx src/bootstrap/owner-cli.ts"
+    "bootstrap:owner": "tsx src/bootstrap/owner-cli.ts",
+    "validate:phase17": "tsx src/validation/phase17-paper-validation.ts"
   },
   "dependencies": {
     "argon2": "^0.45.1",

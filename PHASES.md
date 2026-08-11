@@ -338,6 +338,19 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 17 — Long-Run Alpaca PAPER Validation
+
+- [x] Paper-only validation harness
+- [x] Monitoring samples for broker and market-data reads
+- [x] Validation report generation
+- [x] Live trading endpoint guard
+- [x] Credentials restricted to environment variables
+- [x] Blocked report generated for missing local runtime configuration
+- [ ] Real Alpaca PAPER long-run run: blocked until `DATABASE_URL`, `TRADING_ENGINE_URL`, `BROKER_PROVIDER=alpaca_paper`, `MARKET_DATA_PROVIDER=alpaca`, Alpaca paper credentials, and `PHASE17_ENABLE_PAPER_ORDERS=true` are configured
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass
