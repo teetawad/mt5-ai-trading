@@ -2,7 +2,7 @@
   <div class="space-y-6">
     <div>
       <h1 class="text-2xl font-semibold">Portfolio</h1>
-      <p class="mt-1 text-sm text-slate-400">Equity, cash, P&L, and reconciliation snapshots.</p>
+      <p class="mt-1 text-sm text-slate-400">Internal ledger equity, cash, P&L, and reconciliation snapshots.</p>
     </div>
     <div class="grid gap-3 md:grid-cols-4">
       <div
@@ -67,15 +67,22 @@
 </template>
 
 <script setup lang="ts">
-type Portfolio = { cashBalance: string; portfolioEquity: string; realizedPnl: string; unrealizedPnl: string; dailyPnl: string };
+type Portfolio = {
+  source: 'INTERNAL_LEDGER';
+  cashBalance: string;
+  portfolioEquity: string;
+  realizedPnl: string;
+  unrealizedPnl: string;
+  dailyPnl: string;
+};
 type Snapshot = Portfolio & { id: string; snapshotReason: string; createdAt: string };
 const { apiFetch } = useApi();
 const { data: portfolio } = await useAsyncData<Portfolio>('portfolio-page-summary', () => apiFetch('/portfolio'));
 const { data: snapshots } = await useAsyncData<{ snapshots: Snapshot[] }>('portfolio-page-snapshots', () => apiFetch('/portfolio/snapshots?limit=50'));
 
 const metrics = computed(() => [
-  { label: 'Cash', value: money(portfolio.value?.cashBalance), className: '' },
-  { label: 'Equity', value: money(portfolio.value?.portfolioEquity), className: '' },
+  { label: 'Internal Cash', value: money(portfolio.value?.cashBalance), className: '' },
+  { label: 'Internal Equity', value: money(portfolio.value?.portfolioEquity), className: '' },
   { label: 'Realized P&L', value: money(portfolio.value?.realizedPnl), className: pnl(portfolio.value?.realizedPnl) },
   { label: 'Unrealized P&L', value: money(portfolio.value?.unrealizedPnl), className: pnl(portfolio.value?.unrealizedPnl) },
 ]);

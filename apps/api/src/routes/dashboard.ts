@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import Decimal from 'decimal.js';
 import { requireAuth } from '../auth/middleware';
 import { getPool } from '../db/client';
 import { listRecentFills } from '../db/repositories/fills';
@@ -21,6 +22,7 @@ export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
 
 type ExternalStatus = 'CONNECTED' | 'UNAVAILABLE' | 'RATE_LIMITED';
+type ReconciliationStatus = 'MATCH' | 'MISMATCH' | 'UNKNOWN';
 
 function requestId(req: Request): string | undefined {
   return req.headers['x-request-id'] as string | undefined;
@@ -28,6 +30,29 @@ function requestId(req: Request): string | undefined {
 
 function statusFromError(err: unknown): ExternalStatus {
   return err instanceof TradingEngineError && err.status === 429 ? 'RATE_LIMITED' : 'UNAVAILABLE';
+}
+
+function money(value: Decimal): string {
+  return value.toDecimalPlaces(8).toFixed(8);
+}
+
+function decimal(value: string | null | undefined): Decimal {
+  return new Decimal(value ?? '0');
+}
+
+function cashReconciliation(
+  accountStatus: ExternalStatus,
+  brokerCash: string | null | undefined,
+  internalCash: string | null | undefined,
+): { status: ReconciliationStatus; difference: string } {
+  if (accountStatus !== 'CONNECTED' || brokerCash === undefined || brokerCash === null || !internalCash) {
+    return { status: 'UNKNOWN', difference: '0.00000000' };
+  }
+  const difference = decimal(brokerCash).minus(decimal(internalCash));
+  return {
+    status: difference.isZero() ? 'MATCH' : 'MISMATCH',
+    difference: money(difference),
+  };
 }
 
 dashboardRouter.get('/paper', async (req: Request, res: Response) => {
@@ -80,24 +105,31 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
     ? 'CONNECTED'
     : statusFromError(marketSnapshotsResult.reason);
   const staleCount = marketSnapshots.filter((snapshot) => snapshot.is_stale).length;
+  const internalCash = latestPortfolio?.cashBalance ?? null;
+  const internalEquity = latestPortfolio?.portfolioEquity ?? null;
+  const brokerCash = paperAccount?.cash ?? null;
+  const brokerBuyingPower = paperAccount?.buying_power ?? paperAccount?.cash ?? null;
+  const reconciliation = cashReconciliation(accountStatus, brokerCash, internalCash);
 
   res.json({
     tradingMode: 'PAPER',
     paperTrading: true,
     broker: {
+      source: 'ALPACA_PAPER_ACCOUNT',
       provider: brokerHealth?.provider ?? process.env.BROKER_PROVIDER ?? 'local_paper',
       tradingMode: brokerHealth?.trading_mode ?? 'PAPER',
       status: brokerStatus,
       accountStatus,
-      cash: paperAccount?.cash ?? latestPortfolio?.cashBalance ?? '0.00000000',
-      buyingPower: paperAccount?.buying_power ?? paperAccount?.cash ?? latestPortfolio?.cashBalance ?? '0.00000000',
+      cash: brokerCash ?? '0.00000000',
+      buyingPower: brokerBuyingPower ?? '0.00000000',
       accountId: paperAccount?.account_id ?? null,
       currency: paperAccount?.currency ?? null,
       alpacaStatus: paperAccount?.status ?? null,
     },
     portfolio: {
-      cashBalance: latestPortfolio?.cashBalance ?? '0.00000000',
-      portfolioEquity: latestPortfolio?.portfolioEquity ?? '0.00000000',
+      source: 'INTERNAL_LEDGER',
+      cashBalance: internalCash ?? '0.00000000',
+      portfolioEquity: internalEquity ?? '0.00000000',
       realizedPnl: latestPortfolio?.realizedPnl ?? '0.00000000',
       unrealizedPnl: latestPortfolio?.unrealizedPnl ?? '0.00000000',
       dailyPnl: latestPortfolio?.dailyPnl ?? '0.00000000',
@@ -118,8 +150,15 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
       })),
     },
     reconciliation: {
-      status: brokerStatus === 'CONNECTED' && accountStatus === 'CONNECTED' ? 'CONNECTED' : 'NEEDS_ATTENTION',
+      status: reconciliation.status,
       checkedAt: new Date().toISOString(),
+      brokerCash: brokerCash ?? null,
+      brokerBuyingPower: brokerBuyingPower ?? null,
+      internalCash,
+      internalEquity,
+      cashDifference: reconciliation.difference,
+      sourceOfTruth: 'INTERNAL_LEDGER',
+      comparedSource: 'ALPACA_PAPER_ACCOUNT',
       openPositionCount: positions.length,
       pendingOrderCount: brokerOpenOrders.length,
     },

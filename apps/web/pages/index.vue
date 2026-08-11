@@ -49,12 +49,12 @@
         :class-name="statusClass(dashboard?.broker.status)"
       />
       <MetricBox
-        label="Paper Buying Power"
+        label="Alpaca Buying Power"
         :value="money(dashboard?.broker.buyingPower)"
       />
       <MetricBox
-        label="Paper Cash"
-        :value="money(dashboard?.broker.cash)"
+        label="Internal Ledger Cash"
+        :value="money(dashboard?.portfolio.cashBalance)"
       />
       <MetricBox
         label="Kill Switch"
@@ -82,7 +82,7 @@
       <MetricBox
         label="Reconciliation"
         :value="dashboard?.reconciliation.status ?? 'UNKNOWN'"
-        :class-name="dashboard?.reconciliation.status === 'CONNECTED' ? 'text-emerald-300' : 'text-amber-300'"
+        :class-name="reconciliationClass(dashboard?.reconciliation.status)"
       />
     </div>
 
@@ -187,9 +187,30 @@
             <dt class="text-xs uppercase text-slate-500">Status</dt>
             <dd
               class="mt-1 font-semibold"
-              :class="dashboard?.reconciliation.status === 'CONNECTED' ? 'text-emerald-300' : 'text-amber-300'"
+              :class="reconciliationClass(dashboard?.reconciliation.status)"
             >
               {{ dashboard?.reconciliation.status ?? 'UNKNOWN' }}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase text-slate-500">Source of Truth</dt>
+            <dd class="mt-1 font-semibold">{{ dashboard?.reconciliation.sourceOfTruth ?? '-' }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase text-slate-500">Alpaca Cash</dt>
+            <dd class="mt-1 font-semibold">{{ money(dashboard?.reconciliation.brokerCash) }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase text-slate-500">Internal Cash</dt>
+            <dd class="mt-1 font-semibold">{{ money(dashboard?.reconciliation.internalCash) }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase text-slate-500">Cash Difference</dt>
+            <dd
+              class="mt-1 font-semibold"
+              :class="pnlClass(dashboard?.reconciliation.cashDifference)"
+            >
+              {{ money(dashboard?.reconciliation.cashDifference) }}
             </dd>
           </div>
           <div>
@@ -370,6 +391,7 @@ type Dashboard = {
   tradingMode: 'PAPER';
   paperTrading: boolean;
   broker: {
+    source: 'ALPACA_PAPER_ACCOUNT';
     provider: string;
     tradingMode: 'PAPER';
     status: ExternalStatus;
@@ -381,6 +403,7 @@ type Dashboard = {
     alpacaStatus: string | null;
   };
   portfolio: {
+    source: 'INTERNAL_LEDGER';
     cashBalance: string;
     portfolioEquity: string;
     realizedPnl: string;
@@ -395,8 +418,15 @@ type Dashboard = {
     snapshots: MarketSnapshot[];
   };
   reconciliation: {
-    status: 'CONNECTED' | 'NEEDS_ATTENTION';
+    status: 'MATCH' | 'MISMATCH' | 'UNKNOWN';
     checkedAt: string;
+    brokerCash: string | null;
+    brokerBuyingPower: string | null;
+    internalCash: string | null;
+    internalEquity: string | null;
+    cashDifference: string;
+    sourceOfTruth: 'INTERNAL_LEDGER';
+    comparedSource: 'ALPACA_PAPER_ACCOUNT';
     openPositionCount: number;
     pendingOrderCount: number;
   };
@@ -483,5 +513,11 @@ function statusClass(value?: string): string {
   if (value === 'CONNECTED') return 'text-emerald-300';
   if (value === 'RATE_LIMITED') return 'text-amber-300';
   return 'text-rose-300';
+}
+
+function reconciliationClass(value?: string): string {
+  if (value === 'MATCH') return 'text-emerald-300';
+  if (value === 'MISMATCH') return 'text-rose-300';
+  return 'text-amber-300';
 }
 </script>

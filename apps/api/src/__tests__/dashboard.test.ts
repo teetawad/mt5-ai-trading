@@ -5,6 +5,7 @@ import { createApp } from '../app';
 import { signToken } from '../auth/tokens';
 import { _clearDenylistForTest } from '../auth/denylist';
 import { closePool } from '../db/client';
+import { createSnapshot } from '../db/repositories/portfolio-snapshots';
 import { getTestPool, setupTestDb } from './db/setup';
 import {
   getAllMarketSnapshots,
@@ -57,15 +58,29 @@ describe('GET /dashboard/paper', () => {
   afterAll(async () => {
     await closePool();
     if (pool) {
+      await pool.query('TRUNCATE portfolio_snapshots RESTART IDENTITY CASCADE');
       await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
       await pool.end();
     }
     delete process.env.BROKER_PROVIDER;
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     _clearDenylistForTest();
     vi.clearAllMocks();
+    if (!SKIP) {
+      await pool.query('TRUNCATE portfolio_snapshots RESTART IDENTITY CASCADE');
+      await createSnapshot(pool, {
+        cashBalance: '50000.25000000',
+        portfolioEquity: '50000.25000000',
+        openPositions: [],
+        pendingOrders: [],
+        realizedPnl: '0.00000000',
+        unrealizedPnl: '0.00000000',
+        dailyPnl: '0.00000000',
+        snapshotReason: 'TEST_DASHBOARD',
+      });
+    }
     vi.mocked(getBrokerHealth).mockResolvedValue({
       available: true,
       provider: 'alpaca_paper',
@@ -112,12 +127,18 @@ describe('GET /dashboard/paper', () => {
     expect(res.body.tradingMode).toBe('PAPER');
     expect(res.body.paperTrading).toBe(true);
     expect(res.body.broker).toMatchObject({
+      source: 'ALPACA_PAPER_ACCOUNT',
       provider: 'alpaca_paper',
       tradingMode: 'PAPER',
       status: 'CONNECTED',
       accountStatus: 'CONNECTED',
       cash: '50000.25000000',
       buyingPower: '75000.00000000',
+    });
+    expect(res.body.portfolio).toMatchObject({
+      source: 'INTERNAL_LEDGER',
+      cashBalance: '50000.25000000',
+      portfolioEquity: '50000.25000000',
     });
     expect(res.body.marketData.status).toBe('CONNECTED');
     expect(res.body.marketData.freshness).toBe('FRESH');
@@ -126,7 +147,14 @@ describe('GET /dashboard/paper', () => {
       price: '191.25000000',
       isStale: false,
     });
-    expect(res.body.reconciliation.status).toBe('CONNECTED');
+    expect(res.body.reconciliation).toMatchObject({
+      status: 'MATCH',
+      brokerCash: '50000.25000000',
+      internalCash: '50000.25000000',
+      cashDifference: '0.00000000',
+      sourceOfTruth: 'INTERNAL_LEDGER',
+      comparedSource: 'ALPACA_PAPER_ACCOUNT',
+    });
     expect(res.body.killSwitch.enabled).toBe(true);
     expect(Array.isArray(res.body.pendingProposals)).toBe(true);
     expect(Array.isArray(res.body.riskResults)).toBe(true);
@@ -137,5 +165,41 @@ describe('GET /dashboard/paper', () => {
     });
     expect(Array.isArray(res.body.fills)).toBe(true);
     expect(Array.isArray(res.body.positions)).toBe(true);
+  });
+
+  it.skipIf(SKIP)('marks reconciliation mismatch when Alpaca Paper cash differs from internal ledger cash', async () => {
+    await pool.query('TRUNCATE portfolio_snapshots RESTART IDENTITY CASCADE');
+    await createSnapshot(pool, {
+      cashBalance: '99997.72000000',
+      portfolioEquity: '99997.72000000',
+      openPositions: [],
+      pendingOrders: [],
+      realizedPnl: '-2.28000000',
+      unrealizedPnl: '0.00000000',
+      dailyPnl: '-2.28000000',
+      snapshotReason: 'TEST_DASHBOARD_MISMATCH',
+    });
+    vi.mocked(getPaperAccount).mockResolvedValueOnce({
+      cash: '100000.00000000',
+      buying_power: '100000.00000000',
+      account_id: 'paper-account-1',
+      currency: 'USD',
+      status: 'ACTIVE',
+    });
+
+    const res = await request(app)
+      .get('/dashboard/paper')
+      .set('Authorization', `Bearer ${token()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.broker.cash).toBe('100000.00000000');
+    expect(res.body.portfolio.cashBalance).toBe('99997.72000000');
+    expect(res.body.reconciliation).toMatchObject({
+      status: 'MISMATCH',
+      brokerCash: '100000.00000000',
+      internalCash: '99997.72000000',
+      internalEquity: '99997.72000000',
+      cashDifference: '2.28000000',
+    });
   });
 });

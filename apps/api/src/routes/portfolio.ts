@@ -36,6 +36,7 @@ portfolioRouter.get('/', async (_req: Request, res: Response) => {
 
   if (latest) {
     res.json({
+      source: 'INTERNAL_LEDGER',
       cashBalance: latest.cashBalance,
       portfolioEquity: latest.portfolioEquity,
       realizedPnl: latest.realizedPnl,
@@ -55,6 +56,7 @@ portfolioRouter.get('/', async (_req: Request, res: Response) => {
   const pnl = calculatePortfolioPnl(String(initialCash ?? '100000'), paperPortfolio.cash, positions);
 
   res.json({
+    source: 'INTERNAL_LEDGER',
     cashBalance: paperPortfolio.cash,
     portfolioEquity: pnl.portfolioEquity,
     realizedPnl: pnl.realizedPnl,

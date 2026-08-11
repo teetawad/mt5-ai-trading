@@ -215,6 +215,8 @@ function dashboardMatches(
   marketSnapshots: MarketSnapshotDTO[],
 ): { ok: boolean; evidence: Record<string, unknown> } {
   const broker = asRecord(dashboard.broker);
+  const portfolio = asRecord(dashboard.portfolio);
+  const reconciliation = asRecord(dashboard.reconciliation);
   const marketData = asRecord(dashboard.marketData);
   const dashboardSnapshots = Array.isArray(marketData.snapshots)
     ? marketData.snapshots as Record<string, unknown>[]
@@ -227,6 +229,9 @@ function dashboardMatches(
     && broker.status === 'CONNECTED'
     && broker.cash === account.cash
     && broker.buyingPower === account.buying_power
+    && broker.source === 'ALPACA_PAPER_ACCOUNT'
+    && portfolio.source === 'INTERNAL_LEDGER'
+    && reconciliation.status === 'MATCH'
     && marketData.status === 'CONNECTED'
     && (!firstMarket || firstDashboard?.price === firstMarket.price);
 
@@ -239,6 +244,10 @@ function dashboardMatches(
       accountCash: account.cash,
       brokerBuyingPower: broker.buyingPower,
       accountBuyingPower: account.buying_power,
+      portfolioCash: portfolio.cashBalance,
+      portfolioSource: portfolio.source,
+      reconciliationStatus: reconciliation.status,
+      reconciliationCashDifference: reconciliation.cashDifference,
       marketDataStatus: marketData.status,
       firstDashboardSymbol: firstDashboard?.symbol,
       firstDashboardPrice: firstDashboard?.price,
