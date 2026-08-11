@@ -35,8 +35,6 @@ def validate_bars(bars: list[MarketBar]) -> list[MarketBar]:
 
 class MovingAverageSignalModel:
     def __init__(self, params: StrategyParameters) -> None:
-        if params.kind != StrategyKind.MOVING_AVERAGE_CROSSOVER:
-            raise BacktestError(f"Unsupported strategy kind: {params.kind}")
         if params.short_window >= params.long_window:
             raise BacktestError("short_window must be less than long_window")
         if params.quantity <= 0:
@@ -46,7 +44,8 @@ class MovingAverageSignalModel:
         self._prev_short: Decimal | None = None
         self._prev_long: Decimal | None = None
 
-    def on_bar_close(self, close_price: Decimal) -> BacktestSide | None:
+    def on_bar_close(self, bar: MarketBar) -> BacktestSide | None:
+        close_price = bar.close
         self._prices.append(close_price)
         if len(self._prices) < self._params.long_window:
             return None
@@ -67,6 +66,144 @@ class MovingAverageSignalModel:
         return side
 
 
+class USStockFactorSignalModel:
+    """Trend, momentum, volatility, volume, and MA filter model.
+
+    Signals are computed only from bars that have already closed. The backtest
+    engine executes returned signals on the next bar open.
+    """
+
+    def __init__(self, params: StrategyParameters) -> None:
+        _validate_factor_params(params)
+        self._params = params
+        self._closes: deque[Decimal] = deque(maxlen=_required_history(params) + 1)
+        self._volumes: deque[int] = deque(maxlen=params.volume_window + 1)
+        self._in_position = False
+
+    def on_bar_close(self, bar: MarketBar) -> BacktestSide | None:
+        self._closes.append(bar.close)
+        self._volumes.append(bar.volume)
+        if len(self._closes) < _required_history(self._params) + 1:
+            return None
+        if len(self._volumes) < self._params.volume_window + 1:
+            return None
+
+        features = _features(self._params, list(self._closes), list(self._volumes))
+        entry = (
+            features["trend_pct"] >= self._params.min_trend_pct
+            and features["momentum_pct"] >= self._params.min_momentum_pct
+            and features["volatility_pct"] <= self._params.max_volatility_pct
+            and features["volume_ratio"] >= self._params.min_volume_ratio
+            and features["fast_ma"] > features["slow_ma"]
+        )
+        exit_rule = (
+            features["trend_pct"] <= self._params.exit_trend_pct
+            or features["momentum_pct"] <= self._params.exit_momentum_pct
+            or features["fast_ma"] < features["slow_ma"]
+        )
+
+        if not self._in_position and entry:
+            self._in_position = True
+            return BacktestSide.BUY
+        if self._in_position and exit_rule:
+            self._in_position = False
+            return BacktestSide.SELL
+        return None
+
+
+def _validate_factor_params(params: StrategyParameters) -> None:
+    windows = [
+        params.short_window,
+        params.long_window,
+        params.trend_window,
+        params.momentum_window,
+        params.volatility_window,
+        params.volume_window,
+    ]
+    if any(window < 2 for window in windows):
+        raise BacktestError("All factor windows must be at least 2")
+    if params.short_window >= params.long_window:
+        raise BacktestError("short_window must be less than long_window")
+    if params.quantity <= 0:
+        raise BacktestError("quantity must be positive")
+    if params.max_volatility_pct < 0:
+        raise BacktestError("max_volatility_pct must be non-negative")
+    if params.min_volume_ratio < 0:
+        raise BacktestError("min_volume_ratio must be non-negative")
+
+
+def _required_history(params: StrategyParameters) -> int:
+    return max(
+        params.long_window,
+        params.trend_window,
+        params.momentum_window,
+        params.volatility_window,
+    )
+
+
+def _features(
+    params: StrategyParameters,
+    closes: list[Decimal],
+    volumes: list[int],
+) -> dict[str, Decimal]:
+    current = closes[-1]
+    trend_base = closes[-1 - params.trend_window]
+    momentum_base = closes[-1 - params.momentum_window]
+    fast_prices = closes[-params.short_window :]
+    slow_prices = closes[-params.long_window :]
+    previous_volumes = volumes[-1 - params.volume_window : -1]
+
+    returns = [
+        (current_close / previous_close) - Decimal("1")
+        for previous_close, current_close in zip(
+            closes[-1 - params.volatility_window : -1],
+            closes[-params.volatility_window :],
+            strict=False,
+        )
+        if previous_close != 0
+    ]
+    return {
+        "trend_pct": _pct_change(current, trend_base),
+        "momentum_pct": _pct_change(current, momentum_base),
+        "volatility_pct": _decimal_std(returns) * Decimal("100"),
+        "volume_ratio": Decimal(volumes[-1]) / _avg_int(previous_volumes),
+        "fast_ma": sum(fast_prices, Decimal("0")) / Decimal(params.short_window),
+        "slow_ma": sum(slow_prices, Decimal("0")) / Decimal(params.long_window),
+    }
+
+
+def _pct_change(current: Decimal, previous: Decimal) -> Decimal:
+    if previous == 0:
+        return Decimal("0")
+    return (current / previous - Decimal("1")) * Decimal("100")
+
+
+def _avg_int(values: list[int]) -> Decimal:
+    if not values:
+        return Decimal("1")
+    avg = Decimal(sum(values)) / Decimal(len(values))
+    return avg if avg > 0 else Decimal("1")
+
+
+def _decimal_std(values: list[Decimal]) -> Decimal:
+    if len(values) < 2:
+        return Decimal("0")
+    floats = [float(value) for value in values]
+    mean = sum(floats) / len(floats)
+    variance = sum((value - mean) ** 2 for value in floats) / (len(floats) - 1)
+    return Decimal(str(math.sqrt(variance)))
+
+
+def _signal_model(
+    strategy: StrategyParameters,
+) -> MovingAverageSignalModel | USStockFactorSignalModel:
+    if strategy.kind == StrategyKind.MOVING_AVERAGE_CROSSOVER:
+        return MovingAverageSignalModel(strategy)
+    if strategy.kind == StrategyKind.US_STOCK_FACTOR:
+        return USStockFactorSignalModel(strategy)
+    raise BacktestError(f"Unsupported strategy kind: {strategy.kind}")
+
+
 def run_backtest(
     bars: list[MarketBar],
     strategy: StrategyParameters,
@@ -77,7 +214,7 @@ def run_backtest(
     if strategy.symbol.upper() != ordered[0].symbol.upper():
         raise BacktestError("Strategy symbol must match bar symbol")
 
-    model = MovingAverageSignalModel(strategy)
+    model = _signal_model(strategy)
     cash = cfg.initial_cash
     position = Decimal("0")
     pending_signal: BacktestSide | None = None
@@ -101,7 +238,7 @@ def run_backtest(
         equity_curve.append(cash + position * bar.close)
 
         if index < len(ordered) - 1:
-            pending_signal = model.on_bar_close(bar.close)
+            pending_signal = model.on_bar_close(bar)
 
     final_equity = equity_curve[-1]
     benchmark_final = _benchmark_final_equity(ordered, cfg.initial_cash)

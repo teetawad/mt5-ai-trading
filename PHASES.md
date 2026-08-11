@@ -351,6 +351,26 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 18 — US Stock Strategy Layer
+
+- [x] Trend factor
+- [x] Momentum factor
+- [x] Volatility factor
+- [x] Volume factor
+- [x] Moving-average confirmation
+- [x] Configurable entry rules
+- [x] Configurable exit rules
+- [x] Factor strategy backtesting
+- [x] Walk-forward validation preserved
+- [x] Risk-adjusted parameter selection
+- [x] Benchmark comparison preserved
+- [x] Look-ahead bias prevention
+- [x] Data leakage prevention
+- [x] PAPER execution boundary preserved
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

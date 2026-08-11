@@ -16,18 +16,37 @@ class BacktestSide(StrEnum):
 
 class StrategyKind(StrEnum):
     MOVING_AVERAGE_CROSSOVER = "moving_average_crossover"
+    US_STOCK_FACTOR = "us_stock_factor"
 
 
 class StrategyParameters(BaseModel):
     kind: StrategyKind = StrategyKind.MOVING_AVERAGE_CROSSOVER
     symbol: str
-    short_window: int
-    long_window: int
+    short_window: int = 5
+    long_window: int = 20
     quantity: Decimal = Decimal("1")
+    trend_window: int = 20
+    momentum_window: int = 10
+    volatility_window: int = 20
+    volume_window: int = 20
+    min_trend_pct: Decimal = Decimal("0")
+    min_momentum_pct: Decimal = Decimal("0")
+    max_volatility_pct: Decimal = Decimal("100")
+    min_volume_ratio: Decimal = Decimal("0")
+    exit_trend_pct: Decimal = Decimal("0")
+    exit_momentum_pct: Decimal = Decimal("0")
 
     model_config = {"arbitrary_types_allowed": True}
 
-    @field_serializer("quantity")
+    @field_serializer(
+        "quantity",
+        "min_trend_pct",
+        "min_momentum_pct",
+        "max_volatility_pct",
+        "min_volume_ratio",
+        "exit_trend_pct",
+        "exit_momentum_pct",
+    )
     def serialize_quantity(self, value: Decimal) -> str:
         return _money(value)
 

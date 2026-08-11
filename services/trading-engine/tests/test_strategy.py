@@ -23,6 +23,7 @@ from strategy.registry import (
     register_strategy,
 )
 from strategy.signal import Signal, SignalSide, SignalType
+from strategy.us_stock_factor import USStockFactorConfig, USStockFactorStrategy
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -32,20 +33,25 @@ STRATEGY_DIR = pathlib.Path(__file__).parent.parent / "strategy"
 class SequenceMD(MarketDataProvider):
     """Returns prices from a list in order; raises StopIteration when exhausted."""
 
-    def __init__(self, symbol: str, prices: list[Decimal]) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        prices: list[Decimal],
+        volumes: list[int] | None = None,
+    ) -> None:
         self._symbol = symbol
-        self._iter = iter(prices)
+        self._items = iter(zip(prices, volumes or [1000] * len(prices), strict=True))
 
     def get_snapshot(self, symbol: str) -> MarketSnapshot:
         if symbol != self._symbol:
             raise SymbolNotFoundError(f"Unknown: {symbol}")
-        price = next(self._iter)
+        price, volume = next(self._items)
         return MarketSnapshot(
             symbol=symbol,
             price=price,
             bid=price * Decimal("0.999"),
             ask=price * Decimal("1.001"),
-            volume=1000,
+            volume=volume,
             timestamp=datetime.now(tz=UTC),
         )
 
@@ -88,6 +94,16 @@ class FixedMD(MarketDataProvider):
 
 def _feed(strategy: MovingAverageCrossoverStrategy, md: SequenceMD) -> list[Signal]:
     """Drain all prices in md through the strategy and return all emitted signals."""
+    signals: list[Signal] = []
+    while True:
+        try:
+            signals.extend(strategy.generate_signals(md))
+        except StopIteration:
+            break
+    return signals
+
+
+def _feed_any(strategy: Strategy, md: SequenceMD) -> list[Signal]:
     signals: list[Signal] = []
     while True:
         try:
@@ -302,6 +318,78 @@ class TestMovingAverageCrossover:
         md = SequenceMD("AAPL", [Decimal("10")] * 5 + [trigger_price])
         signals = _feed(mac, md)
         assert signals[0].reference_price == trigger_price
+
+
+class TestUSStockFactorStrategy:
+    def _strategy(self) -> USStockFactorStrategy:
+        return USStockFactorStrategy(
+            "AAPL",
+            quantity=Decimal("3"),
+            config=USStockFactorConfig(
+                trend_window=3,
+                momentum_window=2,
+                volatility_window=3,
+                volume_window=3,
+                short_window=2,
+                long_window=3,
+                min_trend_pct=Decimal("5"),
+                min_momentum_pct=Decimal("3"),
+                max_volatility_pct=Decimal("100"),
+                min_volume_ratio=Decimal("1"),
+                exit_trend_pct=Decimal("0"),
+                exit_momentum_pct=Decimal("0"),
+            ),
+        )
+
+    def test_factor_strategy_is_read_only_strategy(self) -> None:
+        strategy = self._strategy()
+        assert isinstance(strategy, Strategy)
+        assert "us_stock_factor_AAPL" in strategy.name
+
+    def test_generates_buy_and_sell_from_configurable_factors(self) -> None:
+        strategy = self._strategy()
+        prices = [
+            Decimal("10"),
+            Decimal("10"),
+            Decimal("10"),
+            Decimal("11"),
+            Decimal("12"),
+            Decimal("13"),
+            Decimal("9"),
+            Decimal("8"),
+        ]
+        signals = _feed_any(strategy, SequenceMD("AAPL", prices))
+
+        assert [signal.side for signal in signals] == [SignalSide.BUY, SignalSide.SELL]
+        assert signals[0].quantity == Decimal("3")
+        assert signals[0].reference_price == Decimal("11")
+        assert {"trend_pct", "momentum_pct", "volatility_pct", "volume_ratio"}.issubset(
+            signals[0].metadata
+        )
+
+    def test_volume_filter_blocks_entry(self) -> None:
+        strategy = USStockFactorStrategy(
+            "AAPL",
+            config=USStockFactorConfig(
+                trend_window=3,
+                momentum_window=2,
+                volatility_window=3,
+                volume_window=3,
+                short_window=2,
+                long_window=3,
+                min_trend_pct=Decimal("5"),
+                min_momentum_pct=Decimal("3"),
+                min_volume_ratio=Decimal("2"),
+            ),
+        )
+        prices = [Decimal("10"), Decimal("10"), Decimal("10"), Decimal("11"), Decimal("12")]
+        volumes = [100, 100, 100, 100, 100]
+
+        assert _feed_any(strategy, SequenceMD("AAPL", prices, volumes)) == []
+
+    def test_invalid_factor_config_raises(self) -> None:
+        with pytest.raises(ValueError, match="short_window"):
+            USStockFactorConfig(short_window=5, long_window=5)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────

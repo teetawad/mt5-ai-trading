@@ -3,6 +3,7 @@ from market_data.snapshot import MarketBar
 from .engine import BacktestError, run_backtest
 from .types import (
     BacktestConfig,
+    BacktestMetrics,
     StrategyParameters,
     TimeSplit,
     WalkForwardFoldResult,
@@ -50,10 +51,10 @@ def walk_forward_validate(
         train_bars = ordered[train_start:train_end]
         test_bars = ordered[test_start:test_end]
 
-        ranked = [
-            (run_backtest(train_bars, candidate, config).metrics.total_return_pct, candidate)
-            for candidate in candidates
-        ]
+        ranked = []
+        for candidate in candidates:
+            result = run_backtest(train_bars, candidate, config)
+            ranked.append((selection_score(result.metrics), candidate))
         _, selected = max(ranked, key=lambda item: item[0])
         train_result = run_backtest(train_bars, selected, config)
         test_result = run_backtest(test_bars, selected, config)
@@ -77,3 +78,23 @@ def walk_forward_validate(
     if not folds:
         raise BacktestError("Not enough bars for one walk-forward fold")
     return WalkForwardResult(folds=folds)
+
+
+def selection_score(metrics: BacktestMetrics) -> float:
+    """Risk-adjusted train score for walk-forward parameter selection.
+
+    This deliberately does not optimize only historical return. It rewards
+    return, Sharpe, win rate, and profit factor while penalizing drawdown and
+    no-trade candidates.
+    """
+
+    profit_factor = metrics.profit_factor if metrics.profit_factor is not None else 0
+    trade_penalty = 5 if metrics.trade_count == 0 else 0
+    return (
+        float(metrics.total_return_pct)
+        - float(metrics.max_drawdown_pct)
+        + float(metrics.sharpe_ratio) * 2
+        + float(metrics.win_rate_pct) * 0.05
+        + min(float(profit_factor), 10.0)
+        - trade_penalty
+    )
