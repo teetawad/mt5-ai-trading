@@ -10,6 +10,7 @@ import { createFill, findFillByBrokerFillId, findFillsByOrder } from '../db/repo
 import { createOrder, findOrderByExecution, updateOrderStatus } from '../db/repositories/orders';
 import { createSnapshot } from '../db/repositories/portfolio-snapshots';
 import {
+  findAllPositions,
   findPositionBySymbolForUpdate,
   findOpenPositions,
   upsertPosition,
@@ -65,6 +66,21 @@ export interface ExecutionWorkflowResult {
   fills: Fill[];
   position: Position | null;
   idempotent: boolean;
+}
+
+export interface PositionAccountingState {
+  quantity: string | null | undefined;
+  averageEntryPrice: string | null | undefined;
+  realizedPnl: string | null | undefined;
+  unrealizedPnl?: string | null;
+}
+
+export interface PositionAccountingResult {
+  quantity: string;
+  averageEntryPrice: string | null;
+  realizedPnl: string;
+  unrealizedPnl: string;
+  lastPrice: string | null;
 }
 
 function executionKey(proposalId: string): string {
@@ -152,6 +168,52 @@ function filledQuantity(fills: FillEventDTO[]): string {
   return money(fills.reduce((sum, fill) => sum.plus(fill.quantity), new Decimal(0)));
 }
 
+export function calculatePositionAccounting(
+  existing: PositionAccountingState | null,
+  side: TradeProposal['side'],
+  fills: FillEventDTO[],
+): PositionAccountingResult {
+  let quantity = decimal(existing?.quantity);
+  let averageEntryPrice = decimal(existing?.averageEntryPrice);
+  let realizedPnl = decimal(existing?.realizedPnl);
+  let lastPrice: Decimal | null = null;
+
+  for (const fill of fills) {
+    const fillQuantity = decimal(fill.quantity);
+    const fillPrice = decimal(fill.price);
+    const fee = decimal(fill.fee);
+    lastPrice = fillPrice;
+
+    if (side === 'BUY') {
+      const currentCost = quantity.times(averageEntryPrice);
+      const addedCost = fillQuantity.times(fillPrice).plus(fee);
+      quantity = quantity.plus(fillQuantity);
+      averageEntryPrice = quantity.isZero()
+        ? new Decimal(0)
+        : currentCost.plus(addedCost).div(quantity);
+    } else {
+      realizedPnl = realizedPnl.plus(fillPrice.minus(averageEntryPrice).times(fillQuantity)).minus(fee);
+      quantity = quantity.minus(fillQuantity);
+      if (quantity.lte(0)) {
+        quantity = new Decimal(0);
+        averageEntryPrice = new Decimal(0);
+      }
+    }
+  }
+
+  const unrealizedPnl = lastPrice
+    ? lastPrice.minus(averageEntryPrice).times(quantity)
+    : decimal(existing?.unrealizedPnl);
+
+  return {
+    quantity: money(quantity),
+    averageEntryPrice: quantity.isZero() ? null : money(averageEntryPrice),
+    realizedPnl: money(realizedPnl),
+    unrealizedPnl: money(unrealizedPnl),
+    lastPrice: lastPrice ? money(lastPrice) : null,
+  };
+}
+
 async function persistFills(
   client: PoolClient,
   orderId: string,
@@ -187,46 +249,16 @@ async function updatePositionFromFills(
   if (!fills.length) return findPositionBySymbolForUpdate(client, proposal.symbol);
 
   const existing = await findPositionBySymbolForUpdate(client, proposal.symbol);
-  let quantity = decimal(existing?.quantity);
-  let averageEntryPrice = decimal(existing?.averageEntryPrice);
-  let realizedPnl = decimal(existing?.realizedPnl);
-  let lastPrice: Decimal | null = null;
-
-  for (const fill of fills) {
-    const fillQuantity = decimal(fill.quantity);
-    const fillPrice = decimal(fill.price);
-    const fee = decimal(fill.fee);
-    lastPrice = fillPrice;
-
-    if (proposal.side === 'BUY') {
-      const currentCost = quantity.times(averageEntryPrice);
-      const addedCost = fillQuantity.times(fillPrice).plus(fee);
-      quantity = quantity.plus(fillQuantity);
-      averageEntryPrice = quantity.isZero()
-        ? new Decimal(0)
-        : currentCost.plus(addedCost).div(quantity);
-    } else {
-      realizedPnl = realizedPnl.plus(fillPrice.minus(averageEntryPrice).times(fillQuantity)).minus(fee);
-      quantity = quantity.minus(fillQuantity);
-      if (quantity.lte(0)) {
-        quantity = new Decimal(0);
-        averageEntryPrice = new Decimal(0);
-      }
-    }
-  }
-
-  const unrealizedPnl = lastPrice
-    ? lastPrice.minus(averageEntryPrice).times(quantity)
-    : decimal(existing?.unrealizedPnl);
+  const accounting = calculatePositionAccounting(existing, proposal.side, fills);
 
   return upsertPosition(client, {
     symbol: proposal.symbol,
-    quantity: money(quantity),
-    averageEntryPrice: quantity.isZero() ? null : money(averageEntryPrice),
-    realizedPnl: money(realizedPnl),
-    unrealizedPnl: money(unrealizedPnl),
-    lastPrice: lastPrice ? money(lastPrice) : existing?.lastPrice,
-    lastPriceAt: lastPrice ? new Date() : existing?.lastPriceAt,
+    quantity: accounting.quantity,
+    averageEntryPrice: accounting.averageEntryPrice,
+    realizedPnl: accounting.realizedPnl,
+    unrealizedPnl: accounting.unrealizedPnl,
+    lastPrice: accounting.lastPrice ?? existing?.lastPrice,
+    lastPriceAt: accounting.lastPrice ? new Date() : existing?.lastPriceAt,
   });
 }
 
@@ -239,11 +271,12 @@ async function writePortfolioSnapshot(
     getPaperPortfolio(requestId),
     findOpenPositions(client),
   ]);
-  const realizedPnl = openPositions.reduce(
+  const allPositions = await findAllPositions(client);
+  const realizedPnl = allPositions.reduce(
     (sum, position) => sum.plus(position.realizedPnl),
     new Decimal(0),
   );
-  const unrealizedPnl = openPositions.reduce(
+  const unrealizedPnl = allPositions.reduce(
     (sum, position) => sum.plus(position.unrealizedPnl),
     new Decimal(0),
   );

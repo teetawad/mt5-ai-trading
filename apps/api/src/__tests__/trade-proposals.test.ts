@@ -214,10 +214,11 @@ describe('Phase 8 signal to proposal workflow', () => {
     await closePool();
     if (pool) {
       await pool.query(
-        `TRUNCATE fills, orders, executions, trade_approvals, risk_checks,
-         trade_proposals, signals, positions, portfolio_snapshots, strategies, users
+        `TRUNCATE audit_logs, fills, orders, executions, trade_approvals, risk_checks,
+         trade_proposals, signals, positions, portfolio_snapshots, strategies
          RESTART IDENTITY CASCADE`,
       );
+      await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
       await pool.end();
     }
   });
@@ -899,6 +900,84 @@ describe('Phase 8 signal to proposal workflow', () => {
     expect(res.body.order.filledQuantity).toBe('8.00000000');
     expect(res.body.fills[0].fillType).toBe('PARTIAL');
     expect(res.body.position.quantity).toBeDefined();
+  });
+
+  it.skipIf(SKIP)('closing a paper position carries realized P&L into the latest portfolio snapshot', async () => {
+    mockEngineSequence('PASS', 'PASS', 'PASS', 'PASS');
+    vi.mocked(submitOrder)
+      .mockResolvedValueOnce({
+        broker_order_id: `broker-order-close-pnl-buy-${BROKER_RUN_ID}`,
+        status: 'FILLED',
+        fills: [
+          {
+            order_id: `broker-order-close-pnl-buy-${BROKER_RUN_ID}`,
+            fill_id: `broker-fill-close-pnl-buy-${BROKER_RUN_ID}`,
+            quantity: '1.00000000',
+            price: '100.00000000',
+            fee: '1.00000000',
+            is_partial: false,
+            filled_at: '2024-01-15T10:31:00.000Z',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        broker_order_id: `broker-order-close-pnl-sell-${BROKER_RUN_ID}`,
+        status: 'FILLED',
+        fills: [
+          {
+            order_id: `broker-order-close-pnl-sell-${BROKER_RUN_ID}`,
+            fill_id: `broker-fill-close-pnl-sell-${BROKER_RUN_ID}`,
+            quantity: '1.00000000',
+            price: '99.93000000',
+            fee: '1.00000000',
+            is_partial: false,
+            filled_at: '2024-01-15T10:32:00.000Z',
+          },
+        ],
+      });
+
+    const buy = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'MSFT',
+        side: 'BUY',
+        quantity: '1.00000000',
+        reason: 'close pnl buy',
+      });
+    await request(app)
+      .post(`/trade-proposals/${buy.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'close-pnl-buy-approve' });
+
+    const sell = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'MSFT',
+        side: 'SELL',
+        quantity: '1.00000000',
+        reason: 'close pnl sell',
+      });
+    const closed = await request(app)
+      .post(`/trade-proposals/${sell.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'close-pnl-sell-approve' });
+
+    expect(closed.status).toBe(200);
+    expect(closed.body.position.quantity).toBe('0.00000000');
+    expect(closed.body.position.realizedPnl).toBe('-2.07000000');
+
+    const latestSnapshot = await pool.query(
+      'SELECT realized_pnl, unrealized_pnl FROM portfolio_snapshots ORDER BY created_at DESC LIMIT 1',
+    );
+    expect(latestSnapshot.rows[0].realized_pnl).toBe('-2.07000000');
+    const closedPosition = await pool.query(
+      "SELECT unrealized_pnl FROM positions WHERE symbol = 'MSFT'",
+    );
+    expect(closedPosition.rows[0].unrealized_pnl).toBe('0.00000000');
   });
 
   it.skipIf(SKIP)('POST execute can recover after app restart from a transient broker submission error', async () => {

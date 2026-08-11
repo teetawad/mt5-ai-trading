@@ -7,7 +7,7 @@ import { findAuditLogsByEntity, listAuditLogs } from '../db/repositories/audit-l
 import { listRecentFills } from '../db/repositories/fills';
 import { listOrders } from '../db/repositories/orders';
 import { findLatestSnapshot } from '../db/repositories/portfolio-snapshots';
-import { findOpenPositions } from '../db/repositories/positions';
+import { findAllPositions, findOpenPositions } from '../db/repositories/positions';
 import { getSettingValue, setSetting } from '../db/repositories/system-settings';
 import { findAllStrategies } from '../db/repositories/strategies';
 import { AuditLog, Order, Position } from '../db/types';
@@ -422,10 +422,11 @@ export async function runPhase21Validation(env: Env = process.env): Promise<Phas
       workflow,
     );
 
-    const [orders, fills, positions, latestSnapshot, auditLogs] = await Promise.all([
+    const [orders, fills, positions, allPositions, latestSnapshot, auditLogs] = await Promise.all([
       listOrders(pool, { limit: 100 }),
       listRecentFills(pool, 100),
       findOpenPositions(pool),
+      findAllPositions(pool),
       findLatestSnapshot(pool),
       listAuditLogs(pool, { limit: 100 }),
     ]);
@@ -435,8 +436,8 @@ export async function runPhase21Validation(env: Env = process.env): Promise<Phas
     }, {});
     const orderDrift = orderFillDrift(orders, fillSumsByOrderId);
     const positionDrift = brokerPositionDrift(positions, portfolio.positions);
-    const realizedPnl = positions.reduce((sum, position) => sum.plus(position.realizedPnl), new Decimal(0));
-    const unrealizedPnl = positions.reduce((sum, position) => sum.plus(position.unrealizedPnl), new Decimal(0));
+    const realizedPnl = allPositions.reduce((sum, position) => sum.plus(position.realizedPnl), new Decimal(0));
+    const unrealizedPnl = allPositions.reduce((sum, position) => sum.plus(position.unrealizedPnl), new Decimal(0));
     const pnlMatches = latestSnapshot
       ? decimal(latestSnapshot.realizedPnl).eq(realizedPnl)
         && decimal(latestSnapshot.unrealizedPnl).eq(unrealizedPnl)

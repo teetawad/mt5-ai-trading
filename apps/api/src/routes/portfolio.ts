@@ -6,7 +6,7 @@ import {
   findLatestSnapshot,
   listSnapshots,
 } from '../db/repositories/portfolio-snapshots';
-import { findOpenPositions } from '../db/repositories/positions';
+import { findAllPositions, findOpenPositions } from '../db/repositories/positions';
 
 export const portfolioRouter = Router();
 
@@ -34,7 +34,10 @@ function pagination(req: Request): { limit: number; offset: number } | null {
 portfolioRouter.get('/', async (_req: Request, res: Response) => {
   const pool = getPool();
   const latest = await findLatestSnapshot(pool);
-  const positions = await findOpenPositions(pool);
+  const [positions, allPositions] = await Promise.all([
+    findOpenPositions(pool),
+    findAllPositions(pool),
+  ]);
 
   if (latest) {
     res.json({
@@ -50,11 +53,11 @@ portfolioRouter.get('/', async (_req: Request, res: Response) => {
     return;
   }
 
-  const unrealizedPnl = positions.reduce(
+  const unrealizedPnl = allPositions.reduce(
     (sum, position) => sum.plus(position.unrealizedPnl),
     new Decimal(0),
   );
-  const realizedPnl = positions.reduce(
+  const realizedPnl = allPositions.reduce(
     (sum, position) => sum.plus(position.realizedPnl),
     new Decimal(0),
   );
