@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
+import { csrfProtection } from './auth/csrf';
 import { healthRouter } from './routes/health';
 import { authRouter } from './routes/auth';
 import { marketDataRouter } from './routes/market-data';
@@ -28,6 +29,7 @@ export function createApp() {
   app.use(morgan('combined'));
   app.use(express.json());
   app.use(cookieParser());
+  app.use(csrfProtection);
 
   app.use('/health', healthRouter);
   app.use('/auth', authRouter);

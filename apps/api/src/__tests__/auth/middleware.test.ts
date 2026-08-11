@@ -3,6 +3,7 @@ import request from 'supertest';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { requireAuth, requireOwner } from '../../auth/middleware';
+import { csrfProtection } from '../../auth/csrf';
 import { signToken } from '../../auth/tokens';
 import { _clearDenylistForTest, denyToken } from '../../auth/denylist';
 
@@ -21,6 +22,23 @@ function makeApp() {
   });
 
   app.get('/owner-only', requireAuth, requireOwner, (req, res) => {
+    res.json({ ok: true });
+  });
+
+  return app;
+}
+
+function makeCsrfApp() {
+  const app = express();
+  app.use(express.json());
+  app.use(cookieParser());
+  app.use(csrfProtection);
+
+  app.get('/state', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  app.post('/state', (_req, res) => {
     res.json({ ok: true });
   });
 
@@ -89,5 +107,37 @@ describe('requireOwner middleware', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('FORBIDDEN');
+  });
+});
+
+describe('csrfProtection middleware', () => {
+  it('allows safe methods without a CSRF token', async () => {
+    const res = await request(makeCsrfApp())
+      .get('/state')
+      .set('Cookie', 'session=session-token');
+    expect(res.status).toBe(200);
+  });
+
+  it('allows bearer-token API clients without a session cookie', async () => {
+    const res = await request(makeCsrfApp())
+      .post('/state')
+      .set('Authorization', 'Bearer token');
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects cookie-authenticated unsafe requests without a CSRF token', async () => {
+    const res = await request(makeCsrfApp())
+      .post('/state')
+      .set('Cookie', 'session=session-token; csrf_token=csrf-token');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('CSRF_TOKEN_INVALID');
+  });
+
+  it('allows cookie-authenticated unsafe requests with a matching CSRF token', async () => {
+    const res = await request(makeCsrfApp())
+      .post('/state')
+      .set('Cookie', 'session=session-token; csrf_token=csrf-token')
+      .set('X-CSRF-Token', 'csrf-token');
+    expect(res.status).toBe(200);
   });
 });

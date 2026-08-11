@@ -391,6 +391,32 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 20 โ€” Security and Production Readiness
+
+- [x] Authentication and authorization review
+- [x] Owner approval security review
+- [x] API validation review
+- [x] Secrets and environment variables review
+- [x] CSRF/XSS/session risk review
+- [x] Replay and duplicate request review
+- [x] Race condition review
+- [x] Idempotency review
+- [x] Database transaction review
+- [x] Audit log review
+- [x] Kill switch review
+- [x] Broker reconciliation review
+- [x] Market-data failure handling review
+- [x] Logging and monitoring review
+- [x] Dependency/security review
+- [x] Backup/recovery review
+- [x] Critical/high-risk CSRF issue fixed
+- [x] Critical/high dependency audit issue fixed
+- [x] Full tests, lint, typecheck, dependency audit, and production builds run
+- [x] Production-readiness report (`docs/PHASE_20_PRODUCTION_READINESS.md`)
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

@@ -7,6 +7,7 @@ import { verifyPassword } from '../auth/password';
 import { signToken } from '../auth/tokens';
 import { denyToken } from '../auth/denylist';
 import { requireAuth } from '../auth/middleware';
+import { CSRF_COOKIE_NAME, makeCsrfToken } from '../auth/csrf';
 
 export const authRouter = Router();
 
@@ -18,6 +19,11 @@ const COOKIE_OPTIONS = {
   sameSite: 'strict' as const,
   maxAge: SESSION_TTL_SECONDS * 1000,
   path: '/',
+};
+
+const CSRF_COOKIE_OPTIONS = {
+  ...COOKIE_OPTIONS,
+  httpOnly: false,
 };
 
 const loginLimiter = rateLimit({
@@ -69,6 +75,7 @@ authRouter.post('/login', loginLimiter, async (req: Request, res: Response) => {
   }
 
   const token = signToken({ sub: user.id, email: user.email, role: user.role });
+  const csrfToken = makeCsrfToken();
 
   await createAuditLog(pool, {
     eventType: 'LOGIN_SUCCESS',
@@ -82,9 +89,11 @@ authRouter.post('/login', loginLimiter, async (req: Request, res: Response) => {
   });
 
   res.cookie('session', token, COOKIE_OPTIONS);
+  res.cookie(CSRF_COOKIE_NAME, csrfToken, CSRF_COOKIE_OPTIONS);
   res.json({
     user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
     sessionToken: token,
+    csrfToken,
   });
 });
 
@@ -107,6 +116,7 @@ authRouter.post('/logout', requireAuth, async (req: Request, res: Response) => {
   });
 
   res.clearCookie('session', { path: '/' });
+  res.clearCookie(CSRF_COOKIE_NAME, { path: '/' });
   res.json({ message: 'Logged out successfully' });
 });
 
