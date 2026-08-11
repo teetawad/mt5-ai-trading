@@ -45,24 +45,26 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 2 — Database
 
-- [ ] Migration tooling selected and configured
-- [ ] `users` table + migration
-- [ ] `strategies` table + migration
-- [ ] `signals` table + migration
-- [ ] `risk_checks` table + migration
-- [ ] `trade_proposals` table + migration
-- [ ] `trade_approvals` table + migration
-- [ ] `executions` table + migration
-- [ ] `orders` table + migration
-- [ ] `fills` table + migration
-- [ ] `positions` table + migration
-- [ ] `portfolio_snapshots` table + migration
-- [ ] `audit_logs` table + migration
-- [ ] `system_settings` table + migration
-- [ ] Indexes and constraints
-- [ ] Repository layer (Node)
-- [ ] Repository layer (Python)
-- [ ] Database tests
+- [x] Migration tooling selected and configured
+- [x] `users` table + migration
+- [x] `strategies` table + migration
+- [x] `signals` table + migration
+- [x] `risk_checks` table + migration
+- [x] `trade_proposals` table + migration
+- [x] `trade_approvals` table + migration
+- [x] `executions` table + migration
+- [x] `orders` table + migration
+- [x] `fills` table + migration
+- [x] `positions` table + migration
+- [x] `portfolio_snapshots` table + migration
+- [x] `audit_logs` table + migration
+- [x] `system_settings` table + migration
+- [x] Indexes and constraints
+- [x] DB-level triggers (audit immutability, proposal field immutability)
+- [x] System settings seeded (12 defaults)
+- [x] Repository layer (Node) — 13 repositories
+- [x] Repository layer (Python) — asyncpg pool + system_settings
+- [x] Database tests (skip gracefully without TEST_DATABASE_URL)
 - [ ] Owner review
 
 ---

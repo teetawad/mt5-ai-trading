@@ -19,8 +19,22 @@ describe('GET /health', () => {
 });
 
 describe('GET /health/db', () => {
-  it('returns 200', async () => {
+  it('returns 200 when connected or 503 when DB unreachable', async () => {
     const res = await request(app).get('/health/db');
-    expect(res.status).toBe(200);
+    // 200 = connected, 503 = no DB available (expected in unit test environment)
+    expect([200, 503]).toContain(res.status);
+    expect(res.body.service).toBe('api');
+    expect(res.body.timestamp).toBeDefined();
+  });
+
+  it('status field reflects connectivity', async () => {
+    const res = await request(app).get('/health/db');
+    if (res.status === 200) {
+      expect(res.body.status).toBe('ok');
+      expect(res.body.database).toBe('connected');
+    } else {
+      expect(res.body.status).toBe('error');
+      expect(res.body.database).toBe('unreachable');
+    }
   });
 });
