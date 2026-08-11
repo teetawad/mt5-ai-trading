@@ -56,6 +56,7 @@ class BacktestConfig(BaseModel):
     fee_per_share: Decimal = Decimal("0.00")
     min_fee: Decimal = Decimal("0.00")
     slippage_bps: Decimal = Decimal("0")
+    periods_per_year: int = 252
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -82,22 +83,30 @@ class BacktestTrade(BaseModel):
 
 class BacktestMetrics(BaseModel):
     total_return_pct: Decimal
+    annualized_return_pct: Decimal
     benchmark_return_pct: Decimal
     max_drawdown_pct: Decimal
     sharpe_ratio: Decimal
     win_rate_pct: Decimal
     profit_factor: Decimal | None
+    average_win: Decimal | None
+    average_loss: Decimal | None
+    exposure_pct: Decimal
     trade_count: int
 
     model_config = {"arbitrary_types_allowed": True}
 
     @field_serializer(
         "total_return_pct",
+        "annualized_return_pct",
         "benchmark_return_pct",
         "max_drawdown_pct",
         "sharpe_ratio",
         "win_rate_pct",
         "profit_factor",
+        "average_win",
+        "average_loss",
+        "exposure_pct",
     )
     def serialize_decimal(self, value: Decimal | None) -> str | None:
         return _money(value) if value is not None else None

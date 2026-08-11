@@ -1,0 +1,66 @@
+[
+  {
+    "name": "moving_average_crossover",
+    "kind": "moving_average_crossover",
+    "candidate_count": 3,
+    "fold_count": 2,
+    "metrics": {
+      "total_return_pct": "0E-8",
+      "annualized_return_pct": "0E-8",
+      "benchmark_return_pct": "0.66401062",
+      "max_drawdown_pct": "0E-8",
+      "sharpe_ratio": "0E-8",
+      "win_rate_pct": "0E-8",
+      "profit_factor": null,
+      "average_win": null,
+      "average_loss": null,
+      "exposure_pct": "0E-8",
+      "trade_count": 0
+    },
+    "benchmark_return_pct": "0.331653051806919096381934650",
+    "stability_positive_fold_pct": "0",
+    "stability_return_std_pct": "0.0",
+    "train_test_return_gap_pct": "0.00",
+    "overfitting_flags": [
+      "less than half of out-of-sample folds profitable",
+      "too few trades for confidence"
+    ],
+    "recommendation": "DO NOT CONTINUE PAPER TESTING",
+    "selected_parameters": [
+      "{\"kind\":\"moving_average_crossover\",\"symbol\":\"AAPL\",\"short_window\":2,\"long_window\":3,\"quantity\":\"10.00000000\",\"trend_window\":20,\"momentum_window\":10,\"volatility_window\":20,\"volume_window\":20,\"min_trend_pct\":\"0E-8\",\"min_momentum_pct\":\"0E-8\",\"max_volatility_pct\":\"100.00000000\",\"min_volume_ratio\":\"0E-8\",\"exit_trend_pct\":\"0E-8\",\"exit_momentum_pct\":\"0E-8\"}",
+      "{\"kind\":\"moving_average_crossover\",\"symbol\":\"AAPL\",\"short_window\":2,\"long_window\":3,\"quantity\":\"10.00000000\",\"trend_window\":20,\"momentum_window\":10,\"volatility_window\":20,\"volume_window\":20,\"min_trend_pct\":\"0E-8\",\"min_momentum_pct\":\"0E-8\",\"max_volatility_pct\":\"100.00000000\",\"min_volume_ratio\":\"0E-8\",\"exit_trend_pct\":\"0E-8\",\"exit_momentum_pct\":\"0E-8\"}"
+    ]
+  },
+  {
+    "name": "us_stock_factor",
+    "kind": "us_stock_factor",
+    "candidate_count": 3,
+    "fold_count": 2,
+    "metrics": {
+      "total_return_pct": "0E-8",
+      "annualized_return_pct": "0E-8",
+      "benchmark_return_pct": "0.66401062",
+      "max_drawdown_pct": "0E-8",
+      "sharpe_ratio": "0E-8",
+      "win_rate_pct": "0E-8",
+      "profit_factor": null,
+      "average_win": null,
+      "average_loss": null,
+      "exposure_pct": "0E-8",
+      "trade_count": 0
+    },
+    "benchmark_return_pct": "0.331653051806919096381934650",
+    "stability_positive_fold_pct": "0",
+    "stability_return_std_pct": "0.0",
+    "train_test_return_gap_pct": "0.0015306250",
+    "overfitting_flags": [
+      "less than half of out-of-sample folds profitable",
+      "too few trades for confidence"
+    ],
+    "recommendation": "DO NOT CONTINUE PAPER TESTING",
+    "selected_parameters": [
+      "{\"kind\":\"us_stock_factor\",\"symbol\":\"AAPL\",\"short_window\":2,\"long_window\":3,\"quantity\":\"10.00000000\",\"trend_window\":3,\"momentum_window\":2,\"volatility_window\":3,\"volume_window\":3,\"min_trend_pct\":\"0.50000000\",\"min_momentum_pct\":\"0.25000000\",\"max_volatility_pct\":\"5.00000000\",\"min_volume_ratio\":\"0.60000000\",\"exit_trend_pct\":\"-0.50000000\",\"exit_momentum_pct\":\"-0.25000000\"}",
+      "{\"kind\":\"us_stock_factor\",\"symbol\":\"AAPL\",\"short_window\":2,\"long_window\":3,\"quantity\":\"10.00000000\",\"trend_window\":3,\"momentum_window\":2,\"volatility_window\":3,\"volume_window\":3,\"min_trend_pct\":\"0.50000000\",\"min_momentum_pct\":\"0.25000000\",\"max_volatility_pct\":\"5.00000000\",\"min_volume_ratio\":\"0.60000000\",\"exit_trend_pct\":\"-0.50000000\",\"exit_momentum_pct\":\"-0.25000000\"}"
+    ]
+  }
+]

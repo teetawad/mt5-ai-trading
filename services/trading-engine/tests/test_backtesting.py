@@ -11,6 +11,11 @@ from decimal import Decimal
 import pytest
 
 from backtesting.engine import BacktestError, run_backtest
+from backtesting.performance import (
+    evaluate_all_strategies,
+    overfitting_flags,
+    render_performance_report,
+)
 from backtesting.types import (
     BacktestConfig,
     BacktestMetrics,
@@ -84,9 +89,11 @@ class TestBacktestEngine:
         assert result.end == bars[-1].timestamp
         assert result.metrics.trade_count == 2
         assert result.metrics.total_return_pct != Decimal("0")
+        assert result.metrics.annualized_return_pct != Decimal("0")
         assert result.metrics.benchmark_return_pct == Decimal("-20.0")
         assert result.metrics.max_drawdown_pct >= 0
         assert result.metrics.win_rate_pct >= 0
+        assert result.metrics.exposure_pct > 0
 
     def test_executes_signal_on_next_bar_open_to_prevent_lookahead(self) -> None:
         bars = _bars(
@@ -214,26 +221,129 @@ class TestValidation:
     def test_selection_score_is_not_total_return_only(self) -> None:
         high_return_high_drawdown = BacktestMetrics(
             total_return_pct=Decimal("20"),
+            annualized_return_pct=Decimal("20"),
             benchmark_return_pct=Decimal("5"),
             max_drawdown_pct=Decimal("50"),
             sharpe_ratio=Decimal("0"),
             win_rate_pct=Decimal("10"),
             profit_factor=Decimal("1"),
+            average_win=Decimal("10"),
+            average_loss=Decimal("-20"),
+            exposure_pct=Decimal("80"),
             trade_count=4,
         )
         lower_return_better_risk = BacktestMetrics(
             total_return_pct=Decimal("12"),
+            annualized_return_pct=Decimal("12"),
             benchmark_return_pct=Decimal("5"),
             max_drawdown_pct=Decimal("2"),
             sharpe_ratio=Decimal("2"),
             win_rate_pct=Decimal("60"),
             profit_factor=Decimal("2"),
+            average_win=Decimal("10"),
+            average_loss=Decimal("-5"),
+            exposure_pct=Decimal("40"),
             trade_count=4,
         )
 
         assert selection_score(lower_return_better_risk) > selection_score(
             high_return_high_drawdown
         )
+
+
+class TestPerformanceEvaluation:
+    def test_evaluates_all_implemented_us_stock_strategy_families(self) -> None:
+        bars = _bars(
+            [
+                "10",
+                "10",
+                "10",
+                "11",
+                "12",
+                "13",
+                "12",
+                "11",
+                "10",
+                "12",
+                "13",
+                "14",
+                "13",
+                "12",
+                "15",
+                "16",
+                "15",
+                "14",
+                "17",
+                "18",
+            ]
+        )
+
+        results = evaluate_all_strategies(
+            bars,
+            symbol="AAPL",
+            train_size=8,
+            test_size=4,
+            step_size=4,
+            config=BacktestConfig(initial_cash=Decimal("10000")),
+        )
+
+        assert {result.name for result in results} == {
+            "moving_average_crossover",
+            "us_stock_factor",
+        }
+        for result in results:
+            assert result.fold_count == 3
+            assert result.metrics.trade_count >= 0
+            assert result.recommendation in {
+                "SAFE TO CONTINUE PAPER TESTING",
+                "WATCHLIST ONLY",
+                "DO NOT CONTINUE PAPER TESTING",
+            }
+
+    def test_overfitting_flags_unstable_out_of_sample_results(self) -> None:
+        metrics = BacktestMetrics(
+            total_return_pct=Decimal("10"),
+            annualized_return_pct=Decimal("10"),
+            benchmark_return_pct=Decimal("5"),
+            max_drawdown_pct=Decimal("25"),
+            sharpe_ratio=Decimal("0"),
+            win_rate_pct=Decimal("25"),
+            profit_factor=Decimal("0.8"),
+            average_win=Decimal("1"),
+            average_loss=Decimal("-2"),
+            exposure_pct=Decimal("90"),
+            trade_count=1,
+        )
+
+        flags = overfitting_flags(
+            metrics=metrics,
+            train_test_return_gap_pct=Decimal("20"),
+            stability_positive_fold_pct=Decimal("25"),
+            stability_return_std_pct=Decimal("30"),
+        )
+
+        assert "large train/test return gap" in flags
+        assert "less than half of out-of-sample folds profitable" in flags
+        assert "too few trades for confidence" in flags
+
+    def test_report_contains_required_phase19_metrics_and_paper_boundary(self) -> None:
+        results = evaluate_all_strategies(
+            _bars([str(10 + (index % 5)) for index in range(24)]),
+            symbol="AAPL",
+            train_size=8,
+            test_size=4,
+            step_size=4,
+            config=BacktestConfig(initial_cash=Decimal("10000")),
+        )
+
+        report = render_performance_report(results, symbol="AAPL")
+
+        assert "PAPER Strategy Performance Report" in report
+        assert "Annualized" in report
+        assert "Avg Win" in report
+        assert "Exposure" in report
+        assert "Benchmark" in report
+        assert "No live trading or real-money execution" in report
 
 
 class TestBacktestingBoundary:

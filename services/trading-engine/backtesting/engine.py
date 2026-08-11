@@ -220,6 +220,7 @@ def run_backtest(
     pending_signal: BacktestSide | None = None
     trades: list[BacktestTrade] = []
     equity_curve: list[Decimal] = []
+    exposure_periods = 0
 
     for index, bar in enumerate(ordered):
         if pending_signal is not None:
@@ -236,6 +237,8 @@ def run_backtest(
             pending_signal = None
 
         equity_curve.append(cash + position * bar.close)
+        if position > 0:
+            exposure_periods += 1
 
         if index < len(ordered) - 1:
             pending_signal = model.on_bar_close(bar)
@@ -254,6 +257,9 @@ def run_backtest(
             benchmark_final_equity=benchmark_final,
             initial_cash=cfg.initial_cash,
             trades=trades,
+            exposure_periods=exposure_periods,
+            total_periods=len(equity_curve),
+            periods_per_year=cfg.periods_per_year,
         ),
         trades=trades,
         equity_curve=equity_curve,
@@ -313,8 +319,16 @@ def calculate_metrics(
     benchmark_final_equity: Decimal,
     initial_cash: Decimal,
     trades: list[BacktestTrade],
+    exposure_periods: int,
+    total_periods: int,
+    periods_per_year: int,
 ) -> BacktestMetrics:
     total_return = (equity_curve[-1] / initial_cash - Decimal("1")) * Decimal("100")
+    annualized_return = _annualized_return(
+        total_return_pct=total_return,
+        periods=max(1, len(equity_curve) - 1),
+        periods_per_year=periods_per_year,
+    )
     benchmark_return = (benchmark_final_equity / initial_cash - Decimal("1")) * Decimal("100")
     returns = [
         (current / previous) - Decimal("1")
@@ -334,15 +348,42 @@ def calculate_metrics(
         if losses
         else (None if not wins else Decimal("999999999"))
     )
+    average_win = sum(wins, Decimal("0")) / Decimal(len(wins)) if wins else None
+    average_loss = sum(losses, Decimal("0")) / Decimal(len(losses)) if losses else None
+    exposure = (
+        Decimal(exposure_periods) / Decimal(total_periods) * Decimal("100")
+        if total_periods > 0
+        else Decimal("0")
+    )
     return BacktestMetrics(
         total_return_pct=total_return,
+        annualized_return_pct=annualized_return,
         benchmark_return_pct=benchmark_return,
         max_drawdown_pct=max_drawdown,
         sharpe_ratio=sharpe,
         win_rate_pct=win_rate,
         profit_factor=profit_factor,
+        average_win=average_win,
+        average_loss=average_loss,
+        exposure_pct=exposure,
         trade_count=len(trades),
     )
+
+
+def _annualized_return(
+    *,
+    total_return_pct: Decimal,
+    periods: int,
+    periods_per_year: int,
+) -> Decimal:
+    if periods <= 0 or periods_per_year <= 0:
+        return Decimal("0")
+    total_multiplier = Decimal("1") + total_return_pct / Decimal("100")
+    if total_multiplier <= 0:
+        return Decimal("-100")
+    exponent = Decimal(periods_per_year) / Decimal(periods)
+    annualized = Decimal(str(float(total_multiplier) ** float(exponent)))
+    return (annualized - Decimal("1")) * Decimal("100")
 
 
 def _max_drawdown(equity_curve: list[Decimal]) -> Decimal:

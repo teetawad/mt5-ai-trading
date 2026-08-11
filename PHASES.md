@@ -371,6 +371,26 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 19 — PAPER Strategy Performance Evaluation
+
+- [x] Total return comparison
+- [x] Annualized return comparison
+- [x] Maximum drawdown comparison
+- [x] Sharpe ratio comparison
+- [x] Win rate comparison
+- [x] Profit factor comparison
+- [x] Average win/loss comparison
+- [x] Trade count comparison
+- [x] Exposure comparison
+- [x] Benchmark performance comparison
+- [x] Stability across walk-forward out-of-sample folds
+- [x] Overfitting and instability flags
+- [x] PAPER-only performance report
+- [x] Recommendation for continued PAPER testing
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass
