@@ -22,6 +22,14 @@ export async function findStrategyById(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export async function findStrategyByName(
+  db: Pool | PoolClient,
+  name: string,
+): Promise<Strategy | null> {
+  const { rows } = await db.query('SELECT * FROM strategies WHERE name = $1', [name]);
+  return rows.length ? mapRow(rows[0]) : null;
+}
+
 export async function findAllStrategies(
   db: Pool | PoolClient,
   activeOnly = false,
@@ -46,6 +54,37 @@ export async function createStrategy(
      VALUES ($1, $2, $3, $4)
      RETURNING *`,
     [data.name, data.description ?? null, data.version, JSON.stringify(data.parameters ?? {})],
+  );
+  return mapRow(rows[0]);
+}
+
+export async function upsertStrategy(
+  db: Pool | PoolClient,
+  data: {
+    name: string;
+    description?: string | null;
+    version: string;
+    parameters?: Record<string, unknown>;
+    isActive?: boolean;
+  },
+): Promise<Strategy> {
+  const { rows } = await db.query(
+    `INSERT INTO strategies (name, description, version, parameters, is_active)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (name) DO UPDATE
+       SET description = EXCLUDED.description,
+           version = EXCLUDED.version,
+           parameters = EXCLUDED.parameters,
+           is_active = EXCLUDED.is_active,
+           updated_at = NOW()
+     RETURNING *`,
+    [
+      data.name,
+      data.description ?? null,
+      data.version,
+      JSON.stringify(data.parameters ?? {}),
+      data.isActive ?? true,
+    ],
   );
   return mapRow(rows[0]);
 }

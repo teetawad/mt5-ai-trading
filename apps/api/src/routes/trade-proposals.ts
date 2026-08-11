@@ -146,12 +146,19 @@ tradeProposalsRouter.patch('/:id/cancel', requireOwner, async (req: Request, res
 
 tradeProposalsRouter.post('/:id/approve', requireOwner, async (req: Request, res: Response) => {
   try {
-    const result = await approveProposal(getPool(), req.params.id, {
+    const actor = {
       actorId: req.user!.sub,
       actorEmail: req.user!.email,
       requestId: approvalRequestId(req),
       ipAddress: clientIp(req),
       userAgent: req.headers['user-agent'] ?? null,
+    };
+    const result = await approveProposal(getPool(), req.params.id, {
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      requestId: actor.requestId,
+      ipAddress: actor.ipAddress,
+      userAgent: actor.userAgent,
     });
 
     if (result.riskResult?.result === 'REJECT') {
@@ -166,7 +173,51 @@ tradeProposalsRouter.post('/:id/approve', requireOwner, async (req: Request, res
       return;
     }
 
-    res.json(result);
+    const execution = await executeApprovedProposal(getPool(), result.proposal.id, {
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      requestId: actor.requestId,
+    });
+
+    if (execution.execution.status === 'ERROR') {
+      res.status(503).json({
+        error: 'EXECUTION_ERROR',
+        approval: result.approval,
+        riskCheck: result.riskCheck,
+        riskResult: result.riskResult,
+        proposal: execution.proposal,
+        execution: execution.execution,
+        order: execution.order,
+        fills: execution.fills,
+      });
+      return;
+    }
+
+    if (execution.execution.status === 'REJECTED') {
+      res.status(422).json({
+        error: 'EXECUTION_REJECTED',
+        approval: result.approval,
+        riskCheck: result.riskCheck,
+        riskResult: result.riskResult,
+        proposal: execution.proposal,
+        execution: execution.execution,
+        order: execution.order,
+        fills: execution.fills,
+      });
+      return;
+    }
+
+    res.json({
+      approval: result.approval,
+      riskCheck: result.riskCheck,
+      riskResult: result.riskResult,
+      proposal: execution.proposal,
+      execution: execution.execution,
+      order: execution.order,
+      fills: execution.fills,
+      position: execution.position,
+      idempotent: result.idempotent || execution.idempotent,
+    });
   } catch (err) {
     if (err instanceof ValidationError) {
       res.status(422).json({ error: 'VALIDATION_ERROR', message: err.message });
@@ -190,6 +241,18 @@ tradeProposalsRouter.post('/:id/approve', requireOwner, async (req: Request, res
         message: err.message,
         currentStatus: err.from,
       });
+      return;
+    }
+    if (err instanceof ExecutionBlockedError) {
+      res.status(422).json({
+        error: 'EXECUTION_BLOCKED',
+        message: err.message,
+        failedRule: err.failedRule,
+      });
+      return;
+    }
+    if (err instanceof TradingEngineError) {
+      res.status(503).json({ error: 'SERVICE_UNAVAILABLE', message: err.message });
       return;
     }
     throw err;

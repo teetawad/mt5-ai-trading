@@ -4,7 +4,7 @@ import { createAuditLog } from '../db/repositories/audit-logs';
 import { findLatestSnapshot } from '../db/repositories/portfolio-snapshots';
 import { createRiskCheck, linkRiskCheckToProposal } from '../db/repositories/risk-checks';
 import { createSignal, updateSignalStatus } from '../db/repositories/signals';
-import { findStrategyById } from '../db/repositories/strategies';
+import { findStrategyById, upsertStrategy } from '../db/repositories/strategies';
 import { getSettingValue } from '../db/repositories/system-settings';
 import {
   createApproval,
@@ -23,6 +23,7 @@ import {
   RiskConfigDTO,
   RiskResultDTO,
   evaluateRisk,
+  getTrackedSymbols,
 } from './trading-engine-client';
 import { assertValidProposalTransition, InvalidStateTransitionError } from './proposal-state-machine';
 
@@ -85,6 +86,12 @@ export interface CreateSignalWorkflowResult {
   proposal: TradeProposal;
 }
 
+export interface CreateManualTestSignalInput {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  quantity: string;
+}
+
 export interface ApprovalWorkflowResult {
   proposal: TradeProposal;
   approval: TradeApproval;
@@ -94,10 +101,18 @@ export interface ApprovalWorkflowResult {
 }
 
 const DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
+const MANUAL_TEST_STRATEGY_NAME = 'MANUAL_TEST_PAPER_ONLY';
+const SUPPORTED_US_STOCK_PATTERN = /^[A-Z]{1,5}(\.[A-Z])?$/;
 
 function validatePositiveDecimal(value: string, field: string): void {
   if (!DECIMAL_PATTERN.test(value) || new Decimal(value).lte(0)) {
     throw new ValidationError(`${field} must be a positive decimal string`);
+  }
+}
+
+function validateSide(value: unknown): asserts value is 'BUY' | 'SELL' {
+  if (value !== 'BUY' && value !== 'SELL') {
+    throw new ValidationError('side must be BUY or SELL');
   }
 }
 
@@ -182,6 +197,7 @@ export async function createSignalAndProposal(
   const orderType = input.orderType ?? 'MARKET';
 
   if (!/^[A-Z0-9.]{1,10}$/.test(symbol)) throw new ValidationError('Invalid symbol format');
+  validateSide(input.side);
   validatePositiveDecimal(input.quantity, 'quantity');
   if (input.referencePrice !== undefined) validatePositiveDecimal(input.referencePrice, 'referencePrice');
   if (orderType === 'LIMIT') {
@@ -303,6 +319,60 @@ export async function createSignalAndProposal(
       proposal: finalProposal,
     };
   });
+}
+
+export async function manualTestSignalOptions(requestId?: string | null): Promise<{ symbols: string[] }> {
+  const symbols = await getTrackedSymbols(requestId ?? undefined);
+  return {
+    symbols: symbols
+      .map((symbol) => symbol.toUpperCase())
+      .filter((symbol) => SUPPORTED_US_STOCK_PATTERN.test(symbol))
+      .sort(),
+  };
+}
+
+export async function createManualTestSignalAndProposal(
+  pool: Pool,
+  input: CreateManualTestSignalInput,
+  actor: ActorContext,
+): Promise<CreateSignalWorkflowResult> {
+  const symbol = String(input.symbol ?? '').trim().toUpperCase();
+  validateSide(input.side);
+  validatePositiveDecimal(String(input.quantity ?? ''), 'quantity');
+  if (!SUPPORTED_US_STOCK_PATTERN.test(symbol)) {
+    throw new ValidationError('symbol must be a supported US stock symbol');
+  }
+
+  const { symbols } = await manualTestSignalOptions(actor.requestId);
+  if (!symbols.includes(symbol)) {
+    throw new NotFoundError(`Symbol not supported for PAPER manual tests: ${symbol}`);
+  }
+  const tradingMode = await getSettingValue<string>(pool, 'trading_mode');
+  if ((tradingMode ?? 'PAPER') !== 'PAPER') {
+    throw new ValidationError('manual test signals are available in PAPER mode only');
+  }
+
+  const strategy = await upsertStrategy(pool, {
+    name: MANUAL_TEST_STRATEGY_NAME,
+    description: 'MANUAL TEST / PAPER ONLY signal entry. Uses server-side market data and the normal risk/proposal workflow.',
+    version: '1.0.0',
+    parameters: { source: 'manual_test', tradingMode: 'PAPER' },
+    isActive: true,
+  });
+
+  return createSignalAndProposal(
+    pool,
+    {
+      strategyId: strategy.id,
+      symbol,
+      side: input.side,
+      quantity: String(input.quantity),
+      orderType: 'MARKET',
+      reason: 'MANUAL TEST / PAPER ONLY',
+      confidence: null,
+    },
+    actor,
+  );
 }
 
 export async function cancelProposal(

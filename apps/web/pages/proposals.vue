@@ -143,10 +143,18 @@ type Proposal = {
 type ProposalList = { proposals: Proposal[] };
 
 const { apiFetch } = useApi();
+const route = useRoute();
 const message = ref('');
 const busy = ref(false);
 const selected = ref<Proposal | null>(null);
 const { data: proposals, error, refresh } = await useAsyncData<ProposalList>('proposals-page', () => apiFetch('/trade-proposals?limit=50'));
+
+watchEffect(() => {
+  const proposalId = typeof route.query.proposalId === 'string' ? route.query.proposalId : '';
+  if (!proposalId || selected.value?.id === proposalId) return;
+  const proposal = proposals.value?.proposals.find((item) => item.id === proposalId);
+  if (proposal) selected.value = proposal;
+});
 
 async function approve(id: string) {
   busy.value = true;

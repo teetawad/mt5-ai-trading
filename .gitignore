@@ -26,6 +26,7 @@ coverage.xml
 # Logs
 *.log
 logs/
+.trade-runtime/
 
 # OS
 .DS_Store

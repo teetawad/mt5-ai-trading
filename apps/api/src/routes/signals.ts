@@ -3,7 +3,13 @@ import { requireAuth, requireOwner } from '../auth/middleware';
 import { getPool } from '../db/client';
 import { findSignalById, listSignals } from '../db/repositories/signals';
 import { SignalStatus } from '../db/types';
-import { createSignalAndProposal, NotFoundError, ValidationError } from '../services/trade-proposal-service';
+import {
+  createManualTestSignalAndProposal,
+  createSignalAndProposal,
+  manualTestSignalOptions,
+  NotFoundError,
+  ValidationError,
+} from '../services/trade-proposal-service';
 
 export const signalsRouter = Router();
 
@@ -50,6 +56,31 @@ signalsRouter.get('/', async (req: Request, res: Response) => {
     ...page,
   });
   res.json({ signals, limit: page.limit, offset: page.offset });
+});
+
+signalsRouter.get('/manual-test/options', async (req: Request, res: Response) => {
+  res.json(await manualTestSignalOptions(requestId(req)));
+});
+
+signalsRouter.post('/manual-test', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const result = await createManualTestSignalAndProposal(getPool(), req.body, {
+      actorId: req.user!.sub,
+      actorEmail: req.user!.email,
+      requestId: requestId(req),
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      res.status(422).json({ error: 'VALIDATION_ERROR', message: err.message });
+      return;
+    }
+    if (err instanceof NotFoundError) {
+      res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+      return;
+    }
+    throw err;
+  }
 });
 
 signalsRouter.get('/:id', async (req: Request, res: Response) => {
