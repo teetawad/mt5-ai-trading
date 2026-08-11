@@ -215,17 +215,17 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 11 — Dashboard
 
-- [ ] Dashboard page (portfolio summary, kill switch status)
-- [ ] Trade Proposals page (list + detail + approve/reject)
-- [ ] Orders page
-- [ ] Positions page
-- [ ] Portfolio page (equity, cash, P&L)
-- [ ] Risk page (rules, current status)
-- [ ] Strategy Signals page
-- [ ] Audit Log page
-- [ ] Settings page (kill switch toggle, risk parameters)
-- [ ] PAPER TRADING banner on all screens
-- [ ] Approval flow (calls secure API, no parameter injection)
+- [x] Dashboard page (portfolio summary, kill switch status)
+- [x] Trade Proposals page (list + detail + approve/reject)
+- [x] Orders page
+- [x] Positions page
+- [x] Portfolio page (equity, cash, P&L)
+- [x] Risk page (rules, current status)
+- [x] Strategy Signals page
+- [x] Audit Log page
+- [x] Settings page (kill switch toggle, risk parameters)
+- [x] PAPER TRADING banner on all screens
+- [x] Approval flow (calls secure API, no parameter injection)
 - [ ] Owner review
 
 ---

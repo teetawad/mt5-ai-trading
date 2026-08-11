@@ -10,6 +10,11 @@ import { riskRouter } from './routes/risk';
 import { signalsRouter } from './routes/signals';
 import { tradeProposalsRouter } from './routes/trade-proposals';
 import { executionsRouter } from './routes/executions';
+import { ordersRouter } from './routes/orders';
+import { positionsRouter } from './routes/positions';
+import { portfolioRouter } from './routes/portfolio';
+import { auditLogsRouter } from './routes/audit-logs';
+import { settingsRouter } from './routes/settings';
 
 export function createApp() {
   const app = express();
@@ -27,9 +32,14 @@ export function createApp() {
   app.use('/auth', authRouter);
   app.use('/market-data', marketDataRouter);
   app.use('/risk', riskRouter);
+  app.use('/settings', settingsRouter);
   app.use('/signals', signalsRouter);
   app.use('/trade-proposals', tradeProposalsRouter);
   app.use('/executions', executionsRouter);
+  app.use('/orders', ordersRouter);
+  app.use('/positions', positionsRouter);
+  app.use('/portfolio', portfolioRouter);
+  app.use('/audit-logs', auditLogsRouter);
 
   return app;
 }

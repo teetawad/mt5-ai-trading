@@ -36,6 +36,20 @@ export async function findSnapshotById(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export async function listSnapshots(
+  db: Pool | PoolClient,
+  limit = 20,
+  offset = 0,
+): Promise<PortfolioSnapshot[]> {
+  const { rows } = await db.query(
+    `SELECT * FROM portfolio_snapshots
+     ORDER BY created_at DESC
+     LIMIT $1 OFFSET $2`,
+    [limit, offset],
+  );
+  return rows.map(mapRow);
+}
+
 export async function createSnapshot(
   db: Pool | PoolClient,
   data: {

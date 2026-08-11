@@ -69,6 +69,58 @@ export async function findAuditLogsByEntity(
   return rows.map(mapRow);
 }
 
+export async function listAuditLogs(
+  db: Pool | PoolClient,
+  filters: {
+    eventType?: string;
+    entityId?: string;
+    actorId?: string;
+    from?: Date;
+    to?: Date;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<AuditLog[]> {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters.eventType) {
+    values.push(filters.eventType);
+    clauses.push(`event_type = $${values.length}`);
+  }
+  if (filters.entityId) {
+    values.push(filters.entityId);
+    clauses.push(`entity_id = $${values.length}`);
+  }
+  if (filters.actorId) {
+    values.push(filters.actorId);
+    clauses.push(`actor_id = $${values.length}`);
+  }
+  if (filters.from) {
+    values.push(filters.from);
+    clauses.push(`created_at >= $${values.length}`);
+  }
+  if (filters.to) {
+    values.push(filters.to);
+    clauses.push(`created_at <= $${values.length}`);
+  }
+
+  values.push(filters.limit ?? 20);
+  const limitParam = values.length;
+  values.push(filters.offset ?? 0);
+  const offsetParam = values.length;
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const { rows } = await db.query(
+    `SELECT * FROM audit_logs
+     ${where}
+     ORDER BY created_at DESC
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    values,
+  );
+  return rows.map(mapRow);
+}
+
 export async function findAuditLogsByActor(
   db: Pool | PoolClient,
   actorId: string,
