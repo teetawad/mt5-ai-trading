@@ -1,13 +1,18 @@
 import os
+from typing import Protocol, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from broker.adapter import OrderNotFoundError
-from broker.paper_broker import PaperBrokerAdapter
 from broker.registry import get_broker
 from broker.types import OrderRequest, OrderResult, PaperPortfolio
 
 router = APIRouter(prefix="/broker", tags=["broker"])
+
+
+class PaperPortfolioBroker(Protocol):
+    def get_paper_portfolio(self) -> PaperPortfolio:
+        ...
 
 
 def _verify_internal_token(x_internal_token: str | None = Header(default=None)) -> None:
@@ -58,8 +63,6 @@ async def paper_portfolio(
     _: None = Depends(_verify_internal_token),
 ) -> PaperPortfolio:
     broker = get_broker()
-    if not isinstance(broker, PaperBrokerAdapter):
-        raise HTTPException(
-            status_code=501, detail="Paper portfolio not available for this broker type"
-        )
-    return broker.get_paper_portfolio()
+    if not hasattr(broker, "get_paper_portfolio"):
+        raise HTTPException(status_code=501, detail="Paper portfolio not available for this broker")
+    return cast(PaperPortfolioBroker, broker).get_paper_portfolio()

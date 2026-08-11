@@ -297,6 +297,26 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 16 — Alpaca Paper Trading
+
+- [x] AlpacaPaperBrokerAdapter
+- [x] Alpaca paper trading endpoints only
+- [x] Local PaperBrokerAdapter preserved for tests/fallback
+- [x] Account synchronization
+- [x] Positions synchronization
+- [x] Orders synchronization
+- [x] Submit paper orders
+- [x] Cancel paper orders
+- [x] Broker state mapping
+- [x] `client_order_id` idempotency
+- [x] Reconciliation and retry handling
+- [x] Credentials only from environment variables
+- [x] Mocked Alpaca response tests
+- [x] Live trading endpoint guard
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

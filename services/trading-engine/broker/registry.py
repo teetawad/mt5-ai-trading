@@ -1,3 +1,4 @@
+import os
 
 from broker.adapter import BrokerAdapter
 
@@ -10,6 +11,13 @@ def init_broker(broker: BrokerAdapter | None = None) -> None:
     if broker is not None:
         _broker = broker
         return
+    mode = os.environ.get("BROKER_PROVIDER", "local_paper").lower()
+    if mode == "alpaca_paper":
+        from broker.alpaca_paper import AlpacaPaperBrokerAdapter
+
+        _broker = AlpacaPaperBrokerAdapter.from_env()
+        return
+
     from decimal import Decimal
 
     from broker.paper_broker import PaperBrokerAdapter
