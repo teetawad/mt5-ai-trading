@@ -29,6 +29,38 @@ export interface MarketSnapshotDTO {
   is_stale: boolean;
 }
 
+export interface MarketBarDTO {
+  symbol: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: number;
+  timestamp: string;
+  trade_count?: number | null;
+  vwap?: string | null;
+}
+
+export interface MarketQuoteDTO {
+  symbol: string;
+  bid: string;
+  ask: string;
+  bid_size: number;
+  ask_size: number;
+  timestamp: string;
+  is_stale: boolean;
+}
+
+export interface MarketTradeDTO {
+  symbol: string;
+  price: string;
+  size: number;
+  timestamp: string;
+  exchange?: string | null;
+  trade_id?: number | string | null;
+  is_stale: boolean;
+}
+
 function getBaseUrl(): string {
   const url = process.env.TRADING_ENGINE_URL;
   if (!url) throw new TradingEngineError('TRADING_ENGINE_URL is not configured');
@@ -94,6 +126,56 @@ export async function getTrackedSymbols(requestId?: string): Promise<string[]> {
     throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
   }
   return res.json() as Promise<string[]>;
+}
+
+export async function getHistoricalBars(
+  symbol: string,
+  params: {
+    timeframe: string;
+    start: string;
+    end?: string;
+    limit?: number;
+  },
+  requestId?: string,
+): Promise<MarketBarDTO[]> {
+  const query = new URLSearchParams({
+    timeframe: params.timeframe,
+    start: params.start,
+    limit: String(params.limit ?? 100),
+  });
+  if (params.end) query.set('end', params.end);
+  const res = await engineFetch(
+    `/market-data/bars/${encodeURIComponent(symbol)}?${query.toString()}`,
+    requestId,
+  );
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<MarketBarDTO[]>;
+}
+
+export async function getLatestQuote(
+  symbol: string,
+  requestId?: string,
+): Promise<MarketQuoteDTO | null> {
+  const res = await engineFetch(`/market-data/quote/${encodeURIComponent(symbol)}`, requestId);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<MarketQuoteDTO>;
+}
+
+export async function getLatestTrade(
+  symbol: string,
+  requestId?: string,
+): Promise<MarketTradeDTO | null> {
+  const res = await engineFetch(`/market-data/trade/${encodeURIComponent(symbol)}`, requestId);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<MarketTradeDTO>;
 }
 
 // ── Broker ────────────────────────────────────────────────────────────────────

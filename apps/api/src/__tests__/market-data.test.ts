@@ -14,12 +14,18 @@ vi.mock('../services/trading-engine-client', () => ({
   },
   getMarketSnapshot: vi.fn(),
   getAllMarketSnapshots: vi.fn(),
+  getHistoricalBars: vi.fn(),
+  getLatestQuote: vi.fn(),
+  getLatestTrade: vi.fn(),
   getTrackedSymbols: vi.fn(),
 }));
 
 import {
   getMarketSnapshot,
   getAllMarketSnapshots,
+  getHistoricalBars,
+  getLatestQuote,
+  getLatestTrade,
   getTrackedSymbols,
   TradingEngineError,
 } from '../services/trading-engine-client';
@@ -152,5 +158,113 @@ describe('GET /market-data/symbols', () => {
       .set('Authorization', `Bearer ${makeToken()}`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual(['AAPL', 'MSFT', 'GOOGL']);
+  });
+});
+
+describe('GET /market-data/bars/:symbol', () => {
+  it('returns historical bars', async () => {
+    vi.mocked(getHistoricalBars).mockResolvedValue([
+      {
+        symbol: 'AAPL',
+        open: '190.00000000',
+        high: '192.00000000',
+        low: '189.00000000',
+        close: '191.00000000',
+        volume: 1000,
+        timestamp: '2026-08-10T13:30:00Z',
+        trade_count: 42,
+        vwap: '190.75000000',
+      },
+    ]);
+    const app = createApp();
+    const res = await request(app)
+      .get('/market-data/bars/aapl?timeframe=1Min&start=2026-08-10T13:30:00Z&limit=1')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body[0].symbol).toBe('AAPL');
+    expect(res.body[0].tradeCount).toBe(42);
+    expect(res.body[0].trade_count).toBeUndefined();
+    expect(vi.mocked(getHistoricalBars)).toHaveBeenCalledWith(
+      'AAPL',
+      {
+        timeframe: '1Min',
+        start: '2026-08-10T13:30:00Z',
+        end: undefined,
+        limit: 1,
+      },
+      undefined,
+    );
+  });
+
+  it('validates required bar query fields', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .get('/market-data/bars/AAPL?timeframe=1Min')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(422);
+  });
+
+  it('propagates market data rate limits', async () => {
+    vi.mocked(getHistoricalBars).mockRejectedValue(new TradingEngineError('rate limited', 429));
+    const app = createApp();
+    const res = await request(app)
+      .get('/market-data/bars/AAPL?timeframe=1Min&start=2026-08-10T13:30:00Z')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(429);
+    expect(res.body.error).toBe('RATE_LIMITED');
+  });
+});
+
+describe('GET /market-data/quote/:symbol and /trade/:symbol', () => {
+  it('returns latest quote', async () => {
+    vi.mocked(getLatestQuote).mockResolvedValue({
+      symbol: 'AAPL',
+      bid: '191.20000000',
+      ask: '191.30000000',
+      bid_size: 100,
+      ask_size: 200,
+      timestamp: '2026-08-10T13:30:01Z',
+      is_stale: false,
+    });
+    const app = createApp();
+    const res = await request(app)
+      .get('/market-data/quote/AAPL')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.bidSize).toBe(100);
+    expect(res.body.bid_size).toBeUndefined();
+    expect(res.body.isStale).toBe(false);
+  });
+
+  it('returns latest trade', async () => {
+    vi.mocked(getLatestTrade).mockResolvedValue({
+      symbol: 'AAPL',
+      price: '191.25000000',
+      size: 50,
+      timestamp: '2026-08-10T13:30:02Z',
+      exchange: 'V',
+      trade_id: 123,
+      is_stale: false,
+    });
+    const app = createApp();
+    const res = await request(app)
+      .get('/market-data/trade/AAPL')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.tradeId).toBe(123);
+    expect(res.body.trade_id).toBeUndefined();
+  });
+
+  it('returns 404 for unknown latest quote symbol', async () => {
+    vi.mocked(getLatestQuote).mockResolvedValue(null);
+    const app = createApp();
+    const res = await request(app)
+      .get('/market-data/quote/ZZZZZ')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(404);
   });
 });

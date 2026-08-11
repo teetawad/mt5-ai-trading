@@ -249,6 +249,37 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 13 — Paper MVP Audit
+
+- [x] Architecture audit
+- [x] Security audit
+- [x] Phase 9 approval audit
+- [x] Phase 10 execution audit
+- [x] Risk control audit
+- [x] Concurrency and idempotency audit
+- [x] Accounting and recovery audit
+- [x] Execution-time paper safety gate
+- [x] Complete test suite run
+- [ ] Owner review
+
+---
+
+## Phase 14 — US Stocks Market Data
+
+- [x] Alpaca Market Data provider
+- [x] Historical bars
+- [x] Latest quotes
+- [x] Latest trades
+- [x] Real-time WebSocket support
+- [x] Timestamp parsing and freshness checks
+- [x] Reconnect and error handling
+- [x] Rate-limit handling
+- [x] Synthetic and CSV providers preserved
+- [x] Tests
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

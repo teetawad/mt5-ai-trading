@@ -31,6 +31,10 @@ def init_provider(provider: MarketDataProvider | None = None) -> None:
             data_dir=data_dir,
             staleness_threshold_seconds=staleness,
         )
+    elif mode == "alpaca":
+        from .alpaca import AlpacaMarketDataProvider
+
+        _provider = AlpacaMarketDataProvider.from_env()
     else:
         staleness = int(os.environ.get("MARKET_DATA_STALENESS_SECONDS", "60"))
         _provider = SyntheticMarketDataProvider(

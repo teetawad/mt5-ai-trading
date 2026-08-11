@@ -3,17 +3,21 @@
 All tests run without a database or network connection.
 """
 
+import asyncio
 import csv
 import tempfile
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 
+from market_data.alpaca import AlpacaMarketDataProvider, AlpacaMarketDataStream
 from market_data.csv_provider import CSVMarketDataProvider
-from market_data.provider import SymbolNotFoundError
+from market_data.provider import MarketDataProvider, MarketDataRateLimitError, SymbolNotFoundError
 from market_data.registry import get_provider, init_provider
-from market_data.snapshot import MarketSnapshot
+from market_data.snapshot import MarketBar, MarketQuote, MarketSnapshot, MarketTrade
 from market_data.synthetic import SyntheticMarketDataProvider
 
 # ── SyntheticMarketDataProvider ────────────────────────────────────────────────
@@ -171,6 +175,203 @@ class TestCSVProvider:
             tmp.cleanup()
 
 
+# AlpacaMarketDataProvider
+
+def _mock_alpaca(response: httpx.Response) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(lambda _request: response))
+
+
+class TestAlpacaProvider:
+    def test_latest_snapshot_maps_alpaca_payload_and_freshness(self):
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            symbols=["AAPL"],
+            client=_mock_alpaca(httpx.Response(200, json={
+                "snapshot": {
+                    "latestTrade": {"t": now, "p": 191.25, "s": 10},
+                    "latestQuote": {"t": now, "bp": 191.2, "ap": 191.3, "bs": 1, "as": 2},
+                    "minuteBar": {"t": now, "c": 191.25, "v": 12345},
+                }
+            })),
+        )
+
+        snapshot = provider.get_snapshot("aapl")
+
+        assert snapshot.symbol == "AAPL"
+        assert snapshot.price == Decimal("191.25")
+        assert snapshot.bid == Decimal("191.2")
+        assert snapshot.ask == Decimal("191.3")
+        assert snapshot.volume == 12345
+        assert snapshot.is_stale is False
+
+    def test_latest_snapshot_accepts_direct_alpaca_payload(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            symbols=["AAPL"],
+            client=_mock_alpaca(httpx.Response(200, json={
+                "symbol": "AAPL",
+                "latestTrade": {"t": "2026-08-10T13:30:02Z", "p": 191.25, "s": 10},
+                "latestQuote": {
+                    "t": "2026-08-10T13:30:01Z",
+                    "bp": 191.2,
+                    "ap": 191.3,
+                    "bs": 1,
+                    "as": 2,
+                },
+                "minuteBar": {"t": "2026-08-10T13:30:00Z", "c": 191.25, "v": 12345},
+            })),
+        )
+
+        assert provider.get_snapshot("AAPL").price == Decimal("191.25")
+
+    def test_historical_bars_maps_alpaca_payload(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(200, json={
+                "bars": [{
+                    "t": "2026-08-10T13:30:00Z",
+                    "o": 190.0,
+                    "h": 192.0,
+                    "l": 189.5,
+                    "c": 191.0,
+                    "v": 1000,
+                    "n": 42,
+                    "vw": 190.75,
+                }]
+            })),
+        )
+
+        bars = provider.get_historical_bars(
+            "AAPL",
+            timeframe="1Min",
+            start="2026-08-10T13:30:00Z",
+            limit=1,
+        )
+
+        assert len(bars) == 1
+        assert bars[0].symbol == "AAPL"
+        assert bars[0].close == Decimal("191.0")
+        assert bars[0].trade_count == 42
+        assert bars[0].vwap == Decimal("190.75")
+
+    def test_latest_quote_and_trade_map_alpaca_payloads(self):
+        responses = iter([
+            httpx.Response(200, json={
+                "quote": {
+                    "t": "2026-08-10T13:30:01Z",
+                    "bp": 191.2,
+                    "ap": 191.3,
+                    "bs": 100,
+                    "as": 200,
+                }
+            }),
+            httpx.Response(200, json={
+                "trade": {
+                    "t": "2026-08-10T13:30:02Z",
+                    "p": 191.25,
+                    "s": 50,
+                    "x": "V",
+                    "i": 123,
+                }
+            }),
+        ])
+        client = httpx.Client(transport=httpx.MockTransport(lambda _request: next(responses)))
+        provider = AlpacaMarketDataProvider(key_id="key", secret_key="secret", client=client)
+
+        quote = provider.get_latest_quote("AAPL")
+        trade = provider.get_latest_trade("AAPL")
+
+        assert quote.bid == Decimal("191.2")
+        assert quote.ask_size == 200
+        assert trade.price == Decimal("191.25")
+        assert trade.trade_id == 123
+
+    def test_rate_limit_error_preserves_retry_after(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(429, headers={"Retry-After": "2"})),
+        )
+
+        with pytest.raises(MarketDataRateLimitError) as exc:
+            provider.get_latest_trade("AAPL")
+
+        assert exc.value.retry_after_seconds == 2
+
+    def test_from_env_registers_alpaca_provider(self, monkeypatch):
+        import market_data.registry as reg
+        monkeypatch.setattr(reg, "_provider", None)
+        monkeypatch.setenv("MARKET_DATA_PROVIDER", "alpaca")
+        monkeypatch.setenv("ALPACA_API_KEY_ID", "key")
+        monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret")
+        monkeypatch.setenv("MARKET_DATA_SYMBOLS", "AAPL,MSFT")
+
+        init_provider()
+
+        assert isinstance(get_provider(), AlpacaMarketDataProvider)
+        assert get_provider().tracked_symbols() == ["AAPL", "MSFT"]
+
+    def test_provider_creates_stream_from_same_credentials(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            feed="iex",
+            client=_mock_alpaca(httpx.Response(200, json={})),
+        )
+
+        stream = provider.create_stream()
+
+        assert stream.url == "wss://stream.data.alpaca.markets/v2/iex"
+
+
+class TestAlpacaMarketDataStream:
+    def test_stream_message_handler_updates_latest_quote_trade_and_bar(self):
+        stream = AlpacaMarketDataStream(key_id="key", secret_key="secret")
+
+        stream._handle_message("""
+        [
+          {"T":"q","S":"AAPL","bp":191.2,"ap":191.3,"bs":100,"as":200,"t":"2026-08-10T13:30:01Z"},
+          {"T":"t","S":"AAPL","p":191.25,"s":50,"x":"V","i":123,"t":"2026-08-10T13:30:02Z"},
+          {"T":"b","S":"AAPL","o":190,"h":192,"l":189,"c":191,"v":1000,"n":42,"vw":190.75,"t":"2026-08-10T13:30:00Z"}
+        ]
+        """)
+
+        assert stream.latest_quote("AAPL").bid == Decimal("191.2")
+        assert stream.latest_trade("AAPL").price == Decimal("191.25")
+        assert stream.latest_bar("AAPL").close == Decimal("191")
+
+    @pytest.mark.asyncio
+    async def test_stream_records_errors_and_reconnects_until_stopped(self):
+        attempts = 0
+
+        def failing_factory(_url: str):
+            nonlocal attempts
+            attempts += 1
+            raise OSError("temporary stream failure")
+
+        stream = AlpacaMarketDataStream(
+            key_id="key",
+            secret_key="secret",
+            reconnect_initial_seconds=0.01,
+            reconnect_max_seconds=0.01,
+            websocket_factory=failing_factory,
+        )
+        stop_event = asyncio.Event()
+
+        task = asyncio.create_task(stream.run_forever(symbols=["AAPL"], stop_event=stop_event))
+        await asyncio.sleep(0.03)
+        stop_event.set()
+        await task
+
+        assert attempts >= 1
+        assert stream.connected is False
+        assert stream.last_error == "temporary stream failure"
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 class TestRegistry:
@@ -274,3 +475,94 @@ class TestMarketDataEndpoints:
             headers={"X-Internal-Token": "secret-token"},
         )
         assert res.status_code == 200
+
+    def test_historical_bars_endpoint(self):
+        class BarsProvider(MarketDataProvider):
+            def get_snapshot(self, symbol: str) -> MarketSnapshot:
+                raise SymbolNotFoundError(symbol)
+
+            def get_all_snapshots(self) -> list[MarketSnapshot]:
+                return []
+
+            def tracked_symbols(self) -> list[str]:
+                return ["AAPL"]
+
+            def get_historical_bars(
+                self,
+                symbol: str,
+                *,
+                timeframe: str,
+                start: str,
+                end: str | None = None,
+                limit: int = 100,
+            ) -> list[MarketBar]:
+                assert symbol == "AAPL"
+                assert timeframe == "1Min"
+                assert start == "2026-08-10T13:30:00Z"
+                assert end is None
+                assert limit == 1
+                return [
+                    MarketBar(
+                        symbol=symbol,
+                        open=Decimal("190"),
+                        high=Decimal("192"),
+                        low=Decimal("189"),
+                        close=Decimal("191"),
+                        volume=1000,
+                        timestamp=datetime.now(UTC),
+                    )
+                ]
+
+        init_provider(BarsProvider())
+        from fastapi.testclient import TestClient
+
+        from main import app
+        client = TestClient(app)
+        res = client.get(
+            "/market-data/bars/AAPL?timeframe=1Min&start=2026-08-10T13:30:00Z&limit=1"
+        )
+        assert res.status_code == 200
+        assert res.json()[0]["close"] == "191.00000000"
+
+    def test_latest_quote_and_trade_endpoints(self):
+        class LatestProvider(MarketDataProvider):
+            def get_snapshot(self, symbol: str) -> MarketSnapshot:
+                raise SymbolNotFoundError(symbol)
+
+            def get_all_snapshots(self) -> list[MarketSnapshot]:
+                return []
+
+            def tracked_symbols(self) -> list[str]:
+                return ["AAPL"]
+
+            def get_latest_quote(self, symbol: str) -> MarketQuote:
+                return MarketQuote(
+                    symbol=symbol,
+                    bid=Decimal("191.2"),
+                    ask=Decimal("191.3"),
+                    bid_size=100,
+                    ask_size=200,
+                    timestamp=datetime.now(UTC),
+                )
+
+            def get_latest_trade(self, symbol: str) -> MarketTrade:
+                return MarketTrade(
+                    symbol=symbol,
+                    price=Decimal("191.25"),
+                    size=50,
+                    timestamp=datetime.now(UTC),
+                )
+
+        init_provider(LatestProvider())
+        from fastapi.testclient import TestClient
+
+        from main import app
+        client = TestClient(app)
+
+        quote = client.get("/market-data/quote/AAPL")
+        trade = client.get("/market-data/trade/AAPL")
+
+        assert quote.status_code == 200
+        assert quote.json()["bid"] == "191.20000000"
+        assert trade.status_code == 200
+        assert trade.json()["price"] == "191.25000000"

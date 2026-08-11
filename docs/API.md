@@ -97,6 +97,15 @@ GET /market-data/snapshot/:symbol   — current snapshot for a symbol
 GET /market-data/snapshots          — all tracked symbols
 ```
 
+Additional Phase 14 market data routes:
+
+```
+GET /market-data/symbols            - tracked symbol list
+GET /market-data/bars/:symbol       - historical bars
+GET /market-data/quote/:symbol      - latest quote
+GET /market-data/trade/:symbol      - latest trade
+```
+
 ### GET /market-data/snapshot/:symbol
 
 Response 200:
@@ -114,6 +123,64 @@ Response 200:
 
 Response 404: Symbol not found.
 Response 200 with `"isStale": true`: Data older than `market_data_staleness_seconds`.
+
+### GET /market-data/bars/:symbol
+
+Query params:
+- `timeframe`: Alpaca timeframe such as `1Min`, `5Min`, `1Hour`, or `1Day`
+- `start`: ISO 8601 start timestamp
+- `end`: optional ISO 8601 end timestamp
+- `limit`: optional, 1 to 10000, default 100
+
+Response 200:
+```json
+[
+  {
+    "symbol": "AAPL",
+    "open": "190.00000000",
+    "high": "192.00000000",
+    "low": "189.00000000",
+    "close": "191.00000000",
+    "volume": 1000,
+    "timestamp": "2026-08-10T13:30:00Z",
+    "tradeCount": 42,
+    "vwap": "190.75000000"
+  }
+]
+```
+
+### GET /market-data/quote/:symbol
+
+Response 200:
+```json
+{
+  "symbol": "AAPL",
+  "bid": "191.20000000",
+  "ask": "191.30000000",
+  "bidSize": 100,
+  "askSize": 200,
+  "timestamp": "2026-08-10T13:30:01Z",
+  "isStale": false
+}
+```
+
+### GET /market-data/trade/:symbol
+
+Response 200:
+```json
+{
+  "symbol": "AAPL",
+  "price": "191.25000000",
+  "size": 50,
+  "timestamp": "2026-08-10T13:30:02Z",
+  "exchange": "V",
+  "tradeId": 123,
+  "isStale": false
+}
+```
+
+Alpaca-backed requests may return `429 RATE_LIMITED`. Providers that do not
+support historical bars, quotes, or trades return `501 NOT_SUPPORTED`.
 
 ---
 

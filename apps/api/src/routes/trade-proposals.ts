@@ -8,6 +8,7 @@ import {
 } from '../db/repositories/trade-proposals';
 import { ProposalStatus } from '../db/types';
 import {
+  ExecutionBlockedError,
   executeApprovedProposal,
   NotFoundError as ExecutionNotFoundError,
   ProposalExpiredError as ExecutionProposalExpiredError,
@@ -294,6 +295,14 @@ tradeProposalsRouter.post('/:id/execute', requireOwner, async (req: Request, res
         error: 'INVALID_STATE',
         message: err.message,
         currentStatus: err.from,
+      });
+      return;
+    }
+    if (err instanceof ExecutionBlockedError) {
+      res.status(422).json({
+        error: 'EXECUTION_BLOCKED',
+        message: err.message,
+        failedRule: err.failedRule,
       });
       return;
     }

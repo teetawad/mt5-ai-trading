@@ -14,6 +14,7 @@ import {
   findOpenPositions,
   upsertPosition,
 } from '../db/repositories/positions';
+import { getSettingValue } from '../db/repositories/system-settings';
 import {
   findProposalByIdForUpdate,
   updateProposalStatus,
@@ -38,6 +39,16 @@ export class ProposalExpiredError extends Error {
   constructor(public readonly proposal: TradeProposal) {
     super('Trade proposal expired');
     this.name = 'ProposalExpiredError';
+  }
+}
+
+export class ExecutionBlockedError extends Error {
+  constructor(
+    public readonly reason: string,
+    public readonly failedRule: 'KILL_SWITCH' | 'TRADING_MODE',
+  ) {
+    super(reason);
+    this.name = 'ExecutionBlockedError';
   }
 }
 
@@ -255,6 +266,21 @@ async function writePortfolioSnapshot(
   });
 }
 
+async function assertPaperExecutionAllowed(client: PoolClient): Promise<void> {
+  const tradingMode = await getSettingValue<string>(client, 'trading_mode') ?? 'PAPER';
+  if (tradingMode !== 'PAPER') {
+    throw new ExecutionBlockedError(`Trading mode is not PAPER: ${tradingMode}`, 'TRADING_MODE');
+  }
+
+  const killSwitchEnabled = await getSettingValue<boolean>(
+    client,
+    'trading_kill_switch_enabled',
+  ) ?? true;
+  if (!killSwitchEnabled) {
+    throw new ExecutionBlockedError('Trading kill switch is disabled', 'KILL_SWITCH');
+  }
+}
+
 export async function executeApprovedProposal(
   pool: Pool,
   proposalId: string,
@@ -284,6 +310,8 @@ export async function executeApprovedProposal(
     if (proposal.status !== 'APPROVED' && proposal.status !== 'EXECUTION_ERROR') {
       throw new InvalidStateTransitionError(proposal.status, 'SUBMITTING');
     }
+
+    await assertPaperExecutionAllowed(client);
 
     const execution = existing ?? await createExecution(client, {
       proposalId: proposal.id,

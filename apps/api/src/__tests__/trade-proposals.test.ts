@@ -616,6 +616,53 @@ describe('Phase 8 signal to proposal workflow', () => {
     expect(res.body.fills).toEqual([]);
   });
 
+  it.skipIf(SKIP)('POST execute rechecks kill switch after approval before broker submission', async () => {
+    mockEngineSequence('PASS', 'PASS');
+
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '18.00000000',
+        reason: 'phase 13 execution kill switch test',
+      });
+    const approved = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase-13-approve-kill-switch' });
+
+    await pool.query(
+      "UPDATE system_settings SET value = 'false'::jsonb WHERE key = 'trading_kill_switch_enabled'",
+    );
+    try {
+      const res = await request(app)
+        .post(`/trade-proposals/${approved.body.proposal.id}/execute`)
+        .set('Authorization', `Bearer ${token()}`)
+        .send({ requestId: 'phase-13-execute-kill-switch' });
+
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe('EXECUTION_BLOCKED');
+      expect(res.body.failedRule).toBe('KILL_SWITCH');
+      expect(vi.mocked(submitOrder)).not.toHaveBeenCalled();
+
+      const proposalRow = await pool.query('SELECT status FROM trade_proposals WHERE id = $1', [
+        approved.body.proposal.id,
+      ]);
+      const executionRows = await pool.query('SELECT id FROM executions WHERE proposal_id = $1', [
+        approved.body.proposal.id,
+      ]);
+      expect(proposalRow.rows[0].status).toBe('APPROVED');
+      expect(executionRows.rowCount).toBe(0);
+    } finally {
+      await pool.query(
+        "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'trading_kill_switch_enabled'",
+      );
+    }
+  });
+
   it.skipIf(SKIP)('execution DB errors roll back proposal state and execution rows', async () => {
     mockEngineSequence('PASS', 'PASS', 'PASS', 'PASS');
     vi.mocked(submitOrder)
