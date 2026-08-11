@@ -12,10 +12,10 @@
       {{ message }}
     </div>
     <div
-      v-if="error"
+      v-if="pageError"
       class="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100"
     >
-      {{ error.message }}
+      {{ pageError }}
     </div>
 
     <section class="rounded border border-slate-800 bg-slate-900">
@@ -34,7 +34,7 @@
           </thead>
           <tbody>
             <tr
-              v-for="proposal in proposals?.proposals ?? []"
+              v-for="proposal in safeProposals"
               :key="proposal.id"
               class="border-t border-slate-800 hover:bg-slate-800/50"
               @click="selected = proposal"
@@ -50,21 +50,21 @@
                   <button
                     class="rounded border border-emerald-500/50 px-3 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40"
                     :disabled="proposal.status !== 'PENDING_APPROVAL' || busy"
-                    @click="approve(proposal.id)"
+                    @click.stop="approve(proposal.id)"
                   >
                     Approve
                   </button>
                   <button
                     class="rounded border border-rose-500/50 px-3 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/10 disabled:opacity-40"
                     :disabled="proposal.status !== 'PENDING_APPROVAL' || busy"
-                    @click="reject(proposal.id)"
+                    @click.stop="reject(proposal.id)"
                   >
                     Reject
                   </button>
                 </div>
               </td>
             </tr>
-            <tr v-if="!(proposals?.proposals?.length)">
+            <tr v-if="!safeProposals.length">
               <td
                 colspan="7"
                 class="px-4 py-8 text-center text-slate-500"
@@ -99,7 +99,7 @@
         </div>
         <div class="md:col-span-2">
           <dt class="text-xs uppercase text-slate-500">AI Reasons</dt>
-          <dd class="mt-1 font-medium">{{ aiDecision(selected)?.reasons?.join(' ') ?? '-' }}</dd>
+          <dd class="mt-1 font-medium">{{ aiReasons(selected) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Side</dt>
@@ -206,20 +206,20 @@ type Proposal = {
   status: string;
 };
 type AiDecision = {
-  decision: string;
-  confidence: string;
-  reasons: string[];
+  decision?: unknown;
+  confidence?: unknown;
+  reasons?: unknown;
 };
 type Phase22Risk = {
-  entry: string;
-  stopLoss: string;
-  takeProfit: string;
-  riskReward: string;
-  maxLoss: string;
-  spreadPct: string;
-  estimatedSlippagePct: string;
-  dailyLossUsed: string;
-  result: string;
+  entry?: unknown;
+  stopLoss?: unknown;
+  takeProfit?: unknown;
+  riskReward?: unknown;
+  maxLoss?: unknown;
+  spreadPct?: unknown;
+  estimatedSlippagePct?: unknown;
+  dailyLossUsed?: unknown;
+  result?: unknown;
   conflictingPendingOrders?: unknown[];
   cooldown?: {
     remainingSeconds?: number;
@@ -231,24 +231,51 @@ type ProposalList = { proposals: Proposal[] };
 const { apiFetch } = useApi();
 const route = useRoute();
 const message = ref('');
+const actionError = ref('');
 const busy = ref(false);
 const selected = ref<Proposal | null>(null);
 const { data: proposals, error, refresh } = await useAsyncData<ProposalList>('proposals-page', () => apiFetch('/trade-proposals?limit=50'));
+const safeProposals = computed(() => {
+  const list = proposals.value?.proposals;
+  if (!Array.isArray(list)) return [];
+  return list.filter(isRenderableProposal);
+});
+const pageError = computed(() => {
+  if (actionError.value) return actionError.value;
+  if (error.value) return error.value.message;
+  const raw = proposals.value?.proposals;
+  if (raw !== undefined && !Array.isArray(raw)) {
+    return 'Trade proposal API returned an invalid proposals list.';
+  }
+  const invalidCount = Array.isArray(raw) ? raw.length - safeProposals.value.length : 0;
+  if (invalidCount > 0) {
+    return `${invalidCount} malformed proposal${invalidCount === 1 ? '' : 's'} could not be rendered.`;
+  }
+  return '';
+});
 
 watchEffect(() => {
   const proposalId = typeof route.query.proposalId === 'string' ? route.query.proposalId : '';
   if (!proposalId || selected.value?.id === proposalId) return;
-  const proposal = proposals.value?.proposals.find((item) => item.id === proposalId);
+  const proposal = safeProposals.value.find((item) => item.id === proposalId);
   if (proposal) selected.value = proposal;
+});
+
+watch(safeProposals, (list) => {
+  if (!selected.value) return;
+  selected.value = list.find((proposal) => proposal.id === selected.value?.id) ?? null;
 });
 
 async function approve(id: string) {
   busy.value = true;
   message.value = '';
+  actionError.value = '';
   try {
     await apiFetch(`/trade-proposals/${id}/approve`, { method: 'POST', body: { requestId: crypto.randomUUID() } });
     message.value = 'Proposal approved.';
     await refresh();
+  } catch (err) {
+    actionError.value = errorMessage(err, 'Failed to approve proposal.');
   } finally {
     busy.value = false;
   }
@@ -257,6 +284,7 @@ async function approve(id: string) {
 async function reject(id: string) {
   busy.value = true;
   message.value = '';
+  actionError.value = '';
   try {
     await apiFetch(`/trade-proposals/${id}/reject`, {
       method: 'POST',
@@ -264,21 +292,55 @@ async function reject(id: string) {
     });
     message.value = 'Proposal rejected.';
     await refresh();
+  } catch (err) {
+    actionError.value = errorMessage(err, 'Failed to reject proposal.');
   } finally {
     busy.value = false;
   }
 }
 
-function currency(value?: string): string {
-  return value === undefined ? '-' : `$${Number(value).toFixed(2)}`;
+function isRenderableProposal(value: unknown): value is Proposal {
+  if (!value || typeof value !== 'object') return false;
+  const proposal = value as Partial<Proposal>;
+  return typeof proposal.id === 'string'
+    && typeof proposal.symbol === 'string'
+    && typeof proposal.side === 'string'
+    && typeof proposal.quantity === 'string'
+    && typeof proposal.orderType === 'string'
+    && typeof proposal.referencePrice === 'string'
+    && typeof proposal.estimatedNotional === 'string'
+    && typeof proposal.createdAt === 'string'
+    && typeof proposal.expiresAt === 'string'
+    && typeof proposal.status === 'string';
 }
 
-function percent(value?: string): string {
-  return value === undefined ? '-' : `${Number(value).toFixed(2)}%`;
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error ? err.message : fallback;
 }
 
-function ratio(value?: string): string {
-  return value === undefined ? '-' : `${Number(value).toFixed(2)}:1`;
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function currency(value?: unknown): string {
+  const text = stringValue(value);
+  if (!text) return '-';
+  const number = Number(text);
+  return Number.isFinite(number) ? `$${number.toFixed(2)}` : '-';
+}
+
+function percent(value?: unknown): string {
+  const text = stringValue(value);
+  if (!text) return '-';
+  const number = Number(text);
+  return Number.isFinite(number) ? `${number.toFixed(2)}%` : '-';
+}
+
+function ratio(value?: unknown): string {
+  const text = stringValue(value);
+  if (!text) return '-';
+  const number = Number(text);
+  return Number.isFinite(number) ? `${number.toFixed(2)}:1` : '-';
 }
 
 function cooldown(value?: Phase22Risk['cooldown']): string {
@@ -287,11 +349,23 @@ function cooldown(value?: Phase22Risk['cooldown']): string {
 }
 
 function phase22(proposal: Proposal): Phase22Risk | undefined {
-  return proposal.riskSnapshot?.phase22;
+  const value = proposal.riskSnapshot?.phase22;
+  return value && typeof value === 'object' ? value : undefined;
 }
 
 function aiDecision(proposal: Proposal): AiDecision | undefined {
-  return proposal.riskSnapshot?.aiDecision;
+  const value = proposal.riskSnapshot?.aiDecision;
+  return value && typeof value === 'object' ? value : undefined;
+}
+
+function aiReasons(proposal: Proposal): string {
+  const reasons = aiDecision(proposal)?.reasons;
+  if (Array.isArray(reasons)) {
+    const text = reasons.filter((reason): reason is string => typeof reason === 'string').join(' ');
+    return text || '-';
+  }
+  if (typeof reasons === 'string' && reasons.trim()) return reasons;
+  return '-';
 }
 
 function pendingOrderStatus(value?: Phase22Risk): string {

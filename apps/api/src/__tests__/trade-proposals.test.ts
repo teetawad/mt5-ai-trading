@@ -530,6 +530,37 @@ describe('Phase 8 signal to proposal workflow', () => {
       take_profit: `phase23-tp-${BROKER_RUN_ID}`,
       stop_loss: `phase23-sl-${BROKER_RUN_ID}`,
     });
+
+    const listed = await request(app)
+      .get('/trade-proposals?limit=20')
+      .set('Authorization', `Bearer ${token()}`);
+    const listedProposal = listed.body.proposals.find(
+      (proposal: { id: string }) => proposal.id === created.body.proposal.id,
+    );
+    expect(listed.status).toBe(200);
+    expect(listedProposal).toMatchObject({
+      id: created.body.proposal.id,
+      status: 'FILLED',
+      riskSnapshot: {
+        aiDecision: {
+          decision: 'BUY',
+        },
+        phase22: {
+          orderClass: 'BRACKET',
+          stopLoss: '98.00000000',
+          takeProfit: '104.00000000',
+        },
+      },
+    });
+
+    const orderCount = await pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM orders o
+       JOIN executions e ON e.id = o.execution_id
+       WHERE e.proposal_id = $1`,
+      [created.body.proposal.id],
+    );
+    expect(orderCount.rows[0].count).toBe(1);
   });
 
   it.skipIf(SKIP)('Phase 23 take-profit bracket exit closes the position and cancels the stop-loss leg', async () => {

@@ -62,6 +62,14 @@ function approvalRequestId(req: Request): string | null {
   return typeof body.requestId === 'string' ? body.requestId : requestId(req);
 }
 
+function unexpectedError(res: Response, err: unknown): void {
+  console.error('[trade-proposals] Unexpected error:', err);
+  res.status(500).json({
+    error: 'INTERNAL_SERVER_ERROR',
+    message: 'Unexpected trade proposal error',
+  });
+}
+
 function pagination(req: Request): { limit: number; offset: number } | null {
   const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
   const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
@@ -255,7 +263,7 @@ tradeProposalsRouter.post('/:id/approve', requireOwner, async (req: Request, res
       res.status(503).json({ error: 'SERVICE_UNAVAILABLE', message: err.message });
       return;
     }
-    throw err;
+    unexpectedError(res, err);
   }
 });
 
@@ -373,6 +381,6 @@ tradeProposalsRouter.post('/:id/execute', requireOwner, async (req: Request, res
       res.status(503).json({ error: 'SERVICE_UNAVAILABLE', message: err.message });
       return;
     }
-    throw err;
+    unexpectedError(res, err);
   }
 });
