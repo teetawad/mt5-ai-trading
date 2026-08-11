@@ -90,13 +90,19 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 4 — Market Data
 
-- [ ] `MarketDataProvider` interface
-- [ ] `SyntheticMarketDataProvider` implementation
-- [ ] `CSVMarketDataProvider` implementation
-- [ ] Freshness validation (staleness threshold configurable)
-- [ ] Market snapshot schema
-- [ ] API endpoints for current market data
-- [ ] Tests
+- [x] `MarketDataProvider` abstract interface (Python ABC)
+- [x] `SyntheticMarketDataProvider` — geometric random walk, configurable volatility, deterministic seed for tests
+- [x] `CSVMarketDataProvider` — replays historical CSV rows, loops at end
+- [x] Freshness validation — `is_stale` flag computed against `MARKET_DATA_STALENESS_SECONDS`
+- [x] `MarketSnapshot` Pydantic schema (Decimal fields serialised as strings)
+- [x] Module-level registry with `MARKET_DATA_PROVIDER` env var switching
+- [x] `X-Internal-Token` validation on trading-engine endpoints
+- [x] Trading engine endpoints: `GET /market-data/snapshot/:symbol`, `/snapshots`, `/symbols`
+- [x] `TradingEngineClient` (Node) — internal HTTP client with 5s timeout
+- [x] Node API routes: `GET /market-data/snapshot/:symbol`, `/snapshots`, `/symbols` (auth-protected)
+- [x] Sample CSV data file (`data/market_data/AAPL.csv`)
+- [x] Python tests: synthetic provider, CSV provider, registry, FastAPI endpoints (26 pass)
+- [x] Node tests: all routes with mocked engine client (10 pass)
 - [ ] Owner review
 
 ---

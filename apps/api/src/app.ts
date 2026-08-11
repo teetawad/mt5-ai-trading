@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import { healthRouter } from './routes/health';
 import { authRouter } from './routes/auth';
+import { marketDataRouter } from './routes/market-data';
 
 export function createApp() {
   const app = express();
@@ -20,6 +21,7 @@ export function createApp() {
 
   app.use('/health', healthRouter);
   app.use('/auth', authRouter);
+  app.use('/market-data', marketDataRouter);
 
   return app;
 }

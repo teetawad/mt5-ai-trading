@@ -1,14 +1,28 @@
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
+from market_data.registry import init_provider
 from routers.health import router as health_router
+from routers.market_data import router as market_data_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    init_provider()
+    yield
+
 
 app = FastAPI(
     title="Trading Engine",
     description="Internal paper trading engine — PAPER MODE ONLY",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.include_router(health_router)
+app.include_router(market_data_router)
 
 
 @app.get("/")
