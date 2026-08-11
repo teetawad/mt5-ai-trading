@@ -8,10 +8,13 @@ import {
 } from '../db/repositories/trade-proposals';
 import { ProposalStatus } from '../db/types';
 import {
+  approveProposal,
   cancelProposal,
   InvalidStateTransitionError,
   NotFoundError,
   ProposalExpiredError,
+  rejectProposal,
+  ValidationError,
 } from '../services/trade-proposal-service';
 
 export const tradeProposalsRouter = Router();
@@ -39,6 +42,17 @@ const PROPOSAL_STATUSES = new Set<ProposalStatus>([
 
 function requestId(req: Request): string | null {
   return (req.headers['x-request-id'] as string | undefined) ?? null;
+}
+
+function clientIp(req: Request): string | null {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
+  return req.socket.remoteAddress ?? null;
+}
+
+function approvalRequestId(req: Request): string | null {
+  const body = req.body as { requestId?: unknown };
+  return typeof body.requestId === 'string' ? body.requestId : requestId(req);
 }
 
 function pagination(req: Request): { limit: number; offset: number } | null {
@@ -99,6 +113,108 @@ tradeProposalsRouter.patch('/:id/cancel', requireOwner, async (req: Request, res
     });
     res.json(proposal);
   } catch (err) {
+    if (err instanceof NotFoundError) {
+      res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+      return;
+    }
+    if (err instanceof ProposalExpiredError) {
+      res.status(410).json({
+        error: 'PROPOSAL_EXPIRED',
+        message: err.message,
+        expiredAt: err.proposal.expiresAt.toISOString(),
+      });
+      return;
+    }
+    if (err instanceof InvalidStateTransitionError) {
+      res.status(409).json({
+        error: 'INVALID_STATE',
+        message: err.message,
+        currentStatus: err.from,
+      });
+      return;
+    }
+    throw err;
+  }
+});
+
+tradeProposalsRouter.post('/:id/approve', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const result = await approveProposal(getPool(), req.params.id, {
+      actorId: req.user!.sub,
+      actorEmail: req.user!.email,
+      requestId: approvalRequestId(req),
+      ipAddress: clientIp(req),
+      userAgent: req.headers['user-agent'] ?? null,
+    });
+
+    if (result.riskResult?.result === 'REJECT') {
+      res.status(422).json({
+        error: 'RISK_REVALIDATION_FAILED',
+        proposal: result.proposal,
+        approval: result.approval,
+        riskCheck: result.riskCheck,
+        failedRules: result.riskResult.failed_rules,
+        reason: result.riskResult.reason,
+      });
+      return;
+    }
+
+    res.json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      res.status(422).json({ error: 'VALIDATION_ERROR', message: err.message });
+      return;
+    }
+    if (err instanceof NotFoundError) {
+      res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+      return;
+    }
+    if (err instanceof ProposalExpiredError) {
+      res.status(410).json({
+        error: 'PROPOSAL_EXPIRED',
+        message: err.message,
+        expiredAt: err.proposal.expiresAt.toISOString(),
+      });
+      return;
+    }
+    if (err instanceof InvalidStateTransitionError) {
+      res.status(409).json({
+        error: 'INVALID_STATE',
+        message: err.message,
+        currentStatus: err.from,
+      });
+      return;
+    }
+    throw err;
+  }
+});
+
+tradeProposalsRouter.post('/:id/reject', requireOwner, async (req: Request, res: Response) => {
+  const body = req.body as { reason?: unknown };
+  if (body.reason !== undefined && body.reason !== null && typeof body.reason !== 'string') {
+    res.status(422).json({ error: 'VALIDATION_ERROR', message: 'reason must be a string' });
+    return;
+  }
+
+  try {
+    const result = await rejectProposal(
+      getPool(),
+      req.params.id,
+      typeof body.reason === 'string' ? body.reason : null,
+      {
+        actorId: req.user!.sub,
+        actorEmail: req.user!.email,
+        requestId: approvalRequestId(req),
+        ipAddress: clientIp(req),
+        userAgent: req.headers['user-agent'] ?? null,
+      },
+    );
+    res.json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      res.status(422).json({ error: 'VALIDATION_ERROR', message: err.message });
+      return;
+    }
     if (err instanceof NotFoundError) {
       res.status(404).json({ error: 'NOT_FOUND', message: err.message });
       return;

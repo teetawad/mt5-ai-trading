@@ -97,13 +97,16 @@ export async function listProposals(
 
 export async function findActiveExposureProposals(
   db: Pool | PoolClient,
+  excludeProposalId?: string,
 ): Promise<Pick<TradeProposal, 'symbol' | 'side'>[]> {
   const { rows } = await db.query(
     `SELECT symbol, side FROM trade_proposals
      WHERE status IN (
        'PENDING_APPROVAL', 'APPROVED', 'REVALIDATING', 'SUBMITTING',
        'SUBMITTED', 'PARTIALLY_FILLED'
-     )`,
+     )
+       AND ($1::uuid IS NULL OR id != $1::uuid)`,
+    [excludeProposalId ?? null],
   );
   return rows.map((row: Record<string, unknown>) => ({
     symbol: row.symbol as string,

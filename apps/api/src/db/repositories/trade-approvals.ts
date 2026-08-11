@@ -26,6 +26,18 @@ export async function findApprovalsByProposal(
   return rows.map(mapRow);
 }
 
+export async function findApprovalByProposalAndRequestId(
+  db: Pool | PoolClient,
+  proposalId: string,
+  requestId: string,
+): Promise<TradeApproval | null> {
+  const { rows } = await db.query(
+    'SELECT * FROM trade_approvals WHERE proposal_id = $1 AND request_id = $2',
+    [proposalId, requestId],
+  );
+  return rows.length ? mapRow(rows[0]) : null;
+}
+
 export async function createApproval(
   db: Pool | PoolClient,
   data: {

@@ -33,10 +33,14 @@ function token() {
   return signToken({ sub: OWNER_ID, email: 'phase8-owner@test.example.com', role: 'owner' });
 }
 
-function riskResult(result: 'PASS' | 'REJECT', failedRules: string[] = []) {
+function riskResult(
+  result: 'PASS' | 'REJECT',
+  failedRules: string[] = [],
+  stage: 'PRE_PROPOSAL' | 'PRE_EXECUTION' = 'PRE_PROPOSAL',
+) {
   return {
     result,
-    stage: 'PRE_PROPOSAL' as const,
+    stage,
     rules_checked: ['KILL_SWITCH', 'TRADING_MODE', 'MAX_ORDER_NOTIONAL'],
     failed_rules: failedRules,
     reason: failedRules.length ? 'Risk failed' : null,
@@ -75,6 +79,18 @@ function mockEngine(result: 'PASS' | 'REJECT' = 'PASS') {
   );
 }
 
+function mockEngineSequence(...results: Array<'PASS' | 'REJECT'>) {
+  mockEngine('PASS');
+  vi.mocked(evaluateRisk).mockReset();
+  for (const [index, result] of results.entries()) {
+    vi.mocked(evaluateRisk).mockResolvedValueOnce(
+      result === 'PASS'
+        ? riskResult('PASS', [], index === 0 ? 'PRE_PROPOSAL' : 'PRE_EXECUTION')
+        : riskResult('REJECT', ['PRICE_DRIFT'], index === 0 ? 'PRE_PROPOSAL' : 'PRE_EXECUTION'),
+    );
+  }
+}
+
 describe('Phase 8 route guards', () => {
   beforeEach(() => {
     _clearDenylistForTest();
@@ -91,6 +107,27 @@ describe('Phase 8 route guards', () => {
     const app = createApp();
     const res = await request(app).get('/trade-proposals');
     expect(res.status).toBe(401);
+  });
+
+  it('POST approve requires authentication', async () => {
+    const app = createApp();
+    const res = await request(app).post('/trade-proposals/proposal-1/approve').send({});
+    expect(res.status).toBe(401);
+  });
+
+  it('POST reject requires owner role before opening a DB connection', async () => {
+    process.env.SESSION_SECRET = 'test-secret-phase-9-viewer';
+    const viewer = signToken({
+      sub: 'viewer-1',
+      email: 'viewer@test.example.com',
+      role: 'viewer',
+    });
+    const app = createApp();
+    const res = await request(app)
+      .post('/trade-proposals/proposal-1/reject')
+      .set('Authorization', `Bearer ${viewer}`)
+      .send({ requestId: 'viewer-reject' });
+    expect(res.status).toBe(403);
   });
 });
 
@@ -123,8 +160,10 @@ describe('Phase 8 signal to proposal workflow', () => {
     await closePool();
     if (pool) {
       await pool.query('DELETE FROM audit_logs WHERE actor_id = $1', [OWNER_ID]);
-      await pool.query("DELETE FROM trade_proposals WHERE symbol IN ('AAPL')");
       await pool.query("DELETE FROM risk_checks WHERE market_snapshot->>'symbol' = 'AAPL'");
+      await pool.query("DELETE FROM trade_approvals WHERE proposal_id IN (SELECT id FROM trade_proposals WHERE symbol = 'AAPL')");
+      await pool.query("DELETE FROM risk_checks WHERE proposal_id IN (SELECT id FROM trade_proposals WHERE symbol = 'AAPL')");
+      await pool.query("DELETE FROM trade_proposals WHERE symbol IN ('AAPL')");
       await pool.query("DELETE FROM signals WHERE symbol = 'AAPL'");
       await pool.query("DELETE FROM strategies WHERE name LIKE 'phase-8-%'");
       await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
@@ -253,5 +292,158 @@ describe('Phase 8 signal to proposal workflow', () => {
       .set('Authorization', `Bearer ${token()}`);
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('INVALID_STATE');
+  });
+
+  it.skipIf(SKIP)('POST approve revalidates risk and marks proposal approved on pass', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '5.00000000',
+        reason: 'approval pass test',
+      });
+
+    const res = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'approve-pass-1' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.proposal.status).toBe('APPROVED');
+    expect(res.body.approval.action).toBe('APPROVE');
+    expect(res.body.riskResult.stage).toBe('PRE_EXECUTION');
+    expect(vi.mocked(evaluateRisk).mock.calls[1][0].stage).toBe('PRE_EXECUTION');
+    expect(vi.mocked(evaluateRisk).mock.calls[1][0].proposal.expires_at).toBeDefined();
+  });
+
+  it.skipIf(SKIP)('POST approve is idempotent for duplicate requestId', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '6.00000000',
+        reason: 'approval idempotency test',
+      });
+
+    const first = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'approve-idempotent-1' });
+    const second = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'approve-idempotent-1' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.idempotent).toBe(true);
+    expect(second.body.approval.id).toBe(first.body.approval.id);
+  });
+
+  it.skipIf(SKIP)('POST approve records risk rejection after owner approval', async () => {
+    mockEngineSequence('PASS', 'REJECT');
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '7.00000000',
+        reason: 'approval risk reject test',
+      });
+
+    const res = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'approve-risk-reject-1' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('RISK_REVALIDATION_FAILED');
+    expect(res.body.proposal.status).toBe('RISK_REJECTED_AFTER_APPROVAL');
+    expect(res.body.failedRules).toEqual(['PRICE_DRIFT']);
+  });
+
+  it.skipIf(SKIP)('POST reject marks proposal owner rejected', async () => {
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '8.00000000',
+        reason: 'owner reject test',
+      });
+
+    const res = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/reject`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'reject-1', reason: 'No longer wanted' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.proposal.status).toBe('OWNER_REJECTED');
+    expect(res.body.approval.action).toBe('REJECT');
+    expect(res.body.approval.reason).toBe('No longer wanted');
+  });
+
+  it.skipIf(SKIP)('POST approve rejects expired proposals', async () => {
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '9.00000000',
+        reason: 'expired approval test',
+      });
+
+    await pool.query('UPDATE trade_proposals SET expires_at = NOW() - INTERVAL \'1 second\' WHERE id = $1', [
+      created.body.proposal.id,
+    ]);
+
+    const res = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'approve-expired-1' });
+
+    expect(res.status).toBe(410);
+    expect(res.body.error).toBe('PROPOSAL_EXPIRED');
+  });
+
+  it.skipIf(SKIP)('competing approvals do not both approve the same proposal', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '11.00000000',
+        reason: 'competing approval test',
+      });
+
+    const first = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'competing-approve-1' });
+    const second = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'competing-approve-2' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(409);
+    expect(second.body.error).toBe('INVALID_STATE');
   });
 });

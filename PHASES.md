@@ -182,17 +182,17 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 9 — Owner Approval
 
-- [ ] POST /trade-proposals/:id/approve
-- [ ] POST /trade-proposals/:id/reject
-- [ ] Authorization check
-- [ ] Risk revalidation on approval
-- [ ] Price drift check
-- [ ] Expiration check
-- [ ] Concurrency protection (SELECT FOR UPDATE)
-- [ ] Database locking
-- [ ] Audit events
-- [ ] Simultaneous approval tests
-- [ ] Unauthorized approval tests
+- [x] POST /trade-proposals/:id/approve
+- [x] POST /trade-proposals/:id/reject
+- [x] Authorization check
+- [x] Risk revalidation on approval
+- [x] Price drift check
+- [x] Expiration check
+- [x] Concurrency protection (SELECT FOR UPDATE)
+- [x] Database locking
+- [x] Audit events
+- [x] Simultaneous approval tests
+- [x] Unauthorized approval tests
 - [ ] Owner review
 
 ---

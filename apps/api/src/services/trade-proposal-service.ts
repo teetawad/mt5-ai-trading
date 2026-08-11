@@ -7,12 +7,16 @@ import { createSignal, updateSignalStatus } from '../db/repositories/signals';
 import { findStrategyById } from '../db/repositories/strategies';
 import { getSettingValue } from '../db/repositories/system-settings';
 import {
+  createApproval,
+  findApprovalByProposalAndRequestId,
+} from '../db/repositories/trade-approvals';
+import {
   createProposal,
   findActiveExposureProposals,
   findProposalByIdForUpdate,
   updateProposalStatus,
 } from '../db/repositories/trade-proposals';
-import { RiskCheck, Signal, TradeProposal } from '../db/types';
+import { RiskCheck, Signal, TradeApproval, TradeProposal } from '../db/types';
 import {
   getMarketSnapshot,
   getPaperPortfolio,
@@ -43,6 +47,17 @@ export class ProposalExpiredError extends Error {
   }
 }
 
+export class RiskRevalidationFailedError extends Error {
+  constructor(
+    public readonly proposal: TradeProposal,
+    public readonly riskCheck: RiskCheck,
+    public readonly riskResult: RiskResultDTO,
+  ) {
+    super(riskResult.reason ?? 'Risk revalidation failed');
+    this.name = 'RiskRevalidationFailedError';
+  }
+}
+
 export interface CreateSignalInput {
   strategyId: string;
   symbol: string;
@@ -59,6 +74,8 @@ export interface ActorContext {
   actorId: string;
   actorEmail: string;
   requestId?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
 }
 
 export interface CreateSignalWorkflowResult {
@@ -66,6 +83,14 @@ export interface CreateSignalWorkflowResult {
   riskCheck: RiskCheck;
   riskResult: RiskResultDTO;
   proposal: TradeProposal;
+}
+
+export interface ApprovalWorkflowResult {
+  proposal: TradeProposal;
+  approval: TradeApproval;
+  riskCheck?: RiskCheck;
+  riskResult?: RiskResultDTO;
+  idempotent: boolean;
 }
 
 const DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
@@ -121,6 +146,13 @@ function proposalSnapshot(proposal: TradeProposal): Record<string, unknown> {
     status: proposal.status,
     expiresAt: proposal.expiresAt.toISOString(),
   };
+}
+
+function requireRequestId(requestId: string | null | undefined): string {
+  if (!requestId || !requestId.trim()) {
+    throw new ValidationError('requestId is required');
+  }
+  return requestId.trim();
 }
 
 async function withTransaction<T>(
@@ -305,6 +337,197 @@ export async function cancelProposal(
     });
 
     return cancelled;
+  });
+}
+
+export async function approveProposal(
+  pool: Pool,
+  proposalId: string,
+  actor: ActorContext,
+): Promise<ApprovalWorkflowResult> {
+  const requestId = requireRequestId(actor.requestId);
+
+  return withTransaction(pool, async (client) => {
+    const proposal = await findProposalByIdForUpdate(client, proposalId);
+    if (!proposal) throw new NotFoundError('Trade proposal not found');
+
+    const existingApproval = await findApprovalByProposalAndRequestId(client, proposal.id, requestId);
+    if (existingApproval) {
+      return { proposal, approval: existingApproval, idempotent: true };
+    }
+
+    if (proposal.status !== 'PENDING_APPROVAL') {
+      throw new InvalidStateTransitionError(proposal.status, 'APPROVED');
+    }
+
+    const now = new Date();
+    if (proposal.expiresAt <= now) {
+      assertValidProposalTransition(proposal.status, 'EXPIRED');
+      const expired = await updateProposalStatus(client, proposal.id, 'EXPIRED');
+      throw new ProposalExpiredError(expired);
+    }
+
+    const market = await getMarketSnapshot(proposal.symbol, actor.requestId ?? undefined);
+    if (!market) throw new NotFoundError(`Symbol not found: ${proposal.symbol}`);
+    const paperPortfolio = await getPaperPortfolio(actor.requestId ?? undefined);
+    const latestSnapshot = await findLatestSnapshot(client);
+    const cfg = await riskConfig(client);
+
+    const riskResult = await evaluateRisk(
+      {
+        stage: 'PRE_EXECUTION',
+        proposal: {
+          symbol: proposal.symbol,
+          side: proposal.side,
+          quantity: proposal.quantity,
+          reference_price: proposal.referencePrice,
+          expires_at: proposal.expiresAt.toISOString(),
+        },
+        market,
+        portfolio: {
+          cash: paperPortfolio.cash,
+          positions: paperPortfolio.positions,
+          equity: latestSnapshot?.portfolioEquity ?? paperPortfolio.cash,
+          daily_pnl: latestSnapshot?.dailyPnl ?? '0',
+        },
+        config: cfg,
+        pending_proposals: await findActiveExposureProposals(client, proposal.id),
+      },
+      actor.requestId ?? undefined,
+    );
+
+    const riskCheck = await createRiskCheck(client, {
+      signalId: proposal.signalId,
+      proposalId: proposal.id,
+      stage: 'PRE_EXECUTION',
+      result: riskResult.result,
+      rulesChecked: riskResult.rules_checked,
+      failedRules: riskResult.failed_rules,
+      reason: riskResult.reason,
+      marketSnapshot: { ...riskResult.market_snapshot },
+      portfolioSnapshot: { ...riskResult.portfolio_snapshot },
+    });
+
+    const approval = await createApproval(client, {
+      proposalId: proposal.id,
+      approvedBy: actor.actorId,
+      action: 'APPROVE',
+      requestId,
+      ipAddress: actor.ipAddress ?? null,
+      userAgent: actor.userAgent ?? null,
+    });
+
+    if (riskResult.result === 'REJECT') {
+      assertValidProposalTransition(proposal.status, 'APPROVED');
+      const approved = await updateProposalStatus(client, proposal.id, 'APPROVED', {
+        approvedAt: now,
+      });
+      assertValidProposalTransition(approved.status, 'REVALIDATING');
+      const revalidating = await updateProposalStatus(client, approved.id, 'REVALIDATING');
+      assertValidProposalTransition(revalidating.status, 'RISK_REJECTED_AFTER_APPROVAL');
+      const rejectedAfterApproval = await updateProposalStatus(
+        client,
+        revalidating.id,
+        'RISK_REJECTED_AFTER_APPROVAL',
+      );
+
+      await createAuditLog(client, {
+        eventType: 'TRADE_PROPOSAL_APPROVAL_RISK_REJECTED',
+        actorId: actor.actorId,
+        actorEmail: actor.actorEmail,
+        entityType: 'trade_proposal',
+        entityId: rejectedAfterApproval.id,
+        action: 'APPROVE_REJECTED_BY_RISK',
+        beforeData: proposalSnapshot(proposal),
+        afterData: proposalSnapshot(rejectedAfterApproval),
+        requestId,
+      });
+
+      return {
+        proposal: rejectedAfterApproval,
+        approval,
+        riskCheck,
+        riskResult,
+        idempotent: false,
+      };
+    }
+
+    assertValidProposalTransition(proposal.status, 'APPROVED');
+    const approved = await updateProposalStatus(client, proposal.id, 'APPROVED', {
+      approvedAt: now,
+    });
+
+    await createAuditLog(client, {
+      eventType: 'TRADE_PROPOSAL_APPROVED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'trade_proposal',
+      entityId: approved.id,
+      action: 'APPROVE_TRADE_PROPOSAL',
+      beforeData: proposalSnapshot(proposal),
+      afterData: proposalSnapshot(approved),
+      requestId,
+    });
+
+    return { proposal: approved, approval, riskCheck, riskResult, idempotent: false };
+  });
+}
+
+export async function rejectProposal(
+  pool: Pool,
+  proposalId: string,
+  reason: string | null,
+  actor: ActorContext,
+): Promise<ApprovalWorkflowResult> {
+  const requestId = requireRequestId(actor.requestId);
+
+  return withTransaction(pool, async (client) => {
+    const proposal = await findProposalByIdForUpdate(client, proposalId);
+    if (!proposal) throw new NotFoundError('Trade proposal not found');
+
+    const existingApproval = await findApprovalByProposalAndRequestId(client, proposal.id, requestId);
+    if (existingApproval) {
+      return { proposal, approval: existingApproval, idempotent: true };
+    }
+
+    if (proposal.status !== 'PENDING_APPROVAL') {
+      throw new InvalidStateTransitionError(proposal.status, 'OWNER_REJECTED');
+    }
+
+    if (proposal.expiresAt <= new Date()) {
+      assertValidProposalTransition(proposal.status, 'EXPIRED');
+      const expired = await updateProposalStatus(client, proposal.id, 'EXPIRED');
+      throw new ProposalExpiredError(expired);
+    }
+
+    const approval = await createApproval(client, {
+      proposalId: proposal.id,
+      approvedBy: actor.actorId,
+      action: 'REJECT',
+      reason,
+      requestId,
+      ipAddress: actor.ipAddress ?? null,
+      userAgent: actor.userAgent ?? null,
+    });
+
+    assertValidProposalTransition(proposal.status, 'OWNER_REJECTED');
+    const rejected = await updateProposalStatus(client, proposal.id, 'OWNER_REJECTED', {
+      rejectedAt: new Date(),
+    });
+
+    await createAuditLog(client, {
+      eventType: 'TRADE_PROPOSAL_REJECTED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'trade_proposal',
+      entityId: rejected.id,
+      action: 'REJECT_TRADE_PROPOSAL',
+      beforeData: proposalSnapshot(proposal),
+      afterData: { ...proposalSnapshot(rejected), reason },
+      requestId,
+    });
+
+    return { proposal: rejected, approval, idempotent: false };
   });
 }
 

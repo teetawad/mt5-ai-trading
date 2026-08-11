@@ -14,10 +14,9 @@ describe('proposal state machine', () => {
     expect(() => assertValidProposalTransition('PENDING_APPROVAL', 'CANCELLED')).not.toThrow();
   });
 
-  it('rejects approval transitions in Phase 8', () => {
-    expect(() => assertValidProposalTransition('PENDING_APPROVAL', 'APPROVED')).toThrow(
-      InvalidStateTransitionError,
-    );
+  it('allows owner approval and rejection transitions', () => {
+    expect(() => assertValidProposalTransition('PENDING_APPROVAL', 'APPROVED')).not.toThrow();
+    expect(() => assertValidProposalTransition('PENDING_APPROVAL', 'OWNER_REJECTED')).not.toThrow();
   });
 
   it('rejects terminal-state cancellation', () => {

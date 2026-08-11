@@ -262,6 +262,8 @@ Response 200:
 GET  /trade-proposals              — list proposals (paginated, filterable)
 GET  /trade-proposals/:id          — proposal detail
 PATCH /trade-proposals/:id/cancel  — cancel a pre-approval proposal (owner only)
+POST /trade-proposals/:id/approve  — owner approves and risk-revalidates a proposal
+POST /trade-proposals/:id/reject   — owner rejects a proposal
 ```
 
 ### GET /trade-proposals/:id
@@ -317,7 +319,61 @@ Response 410:
 { "error": "PROPOSAL_EXPIRED", "expiredAt": "..." }
 ```
 
-Approval and rejection endpoints are intentionally deferred to Phase 9.
+### POST /trade-proposals/:id/approve
+
+Request:
+```json
+{
+  "requestId": "client-generated-uuid"
+}
+```
+
+Response 200:
+```json
+{
+  "proposal": { "id": "...", "status": "APPROVED" },
+  "approval": { "action": "APPROVE", "requestId": "client-generated-uuid" },
+  "riskCheck": { "stage": "PRE_EXECUTION", "result": "PASS" },
+  "riskResult": { "result": "PASS", "failed_rules": [] },
+  "idempotent": false
+}
+```
+
+Response 422:
+```json
+{
+  "error": "RISK_REVALIDATION_FAILED",
+  "proposal": { "id": "...", "status": "RISK_REJECTED_AFTER_APPROVAL" },
+  "failedRules": ["PRICE_DRIFT"],
+  "reason": "Price drifted beyond threshold"
+}
+```
+
+Notes:
+- The request accepts only `requestId`; trading parameters are loaded from the
+  immutable proposal row.
+- Approval locks the proposal row, records the owner action, and performs
+  `PRE_EXECUTION` risk revalidation with current market and portfolio data.
+- A successful Phase 9 approval stops at `APPROVED`. Paper execution is Phase 10.
+
+### POST /trade-proposals/:id/reject
+
+Request:
+```json
+{
+  "requestId": "client-generated-uuid",
+  "reason": "Market conditions changed"
+}
+```
+
+Response 200:
+```json
+{
+  "proposal": { "id": "...", "status": "OWNER_REJECTED" },
+  "approval": { "action": "REJECT", "requestId": "client-generated-uuid" },
+  "idempotent": false
+}
+```
 
 ---
 
