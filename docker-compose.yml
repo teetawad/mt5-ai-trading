@@ -1,0 +1,52 @@
+version: "3.9"
+
+# Paper Trading Platform — Docker Compose
+# Use for local development only.
+# Only PostgreSQL runs in Docker. Application services run locally.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trade_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trade_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-trade_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trade_user} -d ${POSTGRES_DB:-trade_dev}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Test database — separate from dev, wiped on each test run
+  postgres_test:
+    image: postgres:16-alpine
+    container_name: trade_postgres_test
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trade_test
+      POSTGRES_USER: ${POSTGRES_USER:-trade_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trade_user} -d trade_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - test
+
+volumes:
+  postgres_data:
+    name: trade_postgres_data
+  postgres_test_data:
+    name: trade_postgres_test_data

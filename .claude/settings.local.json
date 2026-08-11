@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(timeout 30 npx nuxt dev)",
+      "Bash(git add *)",
+      "Bash(git -C /c/Users/Teetawad/Desktop/trade add .)",
+      "Bash(git -C /c/Users/Teetawad/Desktop/trade status)"
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "trade",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "test:api": "npm run test --workspace=apps/api",
+    "test:web": "echo 'No web unit tests in Phase 1'",
+    "test": "npm run test:api && npm run test:web",
+    "lint:api": "npm run lint --workspace=apps/api",
+    "lint:web": "npm run lint --workspace=apps/web",
+    "lint": "npm run lint:api && npm run lint:web",
+    "typecheck:api": "npm run typecheck --workspace=apps/api",
+    "typecheck:web": "npm run typecheck --workspace=apps/web",
+    "typecheck": "npm run typecheck:api && npm run typecheck:web",
+    "format:api": "npm run format --workspace=apps/api"
+  }
+}
