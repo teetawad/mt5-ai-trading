@@ -9,16 +9,26 @@
         >
           Trade Platform
         </NuxtLink>
-        <div class="flex flex-wrap items-center gap-1 text-sm text-slate-300">
-          <NuxtLink
-            v-for="item in navItems"
-            :key="item.to"
-            :to="item.to"
-            class="rounded px-3 py-2 hover:bg-slate-800 hover:text-white"
-            active-class="bg-slate-800 text-white"
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <div class="flex flex-wrap items-center gap-1 text-sm text-slate-300">
+            <NuxtLink
+              v-for="item in navItems"
+              :key="item.to"
+              :to="item.to"
+              class="rounded px-3 py-2 hover:bg-slate-800 hover:text-white"
+              active-class="bg-slate-800 text-white"
+            >
+              {{ item.label }}
+            </NuxtLink>
+          </div>
+          <button
+            class="rounded border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+            :disabled="logoutBusy"
+            type="button"
+            @click="handleLogout"
           >
-            {{ item.label }}
-          </NuxtLink>
+            {{ logoutBusy ? 'Signing out...' : 'Logout' }}
+          </button>
         </div>
       </div>
     </nav>
@@ -40,4 +50,16 @@ const navItems = [
   { to: '/audit', label: 'Audit' },
   { to: '/settings', label: 'Settings' },
 ];
+
+const { logout } = useAuth();
+const logoutBusy = ref(false);
+
+async function handleLogout() {
+  logoutBusy.value = true;
+  try {
+    await logout();
+  } finally {
+    logoutBusy.value = false;
+  }
+}
 </script>

@@ -24,12 +24,17 @@ export function useApi() {
   async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
     const method = options.method ?? 'GET';
     const headers: Record<string, string> = {
-      'X-Request-ID': crypto.randomUUID(),
+      'X-Request-ID': globalThis.crypto.randomUUID(),
     };
     const csrfToken = readCookie('csrf_token');
 
     if (UNSAFE_METHODS.has(method) && csrfToken) {
       headers['X-CSRF-Token'] = csrfToken;
+    }
+
+    if (import.meta.server) {
+      const cookie = useRequestHeaders(['cookie']).cookie;
+      if (cookie) headers.cookie = cookie;
     }
 
     const response = await $fetch<T>(`${baseUrl}${path}`, {
