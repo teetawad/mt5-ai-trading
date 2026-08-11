@@ -104,6 +104,13 @@ class AlpacaPaperBrokerAdapter(BrokerAdapter):
                     rejected_reason="Limit price required for LIMIT orders",
                 )
             payload["limit_price"] = str(request.limit_price)
+        if request.bracket is not None:
+            stop_loss_price = request.bracket.get("stop_loss_price")
+            take_profit_price = request.bracket.get("take_profit_price")
+            if stop_loss_price is not None and take_profit_price is not None:
+                payload["order_class"] = "bracket"
+                payload["stop_loss"] = {"stop_price": str(stop_loss_price)}
+                payload["take_profit"] = {"limit_price": str(take_profit_price)}
 
         response = self._request_dict("POST", "/orders", json=payload)
         return self._map_order(response)

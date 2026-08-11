@@ -1,6 +1,8 @@
 import Decimal from 'decimal.js';
 import { Pool, PoolClient } from 'pg';
 import { createAuditLog } from '../db/repositories/audit-logs';
+import { findLatestFillBySymbol } from '../db/repositories/fills';
+import { findActiveOrdersBySymbol } from '../db/repositories/orders';
 import { findLatestSnapshot } from '../db/repositories/portfolio-snapshots';
 import { createRiskCheck, linkRiskCheckToProposal } from '../db/repositories/risk-checks';
 import { createSignal, updateSignalStatus } from '../db/repositories/signals';
@@ -103,6 +105,7 @@ export interface ApprovalWorkflowResult {
 const DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
 const MANUAL_TEST_STRATEGY_NAME = 'MANUAL_TEST_PAPER_ONLY';
 const SUPPORTED_US_STOCK_PATTERN = /^[A-Z]{1,5}(\.[A-Z])?$/;
+const EIGHT_DP = 8;
 
 function validatePositiveDecimal(value: string, field: string): void {
   if (!DECIMAL_PATTERN.test(value) || new Decimal(value).lte(0)) {
@@ -126,7 +129,7 @@ async function riskConfig(db: PoolClient): Promise<RiskConfigDTO> {
     String(await getSettingValue(db, 'max_portfolio_concentration_pct') ?? '0.20'),
   );
 
-  return {
+  const cfg = {
     kill_switch_enabled: await getSettingValue<boolean>(db, 'trading_kill_switch_enabled') ?? true,
     trading_mode: await getSettingValue<string>(db, 'trading_mode') ?? 'PAPER',
     market_data_staleness_seconds:
@@ -137,6 +140,22 @@ async function riskConfig(db: PoolClient): Promise<RiskConfigDTO> {
     max_portfolio_concentration_pct: concentration.mul(100).toString(),
     max_open_positions: Number(await getSettingValue(db, 'max_open_positions') ?? 10),
     max_daily_loss_usd: String(await getSettingValue(db, 'max_daily_loss_usd') ?? '1000'),
+    phase22_stop_loss_pct: String(await getSettingValue(db, 'phase22_stop_loss_pct') ?? '2'),
+    phase22_take_profit_pct: String(await getSettingValue(db, 'phase22_take_profit_pct') ?? '4'),
+    phase22_max_loss_per_trade_usd: String(
+      await getSettingValue(db, 'phase22_max_loss_per_trade_usd') ?? '100',
+    ),
+    phase22_max_bid_ask_spread_pct: String(
+      await getSettingValue(db, 'phase22_max_bid_ask_spread_pct') ?? '0.5',
+    ),
+    phase22_estimated_slippage_pct: String(
+      await getSettingValue(db, 'phase22_estimated_slippage_pct') ?? '0.05',
+    ),
+    phase22_max_estimated_slippage_pct: String(
+      await getSettingValue(db, 'phase22_max_estimated_slippage_pct') ?? '0.25',
+    ),
+    phase22_prevent_duplicate_exposure:
+      await getSettingValue<boolean>(db, 'phase22_prevent_duplicate_exposure') ?? true,
     proposal_ttl_seconds: parseTtlSeconds(await getSettingValue(db, 'proposal_ttl_seconds')),
     trading_session_start:
       await getSettingValue<string | null>(db, 'trading_session_start') ?? undefined,
@@ -144,6 +163,160 @@ async function riskConfig(db: PoolClient): Promise<RiskConfigDTO> {
       await getSettingValue<string | null>(db, 'trading_session_end') ?? undefined,
     cooldown_between_trades_seconds:
       Number(await getSettingValue(db, 'cooldown_between_trades_seconds') ?? 0),
+  };
+  return cfg;
+}
+
+function money(value: Decimal): string {
+  return value.toDecimalPlaces(EIGHT_DP).toFixed(EIGHT_DP);
+}
+
+function decimal(value: string | number | null | undefined): Decimal {
+  return new Decimal(value ?? '0');
+}
+
+function phase22Rules(cfg: RiskConfigDTO) {
+  return {
+    stopLossPct: decimal(cfg.phase22_stop_loss_pct),
+    takeProfitPct: decimal(cfg.phase22_take_profit_pct),
+    maxLossPerTradeUsd: decimal(cfg.phase22_max_loss_per_trade_usd),
+    maxSpreadPct: decimal(cfg.phase22_max_bid_ask_spread_pct),
+    estimatedSlippagePct: decimal(cfg.phase22_estimated_slippage_pct),
+    maxEstimatedSlippagePct: decimal(cfg.phase22_max_estimated_slippage_pct),
+    preventDuplicateExposure: cfg.phase22_prevent_duplicate_exposure !== false,
+    cooldownSeconds: Number(cfg.cooldown_between_trades_seconds ?? 0),
+    maxDailyLossUsd: decimal(cfg.max_daily_loss_usd),
+    maxOrderNotionalUsd: decimal(cfg.max_order_notional_usd),
+    maxPositionSizeUsd: decimal(cfg.max_position_size_usd),
+    maxConcentrationPct: decimal(cfg.max_portfolio_concentration_pct),
+  };
+}
+
+async function phase22RiskControls(
+  client: PoolClient,
+  input: {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    requestedQuantity: string;
+    entryPrice: string;
+    market: { price: string; bid: string; ask: string; is_stale: boolean; timestamp: string };
+    paperPortfolio: { cash: string; positions: Record<string, string> };
+    latestSnapshot: { portfolioEquity: string; dailyPnl: string } | null;
+    cfg: RiskConfigDTO;
+    excludeProposalId?: string;
+  },
+): Promise<{
+  quantity: string;
+  estimatedNotional: string;
+  passed: boolean;
+  failedRules: string[];
+  reason: string | null;
+  snapshot: Record<string, unknown>;
+}> {
+  const rules = phase22Rules(input.cfg);
+  const entry = decimal(input.entryPrice);
+  const bid = decimal(input.market.bid);
+  const ask = decimal(input.market.ask);
+  const mid = bid.plus(ask).div(2);
+  const spreadPct = mid.gt(0) ? ask.minus(bid).div(mid).mul(100) : new Decimal(0);
+  const slippagePct = rules.estimatedSlippagePct;
+  const stopLoss = input.side === 'BUY'
+    ? entry.mul(new Decimal(1).minus(rules.stopLossPct.div(100)))
+    : entry.mul(new Decimal(1).plus(rules.stopLossPct.div(100)));
+  const takeProfit = input.side === 'BUY'
+    ? entry.mul(new Decimal(1).plus(rules.takeProfitPct.div(100)))
+    : entry.mul(new Decimal(1).minus(rules.takeProfitPct.div(100)));
+  const riskPerShare = entry.minus(stopLoss).abs();
+  const requestedQuantity = decimal(input.requestedQuantity);
+  const cash = decimal(input.paperPortfolio.cash);
+  const equity = decimal(input.latestSnapshot?.portfolioEquity ?? input.paperPortfolio.cash);
+  const dailyPnl = decimal(input.latestSnapshot?.dailyPnl);
+  const existingQty = decimal(input.paperPortfolio.positions[input.symbol]);
+  const slippagePerShare = entry.mul(slippagePct.div(100));
+  const estimatedFeePerShare = new Decimal('0.005');
+  const minFee = new Decimal('1');
+  let riskQuantity = riskPerShare.gt(0)
+    ? rules.maxLossPerTradeUsd.div(riskPerShare.plus(slippagePerShare).plus(estimatedFeePerShare))
+    : new Decimal(0);
+  if (input.side !== 'BUY') riskQuantity = requestedQuantity;
+  const cashQuantity = entry.plus(slippagePerShare).gt(0)
+    ? cash.div(entry.plus(slippagePerShare))
+    : new Decimal(0);
+  const positionLimitQuantity = rules.maxPositionSizeUsd.div(entry);
+  const concentrationQuantity = equity.gt(0)
+    ? equity.mul(rules.maxConcentrationPct.div(100)).div(entry)
+    : riskQuantity;
+  const rawQuantity = input.side === 'BUY'
+    ? Decimal.min(requestedQuantity, riskQuantity, cashQuantity, positionLimitQuantity, concentrationQuantity)
+    : requestedQuantity;
+  const quantity = rawQuantity.toDecimalPlaces(0, Decimal.ROUND_DOWN);
+  const estimatedFee = Decimal.max(quantity.mul(estimatedFeePerShare), minFee);
+  const estimatedSlippageUsd = quantity.mul(slippagePerShare);
+  const maxLoss = quantity.mul(riskPerShare).plus(estimatedSlippageUsd).plus(estimatedFee);
+  const riskReward = riskPerShare.gt(0) ? takeProfit.minus(entry).abs().div(riskPerShare) : new Decimal(0);
+  const activeOrders = await findActiveOrdersBySymbol(client, input.symbol);
+  const activeExposure = await findActiveExposureProposals(client, input.excludeProposalId);
+  const latestFill = await findLatestFillBySymbol(client, input.symbol);
+  const cooldownRemaining = latestFill && rules.cooldownSeconds > 0
+    ? Math.max(0, rules.cooldownSeconds - Math.floor((Date.now() - latestFill.filledAt.getTime()) / 1000))
+    : 0;
+  const failedRules: string[] = [];
+
+  if (input.market.is_stale) failedRules.push('PHASE22_FRESH_MARKET_DATA');
+  if (spreadPct.gt(rules.maxSpreadPct)) failedRules.push('PHASE22_BID_ASK_SPREAD');
+  if (slippagePct.gt(rules.maxEstimatedSlippagePct)) failedRules.push('PHASE22_ESTIMATED_SLIPPAGE');
+  if (activeOrders.length > 0) failedRules.push('PHASE22_DUPLICATE_PENDING_ORDER');
+  if (
+    rules.preventDuplicateExposure
+    && input.side === 'BUY'
+    && (existingQty.gt(0) || activeExposure.some((proposal) => proposal.symbol === input.symbol))
+  ) {
+    failedRules.push('PHASE22_DUPLICATE_EXPOSURE');
+  }
+  if (cooldownRemaining > 0) failedRules.push('PHASE22_COOLDOWN');
+  if (dailyPnl.lt(rules.maxDailyLossUsd.neg())) failedRules.push('PHASE22_MAX_DAILY_LOSS');
+  if (maxLoss.gt(rules.maxLossPerTradeUsd)) failedRules.push('PHASE22_MAX_LOSS_PER_TRADE');
+  if (quantity.lte(0)) failedRules.push('PHASE22_POSITION_SIZE');
+
+  const snapshot = {
+    phase: '22',
+    source: 'SERVER_SIDE_RISK_CONTROLS',
+    orderClass: input.side === 'BUY' ? 'BRACKET' : 'SINGLE',
+    entry: money(entry),
+    stopLoss: money(stopLoss),
+    takeProfit: money(takeProfit),
+    riskReward: money(riskReward),
+    requestedQuantity: money(requestedQuantity),
+    quantity: money(quantity),
+    maxLoss: money(maxLoss),
+    riskBudget: money(rules.maxLossPerTradeUsd),
+    spreadPct: money(spreadPct),
+    estimatedSlippagePct: money(slippagePct),
+    estimatedSlippageUsd: money(estimatedSlippageUsd),
+    dailyLossUsed: money(dailyPnl.lt(0) ? dailyPnl.abs() : new Decimal(0)),
+    dailyLossLimit: money(rules.maxDailyLossUsd),
+    cooldown: {
+      configuredSeconds: rules.cooldownSeconds,
+      remainingSeconds: cooldownRemaining,
+      passed: cooldownRemaining === 0,
+    },
+    duplicateExposurePrevented: rules.preventDuplicateExposure,
+    conflictingPendingOrders: activeOrders.map((order) => ({
+      id: order.id,
+      brokerOrderId: order.brokerOrderId,
+      status: order.status,
+    })),
+    failedRules,
+    result: failedRules.length ? 'REJECT' : 'PASS',
+  };
+
+  return {
+    quantity: money(quantity),
+    estimatedNotional: money(quantity.mul(entry)),
+    passed: failedRules.length === 0,
+    failedRules,
+    reason: failedRules.length ? `Phase 22 risk controls failed: ${failedRules.join(', ')}` : null,
+    snapshot,
   };
 }
 
@@ -158,6 +331,7 @@ function proposalSnapshot(proposal: TradeProposal): Record<string, unknown> {
     referencePrice: proposal.referencePrice,
     limitPrice: proposal.limitPrice,
     estimatedNotional: proposal.estimatedNotional,
+    phase22: proposal.riskSnapshot.phase22 ?? null,
     status: proposal.status,
     expiresAt: proposal.expiresAt.toISOString(),
   };
@@ -222,7 +396,18 @@ export async function createSignalAndProposal(
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
     const latestSnapshot = await findLatestSnapshot(client);
     const referencePrice = input.referencePrice ?? market.price;
-    const estimatedNotional = new Decimal(input.quantity).mul(market.price).toFixed(8);
+    const phase22 = await phase22RiskControls(client, {
+      symbol,
+      side: input.side,
+      requestedQuantity: input.quantity,
+      entryPrice: market.price,
+      market,
+      paperPortfolio,
+      latestSnapshot,
+      cfg,
+    });
+    const proposalQuantity = phase22.quantity;
+    const estimatedNotional = phase22.estimatedNotional;
 
     const signal = await createSignal(client, {
       strategyId: strategy.id,
@@ -249,7 +434,7 @@ export async function createSignalAndProposal(
         proposal: {
           symbol,
           side: input.side,
-          quantity: input.quantity,
+          quantity: proposalQuantity,
           reference_price: referencePrice,
           expires_at: expiresAt.toISOString(),
         },
@@ -260,14 +445,25 @@ export async function createSignalAndProposal(
       },
       actor.requestId ?? undefined,
     );
+    const combinedFailedRules = [
+      ...riskResult.failed_rules,
+      ...phase22.failedRules,
+    ];
+    const combinedRiskResult = {
+      ...riskResult,
+      result: (riskResult.result === 'PASS' && phase22.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
+      failed_rules: combinedFailedRules,
+      reason: [riskResult.reason, phase22.reason].filter(Boolean).join('; ') || null,
+      phase22: phase22.snapshot,
+    };
 
     const riskCheck = await createRiskCheck(client, {
       signalId: signal.id,
       stage: 'PRE_PROPOSAL',
-      result: riskResult.result,
-      rulesChecked: riskResult.rules_checked,
-      failedRules: riskResult.failed_rules,
-      reason: riskResult.reason,
+      result: combinedRiskResult.result,
+      rulesChecked: [...riskResult.rules_checked, 'PHASE22_ADVANCED_RISK_CONTROLS'],
+      failedRules: combinedFailedRules,
+      reason: combinedRiskResult.reason,
       marketSnapshot: { ...riskResult.market_snapshot },
       portfolioSnapshot: { ...riskResult.portfolio_snapshot },
     });
@@ -277,20 +473,20 @@ export async function createSignalAndProposal(
       strategyId: strategy.id,
       symbol,
       side: input.side,
-      quantity: input.quantity,
+      quantity: proposalQuantity,
       orderType,
       referencePrice,
       limitPrice: orderType === 'LIMIT' ? input.limitPrice : null,
       estimatedNotional,
       riskCheckId: riskCheck.id,
-      riskSnapshot: riskResult as unknown as Record<string, unknown>,
+      riskSnapshot: combinedRiskResult as unknown as Record<string, unknown>,
       portfolioSnapshot: { ...riskResult.portfolio_snapshot },
       expiresAt,
     });
 
     await linkRiskCheckToProposal(client, riskCheck.id, proposal.id);
 
-    const nextStatus = riskResult.result === 'PASS' ? 'PENDING_APPROVAL' : 'RISK_REJECTED';
+    const nextStatus = combinedRiskResult.result === 'PASS' ? 'PENDING_APPROVAL' : 'RISK_REJECTED';
     assertValidProposalTransition(proposal.status, nextStatus);
     const finalProposal = await updateProposalStatus(
       client,
@@ -298,7 +494,7 @@ export async function createSignalAndProposal(
       nextStatus,
       nextStatus === 'PENDING_APPROVAL' ? { pendingApprovalAt: new Date() } : {},
     );
-    const signalStatus = riskResult.result === 'PASS' ? 'RISK_PASS' : 'RISK_FAIL';
+    const signalStatus = combinedRiskResult.result === 'PASS' ? 'RISK_PASS' : 'RISK_FAIL';
     await updateSignalStatus(client, signal.id, signalStatus);
 
     await createAuditLog(client, {
@@ -315,7 +511,7 @@ export async function createSignalAndProposal(
     return {
       signal: { ...signal, status: signalStatus },
       riskCheck: { ...riskCheck, proposalId: finalProposal.id },
-      riskResult,
+      riskResult: combinedRiskResult,
       proposal: finalProposal,
     };
   });
@@ -442,6 +638,17 @@ export async function approveProposal(
     const paperPortfolio = await getPaperPortfolio(actor.requestId ?? undefined);
     const latestSnapshot = await findLatestSnapshot(client);
     const cfg = await riskConfig(client);
+    const phase22 = await phase22RiskControls(client, {
+      symbol: proposal.symbol,
+      side: proposal.side,
+      requestedQuantity: proposal.quantity,
+      entryPrice: market.price,
+      market,
+      paperPortfolio,
+      latestSnapshot,
+      cfg,
+      excludeProposalId: proposal.id,
+    });
 
     const riskResult = await evaluateRisk(
       {
@@ -465,15 +672,26 @@ export async function approveProposal(
       },
       actor.requestId ?? undefined,
     );
+    const combinedFailedRules = [
+      ...riskResult.failed_rules,
+      ...phase22.failedRules,
+    ];
+    const combinedRiskResult = {
+      ...riskResult,
+      result: (riskResult.result === 'PASS' && phase22.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
+      failed_rules: combinedFailedRules,
+      reason: [riskResult.reason, phase22.reason].filter(Boolean).join('; ') || null,
+      phase22: phase22.snapshot,
+    };
 
     const riskCheck = await createRiskCheck(client, {
       signalId: proposal.signalId,
       proposalId: proposal.id,
       stage: 'PRE_EXECUTION',
-      result: riskResult.result,
-      rulesChecked: riskResult.rules_checked,
-      failedRules: riskResult.failed_rules,
-      reason: riskResult.reason,
+      result: combinedRiskResult.result,
+      rulesChecked: [...riskResult.rules_checked, 'PHASE22_ADVANCED_RISK_CONTROLS'],
+      failedRules: combinedFailedRules,
+      reason: combinedRiskResult.reason,
       marketSnapshot: { ...riskResult.market_snapshot },
       portfolioSnapshot: { ...riskResult.portfolio_snapshot },
     });
@@ -487,7 +705,7 @@ export async function approveProposal(
       userAgent: actor.userAgent ?? null,
     });
 
-    if (riskResult.result === 'REJECT') {
+    if (combinedRiskResult.result === 'REJECT') {
       assertValidProposalTransition(proposal.status, 'APPROVED');
       const approved = await updateProposalStatus(client, proposal.id, 'APPROVED', {
         approvedAt: now,
@@ -517,7 +735,7 @@ export async function approveProposal(
         proposal: rejectedAfterApproval,
         approval,
         riskCheck,
-        riskResult,
+        riskResult: combinedRiskResult,
         idempotent: false,
       };
     }
@@ -539,7 +757,7 @@ export async function approveProposal(
       requestId,
     });
 
-    return { proposal: approved, approval, riskCheck, riskResult, idempotent: false };
+    return { proposal: approved, approval, riskCheck, riskResult: combinedRiskResult, idempotent: false };
   });
 }
 

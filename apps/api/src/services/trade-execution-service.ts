@@ -112,6 +112,26 @@ function proposalSnapshot(proposal: TradeProposal): Record<string, unknown> {
   };
 }
 
+function bracketFromProposal(proposal: TradeProposal): {
+  stop_loss_price: string;
+  take_profit_price: string;
+} | undefined {
+  const phase22 = proposal.riskSnapshot.phase22 as Record<string, unknown> | undefined;
+  if (
+    proposal.side !== 'BUY'
+    || !phase22
+    || phase22.orderClass !== 'BRACKET'
+    || typeof phase22.stopLoss !== 'string'
+    || typeof phase22.takeProfit !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    stop_loss_price: phase22.stopLoss,
+    take_profit_price: phase22.takeProfit,
+  };
+}
+
 async function withTransaction<T>(
   pool: Pool,
   fn: (client: PoolClient) => Promise<T>,
@@ -386,6 +406,7 @@ export async function executeApprovedProposal(
           quantity: proposal.quantity,
           order_type: proposal.orderType,
           ...(proposal.limitPrice ? { limit_price: proposal.limitPrice } : {}),
+          ...(bracketFromProposal(proposal) ? { bracket: bracketFromProposal(proposal) } : {}),
         },
         requestId,
       );

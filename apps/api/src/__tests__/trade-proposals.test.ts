@@ -213,6 +213,9 @@ describe('Phase 8 signal to proposal workflow', () => {
     await pool.query(
       "UPDATE system_settings SET value = '50000'::jsonb WHERE key = 'initial_paper_cash_usd'",
     );
+    await pool.query(
+      "UPDATE system_settings SET value = 'false'::jsonb WHERE key = 'phase22_prevent_duplicate_exposure'",
+    );
     const strategy = await createStrategy(pool, {
       name: `phase-8-${Date.now()}`,
       version: '1.0.0',
@@ -231,6 +234,9 @@ describe('Phase 8 signal to proposal workflow', () => {
       );
       await pool.query(
         "UPDATE system_settings SET value = '100000'::jsonb WHERE key = 'initial_paper_cash_usd'",
+      );
+      await pool.query(
+        "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'phase22_prevent_duplicate_exposure'",
       );
       await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
       await pool.end();
@@ -335,6 +341,98 @@ describe('Phase 8 signal to proposal workflow', () => {
       },
     });
     expect(vi.mocked(submitOrder)).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(SKIP)('Phase 22 computes paper bracket risk controls server-side before approval', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(getPaperPortfolio).mockResolvedValue({
+      cash: '50000.00000000',
+      positions: {},
+    });
+
+    const created = await request(app)
+      .post('/signals/manual-test')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '100.00000000',
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.proposal.status).toBe('PENDING_APPROVAL');
+    expect(created.body.proposal.quantity).toBe('48.00000000');
+    expect(created.body.proposal.riskSnapshot.phase22).toMatchObject({
+      phase: '22',
+      source: 'SERVER_SIDE_RISK_CONTROLS',
+      orderClass: 'BRACKET',
+      entry: '100.00000000',
+      stopLoss: '98.00000000',
+      takeProfit: '104.00000000',
+      result: 'PASS',
+    });
+
+    const approved = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase22-bracket-approve' });
+
+    expect(approved.status).toBe(200);
+    expect(vi.mocked(submitOrder).mock.calls.at(-1)?.[0]).toMatchObject({
+      symbol: 'AAPL',
+      side: 'BUY',
+      quantity: '48.00000000',
+      bracket: {
+        stop_loss_price: '98.00000000',
+        take_profit_price: '104.00000000',
+      },
+    });
+  });
+
+  it.skipIf(SKIP)('Phase 22 rejects unacceptable spread before owner approval', async () => {
+    vi.mocked(getMarketSnapshot).mockResolvedValue({
+      symbol: 'AAPL',
+      price: '100.00000000',
+      bid: '95.00000000',
+      ask: '105.00000000',
+      volume: 1000,
+      timestamp: '2024-01-15T10:30:00.000Z',
+      is_stale: false,
+    });
+
+    const res = await request(app)
+      .post('/signals/manual-test')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.proposal.status).toBe('RISK_REJECTED');
+    expect(res.body.riskCheck.failedRules).toContain('PHASE22_BID_ASK_SPREAD');
+  });
+
+  it.skipIf(SKIP)('Phase 22 prevents duplicate exposure when configured', async () => {
+    await pool.query(
+      "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'phase22_prevent_duplicate_exposure'",
+    );
+    vi.mocked(getPaperPortfolio).mockResolvedValueOnce({
+      cash: '50000.00000000',
+      positions: { AAPL: '1.00000000' },
+    });
+
+    try {
+      const res = await request(app)
+        .post('/signals/manual-test')
+        .set('Authorization', `Bearer ${token()}`)
+        .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.proposal.status).toBe('RISK_REJECTED');
+      expect(res.body.riskCheck.failedRules).toContain('PHASE22_DUPLICATE_EXPOSURE');
+    } finally {
+      await pool.query(
+        "UPDATE system_settings SET value = 'false'::jsonb WHERE key = 'phase22_prevent_duplicate_exposure'",
+      );
+    }
   });
 
   it.skipIf(SKIP)('POST /signals/manual-test rejects unsupported symbols server-side', async () => {

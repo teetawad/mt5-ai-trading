@@ -120,7 +120,7 @@
       <DataTable
         :empty="!(dashboard?.pendingProposals.length)"
         empty-label="No pending trade proposals"
-        :columns="['Symbol', 'Side', 'Qty', 'Reference', 'Risk', 'Expires', 'Actions']"
+        :columns="['Symbol', 'Side', 'Qty', 'Entry', 'Stop', 'Target', 'Max Loss', 'Risk', 'Actions']"
       >
         <tr
           v-for="proposal in dashboard?.pendingProposals ?? []"
@@ -130,9 +130,11 @@
           <td class="px-4 py-3 font-medium">{{ proposal.symbol }}</td>
           <td class="px-4 py-3">{{ proposal.side }}</td>
           <td class="px-4 py-3">{{ proposal.quantity }}</td>
-          <td class="px-4 py-3">{{ money(proposal.referencePrice) }}</td>
+          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.entry ?? proposal.referencePrice) }}</td>
+          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.stopLoss) }}</td>
+          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.takeProfit) }}</td>
+          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.maxLoss) }}</td>
           <td class="px-4 py-3"><StatusPill :label="proposal.riskSnapshot?.result ?? proposal.status" /></td>
-          <td class="px-4 py-3">{{ dateTime(proposal.expiresAt) }}</td>
           <td class="px-4 py-3">
             <div class="flex justify-end gap-2">
               <button
@@ -348,7 +350,15 @@ type Proposal = {
   referencePrice: string;
   status: string;
   expiresAt: string;
-  riskSnapshot: { result?: string } | null;
+  riskSnapshot: {
+    result?: string;
+    phase22?: {
+      entry?: string;
+      stopLoss?: string;
+      takeProfit?: string;
+      maxLoss?: string;
+    };
+  } | null;
 };
 type RiskResult = { id: string; stage: string; result: string; failedRules: string[]; createdAt: string };
 type Order = {

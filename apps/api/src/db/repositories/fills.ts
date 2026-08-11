@@ -36,6 +36,22 @@ export async function listRecentFills(
   return rows.map(mapRow);
 }
 
+export async function findLatestFillBySymbol(
+  db: Pool | PoolClient,
+  symbol: string,
+): Promise<Fill | null> {
+  const { rows } = await db.query(
+    `SELECT fills.*
+     FROM fills
+     JOIN orders ON orders.id = fills.order_id
+     WHERE orders.symbol = $1
+     ORDER BY fills.filled_at DESC
+     LIMIT 1`,
+    [symbol],
+  );
+  return rows.length ? mapRow(rows[0]) : null;
+}
+
 export async function findFillByBrokerFillId(
   db: Pool | PoolClient,
   brokerFillId: string,

@@ -18,6 +18,7 @@ def _req(
     idem_key: str = "proposal-1",
     order_type: OrderType = OrderType.MARKET,
     limit_price: Decimal | None = None,
+    bracket: dict[str, Decimal] | None = None,
 ) -> OrderRequest:
     return OrderRequest(
         idempotency_key=idem_key,
@@ -26,6 +27,7 @@ def _req(
         quantity=Decimal("10"),
         order_type=order_type,
         limit_price=limit_price,
+        bracket=bracket,
     )
 
 
@@ -155,6 +157,31 @@ class TestAlpacaPaperBrokerAdapter:
 
         assert result.status == OrderStatus.PARTIALLY_FILLED
         assert result.fills[0].is_partial is True
+
+    def test_bracket_order_payload_uses_alpaca_paper_bracket_fields(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/orders:by_client_order_id"):
+                return httpx.Response(404, json={})
+            body = request.read().decode("utf-8")
+            assert '"order_class":"bracket"' in body
+            assert '"stop_loss":{"stop_price":"98.00"}' in body
+            assert '"take_profit":{"limit_price":"106.00"}' in body
+            assert request.url.host == "paper-api.alpaca.markets"
+            return httpx.Response(200, json=_order())
+
+        broker = AlpacaPaperBrokerAdapter(
+            key_id="key",
+            secret_key="secret",
+            base_url="https://paper-api.alpaca.markets",
+            client=_client(handler),
+        )
+
+        result = broker.submit_order(_req(bracket={
+            "stop_loss_price": Decimal("98.00"),
+            "take_profit_price": Decimal("106.00"),
+        }))
+
+        assert result.status == OrderStatus.FILLED
 
     def test_cancel_order_uses_paper_cancel_endpoint_and_refetches(self) -> None:
         calls: list[tuple[str, str]] = []

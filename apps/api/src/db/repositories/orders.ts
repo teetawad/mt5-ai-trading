@@ -86,6 +86,20 @@ export async function findOrderByExecution(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export async function findActiveOrdersBySymbol(
+  db: Pool | PoolClient,
+  symbol: string,
+): Promise<Order[]> {
+  const { rows } = await db.query(
+    `SELECT * FROM orders
+     WHERE symbol = $1
+       AND status IN ('PENDING', 'SUBMITTED', 'PARTIALLY_FILLED')
+     ORDER BY created_at`,
+    [symbol],
+  );
+  return rows.map(mapRow);
+}
+
 export async function createOrder(
   db: Pool | PoolClient,
   data: {

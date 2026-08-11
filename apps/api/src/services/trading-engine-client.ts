@@ -198,6 +198,10 @@ export interface OrderRequestDTO {
   quantity: string;
   order_type: OrderType;
   limit_price?: string;
+  bracket?: {
+    stop_loss_price: string;
+    take_profit_price: string;
+  };
 }
 
 export interface FillEventDTO {
@@ -394,6 +398,13 @@ export interface RiskConfigDTO {
   max_portfolio_concentration_pct?: string;
   max_open_positions?: number;
   max_daily_loss_usd?: string;
+  phase22_stop_loss_pct?: string;
+  phase22_take_profit_pct?: string;
+  phase22_max_loss_per_trade_usd?: string;
+  phase22_max_bid_ask_spread_pct?: string;
+  phase22_estimated_slippage_pct?: string;
+  phase22_max_estimated_slippage_pct?: string;
+  phase22_prevent_duplicate_exposure?: boolean;
   proposal_ttl_seconds?: number;
   trading_session_start?: string;
   trading_session_end?: string;

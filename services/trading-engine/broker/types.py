@@ -42,6 +42,7 @@ class OrderRequest(BaseModel):
     quantity: Decimal
     order_type: OrderType
     limit_price: Decimal | None = None
+    bracket: dict[str, Decimal] | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -52,6 +53,10 @@ class OrderRequest(BaseModel):
     @field_serializer("limit_price")
     def _ser_limit(self, v: Decimal | None) -> str | None:
         return _fmt(v) if v is not None else None
+
+    @field_serializer("bracket")
+    def _ser_bracket(self, v: dict[str, Decimal] | None) -> dict[str, str] | None:
+        return {key: _fmt(value) for key, value in v.items()} if v is not None else None
 
 
 class FillEvent(BaseModel):

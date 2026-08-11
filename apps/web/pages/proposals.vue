@@ -114,6 +114,46 @@
           <dd class="mt-1 font-medium">{{ currency(selected.estimatedNotional) }}</dd>
         </div>
         <div>
+          <dt class="text-xs uppercase text-slate-500">Entry</dt>
+          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.entry) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Stop Loss</dt>
+          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.stopLoss) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Take Profit</dt>
+          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.takeProfit) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Risk/Reward</dt>
+          <dd class="mt-1 font-medium">{{ ratio(phase22(selected)?.riskReward) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Max Loss</dt>
+          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.maxLoss) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Spread</dt>
+          <dd class="mt-1 font-medium">{{ percent(phase22(selected)?.spreadPct) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Estimated Slippage</dt>
+          <dd class="mt-1 font-medium">{{ percent(phase22(selected)?.estimatedSlippagePct) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Daily Loss Used</dt>
+          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.dailyLossUsed) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Cooldown</dt>
+          <dd class="mt-1 font-medium">{{ cooldown(phase22(selected)?.cooldown) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Risk Result</dt>
+          <dd class="mt-1 font-medium">{{ phase22(selected)?.result ?? selected.riskSnapshot?.result ?? '-' }}</dd>
+        </div>
+        <div>
           <dt class="text-xs uppercase text-slate-500">Created</dt>
           <dd class="mt-1 font-medium">{{ shortDate(selected.createdAt) }}</dd>
         </div>
@@ -136,9 +176,28 @@ type Proposal = {
   referencePrice: string;
   limitPrice: string | null;
   estimatedNotional: string;
+  riskSnapshot: {
+    result?: string;
+    phase22?: Phase22Risk;
+  } | null;
   createdAt: string;
   expiresAt: string;
   status: string;
+};
+type Phase22Risk = {
+  entry: string;
+  stopLoss: string;
+  takeProfit: string;
+  riskReward: string;
+  maxLoss: string;
+  spreadPct: string;
+  estimatedSlippagePct: string;
+  dailyLossUsed: string;
+  result: string;
+  cooldown?: {
+    remainingSeconds?: number;
+    passed?: boolean;
+  };
 };
 type ProposalList = { proposals: Proposal[] };
 
@@ -184,7 +243,24 @@ async function reject(id: string) {
 }
 
 function currency(value?: string): string {
-  return `$${Number(value ?? 0).toFixed(2)}`;
+  return value === undefined ? '-' : `$${Number(value).toFixed(2)}`;
+}
+
+function percent(value?: string): string {
+  return value === undefined ? '-' : `${Number(value).toFixed(2)}%`;
+}
+
+function ratio(value?: string): string {
+  return value === undefined ? '-' : `${Number(value).toFixed(2)}:1`;
+}
+
+function cooldown(value?: Phase22Risk['cooldown']): string {
+  if (!value) return '-';
+  return value.passed ? 'Passed' : `${value.remainingSeconds ?? 0}s remaining`;
+}
+
+function phase22(proposal: Proposal): Phase22Risk | undefined {
+  return proposal.riskSnapshot?.phase22;
 }
 
 function shortDate(value: string): string {
