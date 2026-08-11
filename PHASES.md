@@ -167,15 +167,15 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 8 — Trade Proposals
 
-- [ ] Signal → Risk Check → Trade Proposal workflow
-- [ ] Proposal state machine enforcement
-- [ ] Proposal expiration
-- [ ] Immutability after PENDING_APPROVAL
-- [ ] POST /signals (create signal)
-- [ ] GET /trade-proposals
-- [ ] GET /trade-proposals/:id
-- [ ] PATCH /trade-proposals/:id/cancel
-- [ ] Tests
+- [x] Signal → Risk Check → Trade Proposal workflow
+- [x] Proposal state machine enforcement
+- [x] Proposal expiration
+- [x] Immutability after PENDING_APPROVAL
+- [x] POST /signals (create signal)
+- [x] GET /trade-proposals
+- [x] GET /trade-proposals/:id
+- [x] PATCH /trade-proposals/:id/cancel
+- [x] Tests
 - [ ] Owner review
 
 ---

@@ -26,6 +26,48 @@ export async function findSignalById(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export async function listSignals(
+  db: Pool | PoolClient,
+  filters: {
+    status?: SignalStatus;
+    strategyId?: string;
+    symbol?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<Signal[]> {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters.status) {
+    values.push(filters.status);
+    clauses.push(`status = $${values.length}`);
+  }
+  if (filters.strategyId) {
+    values.push(filters.strategyId);
+    clauses.push(`strategy_id = $${values.length}`);
+  }
+  if (filters.symbol) {
+    values.push(filters.symbol);
+    clauses.push(`symbol = $${values.length}`);
+  }
+
+  values.push(filters.limit ?? 20);
+  const limitParam = values.length;
+  values.push(filters.offset ?? 0);
+  const offsetParam = values.length;
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const { rows } = await db.query(
+    `SELECT * FROM signals
+     ${where}
+     ORDER BY created_at DESC
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    values,
+  );
+  return rows.map(mapRow);
+}
+
 export async function createSignal(
   db: Pool | PoolClient,
   data: {

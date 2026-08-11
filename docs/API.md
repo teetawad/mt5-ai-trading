@@ -132,7 +132,42 @@ POST /strategies/:id/run  — manually trigger signal generation (owner only)
 ```
 GET /signals            — list recent signals (paginated)
 GET /signals/:id        — signal detail
+POST /signals           — create a signal and run pre-proposal risk (owner only)
 ```
+
+### POST /signals
+
+Request:
+```json
+{
+  "strategyId": "...",
+  "symbol": "AAPL",
+  "side": "BUY",
+  "quantity": "10.00000000",
+  "orderType": "MARKET",
+  "referencePrice": "150.25",
+  "reason": "Manual paper-trading signal"
+}
+```
+
+Response 201:
+```json
+{
+  "signal": { "id": "...", "status": "RISK_PASS" },
+  "riskCheck": { "id": "...", "result": "PASS" },
+  "riskResult": { "result": "PASS", "failed_rules": [] },
+  "proposal": { "id": "...", "status": "PENDING_APPROVAL" }
+}
+```
+
+Notes:
+- The API persists the signal, calls the internal risk engine, persists the risk
+  evaluation, and creates a trade proposal.
+- Risk `PASS` transitions the proposal to `PENDING_APPROVAL` and updates the
+  signal to `RISK_PASS`.
+- Risk `REJECT` records a `RISK_REJECTED` proposal and updates the signal to
+  `RISK_FAIL`.
+- This endpoint does not execute trades and does not approve proposals.
 
 ### GET /signals
 
@@ -226,8 +261,7 @@ Response 200:
 ```
 GET  /trade-proposals              — list proposals (paginated, filterable)
 GET  /trade-proposals/:id          — proposal detail
-POST /trade-proposals/:id/approve  — owner approves a proposal
-POST /trade-proposals/:id/reject   — owner rejects a proposal
+PATCH /trade-proposals/:id/cancel  — cancel a pre-approval proposal (owner only)
 ```
 
 ### GET /trade-proposals/:id
@@ -263,71 +297,27 @@ Response 200:
 
 Note: `currentPrice` and `priceDriftPct` are fetched fresh on each GET for display.
 
-### POST /trade-proposals/:id/approve
+### PATCH /trade-proposals/:id/cancel
 
-Request:
+Response 200:
 ```json
 {
-  "requestId": "client-generated-uuid"
+  "id": "...",
+  "status": "CANCELLED"
 }
 ```
 
-`requestId` is an idempotency key. Duplicate `requestId` values for the same proposal return the original result.
-
-Response 200 (success path — order filled):
+Response 409:
 ```json
-{
-  "proposalId": "...",
-  "status": "FILLED",
-  "executionId": "...",
-  "fills": [
-    { "quantity": "100", "price": "150.40", "fee": "0.50", "filledAt": "..." }
-  ]
-}
+{ "error": "INVALID_STATE", "currentStatus": "RISK_REJECTED" }
 ```
 
-Response 409 (proposal not in PENDING_APPROVAL):
-```json
-{ "error": "INVALID_STATE", "currentStatus": "OWNER_REJECTED" }
-```
-
-Response 422 (risk revalidation failed):
-```json
-{
-  "error": "RISK_REVALIDATION_FAILED",
-  "failedRules": ["MAX_DAILY_LOSS"],
-  "reason": "Daily loss limit exceeded"
-}
-```
-
-Response 410 (proposal expired):
+Response 410:
 ```json
 { "error": "PROPOSAL_EXPIRED", "expiredAt": "..." }
 ```
 
-Response 403 (unauthorized):
-```json
-{ "error": "FORBIDDEN" }
-```
-
-**CRITICAL:** The `approve` endpoint accepts only `requestId`.
-It does NOT accept `symbol`, `quantity`, `price`, or any trading parameter.
-All trading parameters are loaded from the original proposal in the database.
-
-### POST /trade-proposals/:id/reject
-
-Request:
-```json
-{
-  "requestId": "client-generated-uuid",
-  "reason": "Market conditions changed"
-}
-```
-
-Response 200:
-```json
-{ "proposalId": "...", "status": "OWNER_REJECTED" }
-```
+Approval and rejection endpoints are intentionally deferred to Phase 9.
 
 ---
 

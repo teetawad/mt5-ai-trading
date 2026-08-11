@@ -58,6 +58,59 @@ export async function findProposalsByStatus(
   return rows.map(mapRow);
 }
 
+export async function listProposals(
+  db: Pool | PoolClient,
+  filters: {
+    status?: ProposalStatus;
+    symbol?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<TradeProposal[]> {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters.status) {
+    values.push(filters.status);
+    clauses.push(`status = $${values.length}`);
+  }
+  if (filters.symbol) {
+    values.push(filters.symbol);
+    clauses.push(`symbol = $${values.length}`);
+  }
+
+  values.push(filters.limit ?? 20);
+  const limitParam = values.length;
+  values.push(filters.offset ?? 0);
+  const offsetParam = values.length;
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const { rows } = await db.query(
+    `SELECT * FROM trade_proposals
+     ${where}
+     ORDER BY created_at DESC
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    values,
+  );
+  return rows.map(mapRow);
+}
+
+export async function findActiveExposureProposals(
+  db: Pool | PoolClient,
+): Promise<Pick<TradeProposal, 'symbol' | 'side'>[]> {
+  const { rows } = await db.query(
+    `SELECT symbol, side FROM trade_proposals
+     WHERE status IN (
+       'PENDING_APPROVAL', 'APPROVED', 'REVALIDATING', 'SUBMITTING',
+       'SUBMITTED', 'PARTIALLY_FILLED'
+     )`,
+  );
+  return rows.map((row: Record<string, unknown>) => ({
+    symbol: row.symbol as string,
+    side: row.side as 'BUY' | 'SELL',
+  }));
+}
+
 export async function findPendingApprovalProposals(
   db: Pool | PoolClient,
 ): Promise<TradeProposal[]> {
@@ -146,6 +199,18 @@ export async function updateProposalStatus(
     ],
   );
   return mapRow(rows[0]);
+}
+
+export async function expireOpenProposals(db: Pool | PoolClient): Promise<TradeProposal[]> {
+  const { rows } = await db.query(
+    `UPDATE trade_proposals
+     SET status = 'EXPIRED',
+         updated_at = NOW()
+     WHERE status IN ('RISK_CHECKING', 'PENDING_APPROVAL', 'APPROVED', 'REVALIDATING')
+       AND expires_at <= NOW()
+     RETURNING *`,
+  );
+  return rows.map(mapRow);
 }
 
 export async function setProposalRiskCheck(
