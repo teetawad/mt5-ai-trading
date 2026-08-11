@@ -18,8 +18,20 @@ if errorlevel 1 (
 echo.
 echo PostgreSQL has been stopped. Volumes were not deleted.
 echo.
-echo Close the API, Trading Engine, and Frontend CMD windows manually:
-echo - Press Ctrl+C in each service window.
-echo - Then close each CMD window.
+echo Closing development service windows started by start-trade.bat...
+echo.
+
+for %%T in (TRADE_API TRADE_ENGINE TRADE_WEB) do (
+    echo Closing %%T...
+    taskkill /FI "WINDOWTITLE eq %%T" /T /F >nul 2>&1
+    if errorlevel 1 (
+        echo No %%T window found, or it was already closed.
+    ) else (
+        echo %%T closed.
+    )
+)
+
+echo.
+echo Stop complete. Only windows titled TRADE_API, TRADE_ENGINE, and TRADE_WEB were targeted.
 echo.
 pause
