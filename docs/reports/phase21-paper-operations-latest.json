@@ -1,0 +1,49 @@
+{
+  "phase": "21",
+  "generatedAt": "2026-08-11T15:20:18.233Z",
+  "tradingMode": "PAPER",
+  "overallStatus": "BLOCKED",
+  "symbol": "AAPL",
+  "checks": [
+    {
+      "name": "paper trading mode",
+      "status": "BLOCKED",
+      "detail": "Set BROKER_PROVIDER=alpaca_paper before Phase 21 validation."
+    },
+    {
+      "name": "alpaca market data provider",
+      "status": "BLOCKED",
+      "detail": "Set MARKET_DATA_PROVIDER=alpaca before Phase 21 validation."
+    },
+    {
+      "name": "database configured",
+      "status": "PASS",
+      "detail": "DATABASE_URL is configured."
+    },
+    {
+      "name": "trading engine configured",
+      "status": "PASS",
+      "detail": "TRADING_ENGINE_URL is configured."
+    },
+    {
+      "name": "alpaca paper credentials",
+      "status": "BLOCKED",
+      "detail": "Alpaca paper credentials must be provided through environment variables only."
+    },
+    {
+      "name": "live trading endpoint guard",
+      "status": "PASS",
+      "detail": "No live Alpaca trading endpoint is configured for paper trading."
+    },
+    {
+      "name": "phase 21 paper order execution opt-in",
+      "status": "BLOCKED",
+      "detail": "Set PHASE21_ENABLE_PAPER_ORDERS=true to permit one Alpaca PAPER validation order."
+    },
+    {
+      "name": "api dashboard endpoint configured",
+      "status": "BLOCKED",
+      "detail": "Set PHASE21_API_URL and PHASE21_OWNER_BEARER_TOKEN to validate the running dashboard API."
+    }
+  ]
+}

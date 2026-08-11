@@ -417,6 +417,22 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 21 -- Operational PAPER Trading Readiness
+
+- [x] Real US market data verification command added
+- [x] Alpaca PAPER account verification command added
+- [x] Dashboard data correctness verification command added
+- [x] Signal -> risk -> proposal -> owner approval -> paper order verification command added
+- [x] Orders/fills/positions/P&L reconciliation verification command added
+- [x] Reconnect/restart recovery verification command added
+- [x] Kill switch verification command added
+- [x] Logs and audit records verification command added
+- [x] Operational checklist (`docs/PHASE_21_PAPER_TRADING_OPERATIONS.md`)
+- [x] Paper-trading run report (`docs/reports/PHASE_21_PAPER_TRADING_RUN_REPORT.md`)
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass
