@@ -7,7 +7,11 @@ import {
   updateExecutionStatus,
 } from '../db/repositories/executions';
 import { createFill, findFillByBrokerFillId, findFillsByOrder } from '../db/repositories/fills';
-import { createOrder, findOrderByExecution, updateOrderStatus } from '../db/repositories/orders';
+import {
+  createOrder,
+  findOrderByExecution,
+  updateOrderStatus,
+} from '../db/repositories/orders';
 import { createSnapshot } from '../db/repositories/portfolio-snapshots';
 import {
   findPositionBySymbolForUpdate,
@@ -66,6 +70,8 @@ export interface ExecutionWorkflowResult {
   position: Position | null;
   idempotent: boolean;
 }
+
+export type BracketExitReason = 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL' | 'OTHER';
 
 export interface PositionAccountingState {
   quantity: string | null | undefined;
@@ -445,12 +451,22 @@ export async function executeApprovedProposal(
       orderType: proposal.orderType,
       limitPrice: proposal.limitPrice,
       brokerOrderId: brokerResult.broker_order_id,
+      bracketOrderIds: brokerResult.bracket_order_ids ?? (
+        bracketFromProposal(proposal)
+          ? {
+            parent: brokerResult.broker_order_id,
+            take_profit: null,
+            stop_loss: null,
+          }
+          : {}
+      ),
     });
     const persistedFills = await persistFills(client, order.id, brokerResult.fills);
     const updatedOrder = await updateOrderStatus(client, order.id, brokerResult.status, {
       filledQuantity: filledQuantity(brokerResult.fills),
       averageFillPrice: averageFillPrice(brokerResult.fills),
       brokerOrderId: brokerResult.broker_order_id,
+      bracketOrderIds: brokerResult.bracket_order_ids,
     });
     const executionStatus = executionStatusFromBroker(brokerResult);
     const updatedExecution = await updateExecutionStatus(client, execution.id, executionStatus, {
@@ -490,6 +506,79 @@ export async function executeApprovedProposal(
     return {
       proposal: finalProposal,
       execution: updatedExecution,
+      order: updatedOrder,
+      fills: persistedFills,
+      position,
+      idempotent: false,
+    };
+  });
+}
+
+export async function recordApprovedBracketExit(
+  pool: Pool,
+  proposalId: string,
+  exitReason: BracketExitReason,
+  fill: FillEventDTO,
+  actor: ActorContext,
+): Promise<ExecutionWorkflowResult> {
+  return withTransaction(pool, async (client) => {
+    const proposal = await findProposalByIdForUpdate(client, proposalId);
+    if (!proposal) throw new NotFoundError('Trade proposal not found');
+    const execution = await findExecutionByIdempotencyKey(client, executionKey(proposal.id));
+    if (!execution) throw new NotFoundError('Trade execution not found');
+    const order = await findOrderByExecution(client, execution.id);
+    if (!order) throw new NotFoundError('Bracket parent order not found');
+    const phase22 = proposal.riskSnapshot.phase22 as Record<string, unknown> | undefined;
+    if (proposal.side !== 'BUY' || phase22?.orderClass !== 'BRACKET') {
+      throw new InvalidStateTransitionError(proposal.status, 'FILLED');
+    }
+
+    const existingFill = await findFillByBrokerFillId(client, fill.fill_id);
+    if (existingFill) {
+      return existingExecutionResult(client, proposal, execution);
+    }
+
+    const exitOrder = await createOrder(client, {
+      executionId: execution.id,
+      symbol: proposal.symbol,
+      side: 'SELL',
+      quantity: fill.quantity,
+      orderType: 'MARKET',
+      brokerOrderId: fill.order_id,
+      bracketOrderIds: {
+        ...order.bracketOrderIds,
+        cancelled_leg: exitReason === 'TAKE_PROFIT' ? 'stop_loss' : 'take_profit',
+      },
+    });
+    const persistedFills = await persistFills(client, exitOrder.id, [fill]);
+    const updatedOrder = await updateOrderStatus(client, exitOrder.id, 'FILLED', {
+      filledQuantity: fill.quantity,
+      averageFillPrice: fill.price,
+      brokerOrderId: fill.order_id,
+      exitReason,
+      bracketOrderIds: {
+        ...order.bracketOrderIds,
+        filled_leg: exitReason === 'TAKE_PROFIT' ? 'take_profit' : 'stop_loss',
+        cancelled_leg: exitReason === 'TAKE_PROFIT' ? 'stop_loss' : 'take_profit',
+      },
+    });
+    const position = await updatePositionFromFills(client, { ...proposal, side: 'SELL' }, [fill]);
+    await writePortfolioSnapshot(client, actor.requestId ?? undefined, `BRACKET_EXIT_${exitReason}`);
+    await createAuditLog(client, {
+      eventType: 'BRACKET_EXIT_RECONCILED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'trade_proposal',
+      entityId: proposal.id,
+      action: `RECORD_${exitReason}_EXIT`,
+      beforeData: proposalSnapshot(proposal),
+      afterData: { exitReason, fill, cancelledLeg: exitReason === 'TAKE_PROFIT' ? 'stop_loss' : 'take_profit' },
+      requestId: actor.requestId ?? null,
+    });
+
+    return {
+      proposal,
+      execution,
       order: updatedOrder,
       fills: persistedFills,
       position,

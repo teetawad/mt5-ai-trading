@@ -218,6 +218,11 @@ export interface OrderResultDTO {
   broker_order_id: string;
   status: OrderStatus;
   fills: FillEventDTO[];
+  bracket_order_ids?: {
+    parent?: string | null;
+    take_profit?: string | null;
+    stop_loss?: string | null;
+  };
   rejected_reason?: string;
   error_message?: string;
 }

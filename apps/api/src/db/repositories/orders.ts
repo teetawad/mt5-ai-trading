@@ -14,6 +14,8 @@ function mapRow(row: Record<string, unknown>): Order {
     status: row.status as OrderStatus,
     filledQuantity: row.filled_quantity as string,
     averageFillPrice: row.average_fill_price as string | null,
+    bracketOrderIds: row.bracket_order_ids as Record<string, string | null>,
+    exitReason: row.exit_reason as Order['exitReason'],
     createdAt: row.created_at as Date,
     updatedAt: row.updated_at as Date,
   };
@@ -110,12 +112,13 @@ export async function createOrder(
     orderType: string;
     limitPrice?: string | null;
     brokerOrderId?: string | null;
+    bracketOrderIds?: Record<string, string | null>;
   },
 ): Promise<Order> {
   const { rows } = await db.query(
     `INSERT INTO orders
-       (execution_id, symbol, side, quantity, order_type, limit_price, broker_order_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (execution_id, symbol, side, quantity, order_type, limit_price, broker_order_id, bracket_order_ids)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
     [
       data.executionId,
@@ -125,6 +128,7 @@ export async function createOrder(
       data.orderType,
       data.limitPrice ?? null,
       data.brokerOrderId ?? null,
+      JSON.stringify(data.bracketOrderIds ?? {}),
     ],
   );
   return mapRow(rows[0]);
@@ -138,6 +142,8 @@ export async function updateOrderStatus(
     filledQuantity?: string;
     averageFillPrice?: string | null;
     brokerOrderId?: string | null;
+    bracketOrderIds?: Record<string, string | null>;
+    exitReason?: Order['exitReason'];
   } = {},
 ): Promise<Order> {
   const { rows } = await db.query(
@@ -146,7 +152,9 @@ export async function updateOrderStatus(
          updated_at        = NOW(),
          filled_quantity   = COALESCE($3, filled_quantity),
          average_fill_price = COALESCE($4, average_fill_price),
-         broker_order_id   = COALESCE($5, broker_order_id)
+         broker_order_id   = COALESCE($5, broker_order_id),
+         bracket_order_ids = COALESCE($6, bracket_order_ids),
+         exit_reason       = COALESCE($7, exit_reason)
      WHERE id = $1
      RETURNING *`,
     [
@@ -155,6 +163,8 @@ export async function updateOrderStatus(
       data.filledQuantity ?? null,
       data.averageFillPrice ?? null,
       data.brokerOrderId ?? null,
+      data.bracketOrderIds ? JSON.stringify(data.bracketOrderIds) : null,
+      data.exitReason ?? null,
     ],
   );
   return mapRow(rows[0]);

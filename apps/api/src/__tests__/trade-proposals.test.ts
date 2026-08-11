@@ -8,6 +8,7 @@ import { closePool } from '../db/client';
 import { createStrategy } from '../db/repositories/strategies';
 import { getTestPool, setupTestDb } from './db/setup';
 import { executeApprovedProposal } from '../services/trade-execution-service';
+import { recordApprovedBracketExit } from '../services/trade-execution-service';
 import { approveProposal } from '../services/trade-proposal-service';
 import {
   evaluateRisk,
@@ -433,6 +434,281 @@ describe('Phase 8 signal to proposal workflow', () => {
         "UPDATE system_settings SET value = 'false'::jsonb WHERE key = 'phase22_prevent_duplicate_exposure'",
       );
     }
+  });
+
+  it.skipIf(SKIP)('Phase 23 AI BUY creates a proposal but never submits broker orders directly', async () => {
+    mockEngineSequence('PASS');
+
+    const res = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '10.00000000' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.aiDecision.decision).toBe('BUY');
+    expect(res.body.proposal.status).toBe('PENDING_APPROVAL');
+    expect(res.body.proposal.riskSnapshot.aiDecision).toMatchObject({
+      source: 'AI_ASSISTED_DECISION',
+      decision: 'BUY',
+    });
+    expect(vi.mocked(submitOrder)).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(SKIP)('Phase 23 AI HOLD creates no trade', async () => {
+    const res = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'HOLD', quantity: '1.00000000' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.aiDecision.decision).toBe('HOLD');
+    expect(res.body.signal).toBeNull();
+    expect(res.body.proposal).toBeNull();
+    expect(vi.mocked(submitOrder)).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(SKIP)('Phase 23 risk rejection overrides AI BUY', async () => {
+    mockEngine('REJECT');
+
+    const res = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.aiDecision.decision).toBe('BUY');
+    expect(res.body.proposal.status).toBe('RISK_REJECTED');
+    expect(res.body.riskResult.result).toBe('REJECT');
+    expect(vi.mocked(submitOrder)).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(SKIP)('Phase 23 owner approval creates exactly one paper bracket order and duplicate approval is idempotent', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: `phase23-bracket-parent-${BROKER_RUN_ID}`,
+      status: 'FILLED',
+      bracket_order_ids: {
+        parent: `phase23-bracket-parent-${BROKER_RUN_ID}`,
+        take_profit: `phase23-tp-${BROKER_RUN_ID}`,
+        stop_loss: `phase23-sl-${BROKER_RUN_ID}`,
+      },
+      fills: [
+        {
+          order_id: `phase23-bracket-parent-${BROKER_RUN_ID}`,
+          fill_id: `phase23-entry-fill-${BROKER_RUN_ID}`,
+          quantity: '1.00000000',
+          price: '100.00000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:31:00.000Z',
+        },
+      ],
+    });
+
+    const created = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+    const first = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase23-approve-once' });
+    const second = await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase23-approve-once' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.idempotent).toBe(true);
+    expect(vi.mocked(submitOrder)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(submitOrder).mock.calls[0][0].bracket).toMatchObject({
+      stop_loss_price: '98.00000000',
+      take_profit_price: '104.00000000',
+    });
+    expect(first.body.order.bracketOrderIds).toMatchObject({
+      take_profit: `phase23-tp-${BROKER_RUN_ID}`,
+      stop_loss: `phase23-sl-${BROKER_RUN_ID}`,
+    });
+  });
+
+  it.skipIf(SKIP)('Phase 23 take-profit bracket exit closes the position and cancels the stop-loss leg', async () => {
+    await resetTradingLedger(pool);
+    mockEngineSequence('PASS', 'PASS');
+    const created = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+    await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase23-tp-approve' });
+
+    const exit = await recordApprovedBracketExit(pool, created.body.proposal.id, 'TAKE_PROFIT', {
+      order_id: 'phase23-tp-order',
+      fill_id: `phase23-tp-fill-${BROKER_RUN_ID}`,
+      quantity: '1.00000000',
+      price: '104.00000000',
+      fee: '1.00000000',
+      is_partial: false,
+      filled_at: '2024-01-15T10:35:00.000Z',
+    }, { actorId: OWNER_ID, actorEmail: 'phase8-owner@test.example.com' });
+
+    expect(exit.position?.quantity).toBe('0.00000000');
+    expect(exit.order?.exitReason).toBe('TAKE_PROFIT');
+    expect(exit.order?.bracketOrderIds.cancelled_leg).toBe('stop_loss');
+  });
+
+  it.skipIf(SKIP)('Phase 23 stop-loss bracket exit closes the position and cancels the take-profit leg', async () => {
+    await resetTradingLedger(pool);
+    mockEngineSequence('PASS', 'PASS');
+    const created = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+    await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase23-sl-approve' });
+
+    const exit = await recordApprovedBracketExit(pool, created.body.proposal.id, 'STOP_LOSS', {
+      order_id: 'phase23-sl-order',
+      fill_id: `phase23-sl-fill-${BROKER_RUN_ID}`,
+      quantity: '1.00000000',
+      price: '98.00000000',
+      fee: '1.00000000',
+      is_partial: false,
+      filled_at: '2024-01-15T10:35:00.000Z',
+    }, { actorId: OWNER_ID, actorEmail: 'phase8-owner@test.example.com' });
+
+    expect(exit.position?.quantity).toBe('0.00000000');
+    expect(exit.order?.exitReason).toBe('STOP_LOSS');
+    expect(exit.order?.bracketOrderIds.cancelled_leg).toBe('take_profit');
+  });
+
+  it.skipIf(SKIP)('Phase 23 approved AI plan is immutable', async () => {
+    mockEngineSequence('PASS', 'PASS');
+    const created = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+    await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase23-immutable-approve' });
+
+    await expect(pool.query(
+      "UPDATE trade_proposals SET risk_snapshot = jsonb_set(risk_snapshot, '{phase22,stopLoss}', '\"99.00000000\"'::jsonb) WHERE id = $1",
+      [created.body.proposal.id],
+    )).rejects.toThrow(/Cannot modify approved trading plan/);
+  });
+
+  it.skipIf(SKIP)('Phase 23 pending paper order blocks duplicate AI entry', async () => {
+    await resetTradingLedger(pool);
+    mockEngineSequence('PASS', 'PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: `phase23-pending-parent-${BROKER_RUN_ID}`,
+      status: 'SUBMITTED',
+      fills: [],
+    });
+    const first = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+    await request(app)
+      .post(`/trade-proposals/${first.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'phase23-pending-approve' });
+
+    const duplicate = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body.proposal.status).toBe('RISK_REJECTED');
+    expect(duplicate.body.riskCheck.failedRules).toContain('PHASE22_DUPLICATE_PENDING_ORDER');
+  });
+
+  it.skipIf(SKIP)('Phase 23 cooldown blocks AI entry after a recent fill', async () => {
+    await resetTradingLedger(pool);
+    await pool.query(
+      "UPDATE system_settings SET value = '3600'::jsonb WHERE key = 'cooldown_between_trades_seconds'",
+    );
+    mockEngineSequence('PASS', 'PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: `phase23-cooldown-parent-${BROKER_RUN_ID}`,
+      status: 'FILLED',
+      fills: [
+        {
+          order_id: `phase23-cooldown-parent-${BROKER_RUN_ID}`,
+          fill_id: `phase23-cooldown-fill-${BROKER_RUN_ID}`,
+          quantity: '1.00000000',
+          price: '100.00000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: new Date().toISOString(),
+        },
+      ],
+    });
+    try {
+      const first = await request(app)
+        .post('/signals/ai-decision')
+        .set('Authorization', `Bearer ${token()}`)
+        .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+      await request(app)
+        .post(`/trade-proposals/${first.body.proposal.id}/approve`)
+        .set('Authorization', `Bearer ${token()}`)
+        .send({ requestId: 'phase23-cooldown-approve' });
+
+      const blocked = await request(app)
+        .post('/signals/ai-decision')
+        .set('Authorization', `Bearer ${token()}`)
+        .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+
+      expect(blocked.status).toBe(201);
+      expect(blocked.body.proposal.status).toBe('RISK_REJECTED');
+      expect(blocked.body.riskCheck.failedRules).toContain('PHASE22_COOLDOWN');
+    } finally {
+      await pool.query(
+        "UPDATE system_settings SET value = '0'::jsonb WHERE key = 'cooldown_between_trades_seconds'",
+      );
+    }
+  });
+
+  it.skipIf(SKIP)('Phase 23 daily loss limit blocks AI entry', async () => {
+    await resetTradingLedger(pool);
+    await pool.query(
+      `INSERT INTO portfolio_snapshots
+       (cash_balance, portfolio_equity, open_positions, pending_orders, realized_pnl, unrealized_pnl, daily_pnl, snapshot_reason)
+       VALUES ('49000.00000000', '49000.00000000', '[]'::jsonb, '[]'::jsonb, '-1001.00000000', '0.00000000', '-1001.00000000', 'PHASE23_DAILY_LOSS_TEST')`,
+    );
+    mockEngineSequence('PASS');
+
+    const blocked = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+
+    expect(blocked.status).toBe(201);
+    expect(blocked.body.proposal.status).toBe('RISK_REJECTED');
+    expect(blocked.body.riskCheck.failedRules).toContain('PHASE22_MAX_DAILY_LOSS');
+  });
+
+  it.skipIf(SKIP)('Phase 23 max trade loss reduces AI requested position size', async () => {
+    await resetTradingLedger(pool);
+    mockEngineSequence('PASS');
+
+    const res = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '100.00000000' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.proposal.status).toBe('PENDING_APPROVAL');
+    expect(res.body.aiDecision.suggestedPositionSize).toBe('100.00000000');
+    expect(res.body.proposal.quantity).toBe('48.00000000');
+    expect(res.body.proposal.riskSnapshot.phase22.maxLoss).toBe('99.40000000');
   });
 
   it.skipIf(SKIP)('POST /signals/manual-test rejects unsupported symbols server-side', async () => {

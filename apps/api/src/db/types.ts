@@ -154,6 +154,8 @@ export interface Order {
   status: OrderStatus;
   filledQuantity: string;    // NUMERIC(18,8)
   averageFillPrice: string | null; // NUMERIC(18,8)
+  bracketOrderIds: Record<string, string | null>;
+  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL' | 'OTHER' | null;
   createdAt: Date;
   updatedAt: Date;
 }

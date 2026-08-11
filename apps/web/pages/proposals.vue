@@ -90,6 +90,18 @@
       </div>
       <dl class="mt-4 grid gap-3 md:grid-cols-4">
         <div>
+          <dt class="text-xs uppercase text-slate-500">AI Signal</dt>
+          <dd class="mt-1 font-medium">{{ aiDecision(selected)?.decision ?? '-' }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Confidence</dt>
+          <dd class="mt-1 font-medium">{{ aiDecision(selected)?.confidence ?? '-' }}</dd>
+        </div>
+        <div class="md:col-span-2">
+          <dt class="text-xs uppercase text-slate-500">AI Reasons</dt>
+          <dd class="mt-1 font-medium">{{ aiDecision(selected)?.reasons?.join(' ') ?? '-' }}</dd>
+        </div>
+        <div>
           <dt class="text-xs uppercase text-slate-500">Side</dt>
           <dd class="mt-1 font-medium">{{ selected.side }}</dd>
         </div>
@@ -150,8 +162,16 @@
           <dd class="mt-1 font-medium">{{ cooldown(phase22(selected)?.cooldown) }}</dd>
         </div>
         <div>
-          <dt class="text-xs uppercase text-slate-500">Risk Result</dt>
-          <dd class="mt-1 font-medium">{{ phase22(selected)?.result ?? selected.riskSnapshot?.result ?? '-' }}</dd>
+          <dt class="text-xs uppercase text-slate-500">Pending Order Status</dt>
+          <dd class="mt-1 font-medium">{{ pendingOrderStatus(phase22(selected)) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Risk Engine Decision</dt>
+          <dd class="mt-1 font-medium">{{ selected.riskSnapshot?.result ?? '-' }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase text-slate-500">Phase 22 Risk Result</dt>
+          <dd class="mt-1 font-medium">{{ phase22(selected)?.result ?? '-' }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Created</dt>
@@ -178,11 +198,17 @@ type Proposal = {
   estimatedNotional: string;
   riskSnapshot: {
     result?: string;
+    aiDecision?: AiDecision;
     phase22?: Phase22Risk;
   } | null;
   createdAt: string;
   expiresAt: string;
   status: string;
+};
+type AiDecision = {
+  decision: string;
+  confidence: string;
+  reasons: string[];
 };
 type Phase22Risk = {
   entry: string;
@@ -194,6 +220,7 @@ type Phase22Risk = {
   estimatedSlippagePct: string;
   dailyLossUsed: string;
   result: string;
+  conflictingPendingOrders?: unknown[];
   cooldown?: {
     remainingSeconds?: number;
     passed?: boolean;
@@ -261,6 +288,15 @@ function cooldown(value?: Phase22Risk['cooldown']): string {
 
 function phase22(proposal: Proposal): Phase22Risk | undefined {
   return proposal.riskSnapshot?.phase22;
+}
+
+function aiDecision(proposal: Proposal): AiDecision | undefined {
+  return proposal.riskSnapshot?.aiDecision;
+}
+
+function pendingOrderStatus(value?: Phase22Risk): string {
+  if (!value) return '-';
+  return value.conflictingPendingOrders?.length ? 'BLOCKED' : 'CLEAR';
 }
 
 function shortDate(value: string): string {

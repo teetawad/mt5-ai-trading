@@ -26,7 +26,7 @@ describe('migrations', () => {
     );
     expect(rows.length).toBeGreaterThanOrEqual(16);
     expect(rows[0].version).toBe('0001_create_users');
-    expect(rows[rows.length - 1].version).toBe('0018_seed_phase22_risk_settings');
+    expect(rows[rows.length - 1].version).toBe('0019_phase23_ai_bracket_state');
   });
 
   it.skipIf(SKIP)('all expected tables exist', async () => {

@@ -28,6 +28,7 @@ import {
   getTrackedSymbols,
 } from './trading-engine-client';
 import { assertValidProposalTransition, InvalidStateTransitionError } from './proposal-state-machine';
+import { AiDecision, analyzeUsStock } from './ai-decision-service';
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -71,6 +72,7 @@ export interface CreateSignalInput {
   referencePrice?: string;
   reason: string;
   confidence?: string | null;
+  aiDecision?: AiDecision | null;
 }
 
 export interface ActorContext {
@@ -94,6 +96,20 @@ export interface CreateManualTestSignalInput {
   quantity: string;
 }
 
+export interface CreateAiDecisionInput {
+  symbol: string;
+  side?: 'BUY' | 'SELL' | 'HOLD';
+  quantity?: string;
+}
+
+export interface AiDecisionWorkflowResult {
+  aiDecision: AiDecision;
+  signal: Signal | null;
+  riskCheck: RiskCheck | null;
+  riskResult: RiskResultDTO | null;
+  proposal: TradeProposal | null;
+}
+
 export interface ApprovalWorkflowResult {
   proposal: TradeProposal;
   approval: TradeApproval;
@@ -104,6 +120,7 @@ export interface ApprovalWorkflowResult {
 
 const DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
 const MANUAL_TEST_STRATEGY_NAME = 'MANUAL_TEST_PAPER_ONLY';
+const AI_ASSISTED_STRATEGY_NAME = 'AI_ASSISTED_PAPER_ONLY';
 const SUPPORTED_US_STOCK_PATTERN = /^[A-Z]{1,5}(\.[A-Z])?$/;
 const EIGHT_DP = 8;
 
@@ -417,7 +434,7 @@ export async function createSignalAndProposal(
       reason: input.reason.trim(),
       strategyVersion: strategy.version,
       confidence: input.confidence ?? null,
-      marketSnapshot: { ...market },
+      marketSnapshot: input.aiDecision ? { ...market, aiDecision: input.aiDecision } : { ...market },
       expiresAt,
     });
 
@@ -454,6 +471,7 @@ export async function createSignalAndProposal(
       result: (riskResult.result === 'PASS' && phase22.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
       failed_rules: combinedFailedRules,
       reason: [riskResult.reason, phase22.reason].filter(Boolean).join('; ') || null,
+      aiDecision: input.aiDecision ?? null,
       phase22: phase22.snapshot,
     };
 
@@ -569,6 +587,69 @@ export async function createManualTestSignalAndProposal(
     },
     actor,
   );
+}
+
+export async function createAiDecisionAndProposal(
+  pool: Pool,
+  input: CreateAiDecisionInput,
+  actor: ActorContext,
+): Promise<AiDecisionWorkflowResult> {
+  const symbol = String(input.symbol ?? '').trim().toUpperCase();
+  if (!SUPPORTED_US_STOCK_PATTERN.test(symbol)) {
+    throw new ValidationError('symbol must be a supported US stock symbol');
+  }
+  if (input.side !== undefined && !['BUY', 'SELL', 'HOLD'].includes(input.side)) {
+    throw new ValidationError('side must be BUY, SELL, or HOLD');
+  }
+  const quantity = String(input.quantity ?? '1.00000000');
+  validatePositiveDecimal(quantity, 'quantity');
+  const tradingMode = await getSettingValue<string>(pool, 'trading_mode');
+  if ((tradingMode ?? 'PAPER') !== 'PAPER') {
+    throw new ValidationError('AI-assisted signals are available in PAPER mode only');
+  }
+
+  const market = await getMarketSnapshot(symbol, actor.requestId ?? undefined);
+  if (!market) throw new NotFoundError(`Symbol not found: ${symbol}`);
+  const aiDecision = analyzeUsStock(market, {
+    requestedSide: input.side,
+    requestedQuantity: quantity,
+  });
+
+  if (aiDecision.decision === 'HOLD') {
+    await createAuditLog(pool, {
+      eventType: 'AI_DECISION_HOLD',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'signal',
+      entityId: null,
+      action: 'AI_HOLD_NO_TRADE',
+      afterData: { aiDecision },
+      requestId: actor.requestId ?? null,
+    });
+    return { aiDecision, signal: null, riskCheck: null, riskResult: null, proposal: null };
+  }
+
+  const strategy = await upsertStrategy(pool, {
+    name: AI_ASSISTED_STRATEGY_NAME,
+    description: 'AI-assisted PAPER ONLY US stock decision layer. Never submits broker orders.',
+    version: aiDecision.strategyVersion,
+    parameters: { source: 'ai_assisted', model: aiDecision.model, tradingMode: 'PAPER' },
+    isActive: true,
+  });
+
+  const result = await createSignalAndProposal(pool, {
+    strategyId: strategy.id,
+    symbol,
+    side: aiDecision.decision,
+    quantity: aiDecision.suggestedPositionSize,
+    orderType: 'MARKET',
+    referencePrice: aiDecision.proposedEntry,
+    reason: `AI DECISION / PAPER ONLY: ${aiDecision.decision}`,
+    confidence: aiDecision.confidence,
+    aiDecision,
+  }, actor);
+
+  return { aiDecision, ...result };
 }
 
 export async function cancelProposal(
