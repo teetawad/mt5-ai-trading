@@ -118,6 +118,14 @@ function mockEngineSequence(...results: Array<'PASS' | 'REJECT'>) {
   }
 }
 
+async function resetTradingLedger(pool: Pool) {
+  await pool.query(
+    `TRUNCATE audit_logs, fills, orders, executions, trade_approvals, risk_checks,
+     trade_proposals, signals, positions, portfolio_snapshots
+     RESTART IDENTITY CASCADE`,
+  );
+}
+
 describe('Phase 8 route guards', () => {
   beforeEach(() => {
     _clearDenylistForTest();
@@ -202,6 +210,9 @@ describe('Phase 8 signal to proposal workflow', () => {
        ON CONFLICT (id) DO NOTHING`,
       [OWNER_ID],
     );
+    await pool.query(
+      "UPDATE system_settings SET value = '50000'::jsonb WHERE key = 'initial_paper_cash_usd'",
+    );
     const strategy = await createStrategy(pool, {
       name: `phase-8-${Date.now()}`,
       version: '1.0.0',
@@ -217,6 +228,9 @@ describe('Phase 8 signal to proposal workflow', () => {
         `TRUNCATE audit_logs, fills, orders, executions, trade_approvals, risk_checks,
          trade_proposals, signals, positions, portfolio_snapshots, strategies
          RESTART IDENTITY CASCADE`,
+      );
+      await pool.query(
+        "UPDATE system_settings SET value = '100000'::jsonb WHERE key = 'initial_paper_cash_usd'",
       );
       await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
       await pool.end();
@@ -903,7 +917,16 @@ describe('Phase 8 signal to proposal workflow', () => {
   });
 
   it.skipIf(SKIP)('closing a paper position carries realized P&L into the latest portfolio snapshot', async () => {
+    await resetTradingLedger(pool);
     mockEngineSequence('PASS', 'PASS', 'PASS', 'PASS');
+    vi.mocked(getPaperPortfolio).mockReset();
+    vi.mocked(getPaperPortfolio)
+      .mockResolvedValueOnce({ cash: '50000.00000000', positions: {} })
+      .mockResolvedValueOnce({ cash: '50000.00000000', positions: {} })
+      .mockResolvedValueOnce({ cash: '49899.00000000', positions: { MSFT: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49899.00000000', positions: { MSFT: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49899.00000000', positions: { MSFT: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49997.93000000', positions: {} });
     vi.mocked(submitOrder)
       .mockResolvedValueOnce({
         broker_order_id: `broker-order-close-pnl-buy-${BROKER_RUN_ID}`,
@@ -971,13 +994,118 @@ describe('Phase 8 signal to proposal workflow', () => {
     expect(closed.body.position.realizedPnl).toBe('-2.07000000');
 
     const latestSnapshot = await pool.query(
-      'SELECT realized_pnl, unrealized_pnl FROM portfolio_snapshots ORDER BY created_at DESC LIMIT 1',
+      'SELECT cash_balance, portfolio_equity, realized_pnl, unrealized_pnl FROM portfolio_snapshots ORDER BY created_at DESC LIMIT 1',
     );
+    expect(latestSnapshot.rows[0].cash_balance).toBe('49997.93000000');
+    expect(latestSnapshot.rows[0].portfolio_equity).toBe('49997.93000000');
     expect(latestSnapshot.rows[0].realized_pnl).toBe('-2.07000000');
     const closedPosition = await pool.query(
       "SELECT unrealized_pnl FROM positions WHERE symbol = 'MSFT'",
     );
     expect(closedPosition.rows[0].unrealized_pnl).toBe('0.00000000');
+  });
+
+  it.skipIf(SKIP)('multiple sequential paper round trips keep realized P&L aligned with cash equity', async () => {
+    await resetTradingLedger(pool);
+    mockEngineSequence('PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS');
+    vi.mocked(getPaperPortfolio).mockReset();
+    vi.mocked(getPaperPortfolio)
+      .mockResolvedValueOnce({ cash: '50000.00000000', positions: {} })
+      .mockResolvedValueOnce({ cash: '50000.00000000', positions: {} })
+      .mockResolvedValueOnce({ cash: '49899.00000000', positions: { PNLA: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49899.00000000', positions: { PNLA: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49899.00000000', positions: { PNLA: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49997.93000000', positions: {} })
+      .mockResolvedValueOnce({ cash: '49997.93000000', positions: {} })
+      .mockResolvedValueOnce({ cash: '49997.93000000', positions: {} })
+      .mockResolvedValueOnce({ cash: '49896.93000000', positions: { PNLA: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49896.93000000', positions: { PNLA: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49896.93000000', positions: { PNLA: '1.00000000' } })
+      .mockResolvedValueOnce({ cash: '49995.65000000', positions: {} });
+    vi.mocked(submitOrder)
+      .mockResolvedValueOnce({
+        broker_order_id: `broker-order-seq-pnl-buy-1-${BROKER_RUN_ID}`,
+        status: 'FILLED',
+        fills: [ {
+          order_id: `broker-order-seq-pnl-buy-1-${BROKER_RUN_ID}`,
+          fill_id: `broker-fill-seq-pnl-buy-1-${BROKER_RUN_ID}`,
+          quantity: '1.00000000',
+          price: '100.00000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:31:00.000Z',
+        } ],
+      })
+      .mockResolvedValueOnce({
+        broker_order_id: `broker-order-seq-pnl-sell-1-${BROKER_RUN_ID}`,
+        status: 'FILLED',
+        fills: [ {
+          order_id: `broker-order-seq-pnl-sell-1-${BROKER_RUN_ID}`,
+          fill_id: `broker-fill-seq-pnl-sell-1-${BROKER_RUN_ID}`,
+          quantity: '1.00000000',
+          price: '99.93000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:32:00.000Z',
+        } ],
+      })
+      .mockResolvedValueOnce({
+        broker_order_id: `broker-order-seq-pnl-buy-2-${BROKER_RUN_ID}`,
+        status: 'FILLED',
+        fills: [ {
+          order_id: `broker-order-seq-pnl-buy-2-${BROKER_RUN_ID}`,
+          fill_id: `broker-fill-seq-pnl-buy-2-${BROKER_RUN_ID}`,
+          quantity: '1.00000000',
+          price: '100.00000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:33:00.000Z',
+        } ],
+      })
+      .mockResolvedValueOnce({
+        broker_order_id: `broker-order-seq-pnl-sell-2-${BROKER_RUN_ID}`,
+        status: 'FILLED',
+        fills: [ {
+          order_id: `broker-order-seq-pnl-sell-2-${BROKER_RUN_ID}`,
+          fill_id: `broker-fill-seq-pnl-sell-2-${BROKER_RUN_ID}`,
+          quantity: '1.00000000',
+          price: '99.72000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:34:00.000Z',
+        } ],
+      });
+
+    for (const [index, side] of ['BUY', 'SELL', 'BUY', 'SELL'].entries()) {
+      const created = await request(app)
+        .post('/signals')
+        .set('Authorization', `Bearer ${token()}`)
+        .send({
+          strategyId,
+          symbol: 'PNLA',
+          side,
+          quantity: '1.00000000',
+          reason: `sequential pnl ${index}`,
+        });
+      const approved = await request(app)
+        .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+        .set('Authorization', `Bearer ${token()}`)
+        .send({ requestId: `sequential-pnl-${index}` });
+
+      expect(approved.status).toBe(200);
+    }
+
+    const latestSnapshot = await pool.query(
+      'SELECT cash_balance, portfolio_equity, realized_pnl, unrealized_pnl FROM portfolio_snapshots ORDER BY created_at DESC LIMIT 1',
+    );
+    expect(latestSnapshot.rows[0].cash_balance).toBe('49995.65000000');
+    expect(latestSnapshot.rows[0].portfolio_equity).toBe('49995.65000000');
+    expect(latestSnapshot.rows[0].unrealized_pnl).toBe('0.00000000');
+    expect(latestSnapshot.rows[0].realized_pnl).toBe('-4.35000000');
+
+    const invariant = Number(latestSnapshot.rows[0].portfolio_equity)
+      - (50000 + Number(latestSnapshot.rows[0].realized_pnl));
+    expect(invariant).toBeCloseTo(0, 8);
   });
 
   it.skipIf(SKIP)('POST execute can recover after app restart from a transient broker submission error', async () => {

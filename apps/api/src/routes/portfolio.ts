@@ -1,4 +1,3 @@
-import Decimal from 'decimal.js';
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../auth/middleware';
 import { getPool } from '../db/client';
@@ -6,15 +5,14 @@ import {
   findLatestSnapshot,
   listSnapshots,
 } from '../db/repositories/portfolio-snapshots';
-import { findAllPositions, findOpenPositions } from '../db/repositories/positions';
+import { findOpenPositions } from '../db/repositories/positions';
+import { getSettingValue } from '../db/repositories/system-settings';
+import { calculatePortfolioPnl } from '../services/trade-execution-service';
+import { getPaperPortfolio } from '../services/trading-engine-client';
 
 export const portfolioRouter = Router();
 
 portfolioRouter.use(requireAuth);
-
-function money(value: Decimal): string {
-  return value.toDecimalPlaces(8).toFixed(8);
-}
 
 function pagination(req: Request): { limit: number; offset: number } | null {
   const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
@@ -34,10 +32,7 @@ function pagination(req: Request): { limit: number; offset: number } | null {
 portfolioRouter.get('/', async (_req: Request, res: Response) => {
   const pool = getPool();
   const latest = await findLatestSnapshot(pool);
-  const [positions, allPositions] = await Promise.all([
-    findOpenPositions(pool),
-    findAllPositions(pool),
-  ]);
+  const positions = await findOpenPositions(pool);
 
   if (latest) {
     res.json({
@@ -53,21 +48,18 @@ portfolioRouter.get('/', async (_req: Request, res: Response) => {
     return;
   }
 
-  const unrealizedPnl = allPositions.reduce(
-    (sum, position) => sum.plus(position.unrealizedPnl),
-    new Decimal(0),
-  );
-  const realizedPnl = allPositions.reduce(
-    (sum, position) => sum.plus(position.realizedPnl),
-    new Decimal(0),
-  );
+  const [paperPortfolio, initialCash] = await Promise.all([
+    getPaperPortfolio(),
+    getSettingValue(pool, 'initial_paper_cash_usd'),
+  ]);
+  const pnl = calculatePortfolioPnl(String(initialCash ?? '100000'), paperPortfolio.cash, positions);
 
   res.json({
-    cashBalance: '0.00000000',
-    portfolioEquity: money(unrealizedPnl.plus(realizedPnl)),
-    realizedPnl: money(realizedPnl),
-    unrealizedPnl: money(unrealizedPnl),
-    dailyPnl: money(realizedPnl),
+    cashBalance: paperPortfolio.cash,
+    portfolioEquity: pnl.portfolioEquity,
+    realizedPnl: pnl.realizedPnl,
+    unrealizedPnl: pnl.unrealizedPnl,
+    dailyPnl: pnl.realizedPnl,
     openPositions: positions,
     pendingOrders: [],
     lastUpdatedAt: null,

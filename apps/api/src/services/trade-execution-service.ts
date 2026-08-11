@@ -10,7 +10,6 @@ import { createFill, findFillByBrokerFillId, findFillsByOrder } from '../db/repo
 import { createOrder, findOrderByExecution, updateOrderStatus } from '../db/repositories/orders';
 import { createSnapshot } from '../db/repositories/portfolio-snapshots';
 import {
-  findAllPositions,
   findPositionBySymbolForUpdate,
   findOpenPositions,
   upsertPosition,
@@ -81,6 +80,12 @@ export interface PositionAccountingResult {
   realizedPnl: string;
   unrealizedPnl: string;
   lastPrice: string | null;
+}
+
+export interface PortfolioPnlResult {
+  portfolioEquity: string;
+  realizedPnl: string;
+  unrealizedPnl: string;
 }
 
 function executionKey(proposalId: string): string {
@@ -214,6 +219,35 @@ export function calculatePositionAccounting(
   };
 }
 
+export function calculatePortfolioPnl(
+  initialCash: string,
+  cash: string,
+  openPositions: Pick<Position, 'quantity' | 'averageEntryPrice' | 'lastPrice'>[],
+): PortfolioPnlResult {
+  const positionMarketValue = openPositions.reduce(
+    (sum, position) => sum.plus(decimal(position.quantity).times(decimal(position.lastPrice))),
+    new Decimal(0),
+  );
+  const unrealizedPnl = openPositions.reduce(
+    (sum, position) => (
+      sum.plus(
+        decimal(position.lastPrice)
+          .minus(decimal(position.averageEntryPrice))
+          .times(decimal(position.quantity)),
+      )
+    ),
+    new Decimal(0),
+  );
+  const portfolioEquity = decimal(cash).plus(positionMarketValue);
+  const realizedPnl = portfolioEquity.minus(decimal(initialCash)).minus(unrealizedPnl);
+
+  return {
+    portfolioEquity: money(portfolioEquity),
+    realizedPnl: money(realizedPnl),
+    unrealizedPnl: money(unrealizedPnl),
+  };
+}
+
 async function persistFills(
   client: PoolClient,
   orderId: string,
@@ -271,30 +305,17 @@ async function writePortfolioSnapshot(
     getPaperPortfolio(requestId),
     findOpenPositions(client),
   ]);
-  const allPositions = await findAllPositions(client);
-  const realizedPnl = allPositions.reduce(
-    (sum, position) => sum.plus(position.realizedPnl),
-    new Decimal(0),
-  );
-  const unrealizedPnl = allPositions.reduce(
-    (sum, position) => sum.plus(position.unrealizedPnl),
-    new Decimal(0),
-  );
-  const portfolioEquity = decimal(portfolio.cash).plus(
-    openPositions.reduce(
-      (sum, position) => sum.plus(decimal(position.quantity).times(decimal(position.lastPrice))),
-      new Decimal(0),
-    ),
-  );
+  const initialCash = String(await getSettingValue(client, 'initial_paper_cash_usd') ?? '100000');
+  const pnl = calculatePortfolioPnl(initialCash, portfolio.cash, openPositions);
 
   await createSnapshot(client, {
     cashBalance: portfolio.cash,
-    portfolioEquity: money(portfolioEquity),
+    portfolioEquity: pnl.portfolioEquity,
     openPositions,
     pendingOrders: [],
-    realizedPnl: money(realizedPnl),
-    unrealizedPnl: money(unrealizedPnl),
-    dailyPnl: money(realizedPnl),
+    realizedPnl: pnl.realizedPnl,
+    unrealizedPnl: pnl.unrealizedPnl,
+    dailyPnl: pnl.realizedPnl,
     snapshotReason: reason,
   });
 }
