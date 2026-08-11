@@ -71,17 +71,19 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 3 — Authentication
 
-- [ ] Single owner account bootstrap
-- [ ] POST /auth/login
-- [ ] POST /auth/logout
-- [ ] GET /auth/me
-- [ ] Secure password hashing (bcrypt/argon2)
-- [ ] JWT or session tokens
-- [ ] Protected API middleware
-- [ ] Authorization layer
-- [ ] Audit events (LOGIN, LOGOUT, FAILED_LOGIN)
-- [ ] Authentication tests
-- [ ] Security tests
+- [x] Single owner account bootstrap (`npm run bootstrap:owner`)
+- [x] POST /auth/login
+- [x] POST /auth/logout
+- [x] GET /auth/me
+- [x] Secure password hashing (argon2id, 64 MiB memory cost)
+- [x] JWT session tokens (HttpOnly cookie + Bearer header)
+- [x] Server-side logout denylist (JTI-based, memory-resident)
+- [x] Protected API middleware (`requireAuth`, `requireOwner`)
+- [x] Authorization layer (role-based, owner-only guard)
+- [x] Audit events (LOGIN_SUCCESS, LOGIN_FAILED, LOGOUT)
+- [x] Rate limiting on /auth/login (skipped in test mode)
+- [x] Authentication unit tests (tokens, denylist, middleware)
+- [x] Authentication integration tests (routes, audit events; skip without DB)
 - [ ] Owner review
 
 ---
