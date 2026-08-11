@@ -25,6 +25,17 @@ export async function findFillsByOrder(
   return rows.map(mapRow);
 }
 
+export async function listRecentFills(
+  db: Pool | PoolClient,
+  limit = 20,
+): Promise<Fill[]> {
+  const { rows } = await db.query(
+    'SELECT * FROM fills ORDER BY filled_at DESC LIMIT $1',
+    [limit],
+  );
+  return rows.map(mapRow);
+}
+
 export async function findFillByBrokerFillId(
   db: Pool | PoolClient,
   brokerFillId: string,

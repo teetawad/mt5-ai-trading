@@ -694,7 +694,9 @@ class TestBrokerEndpoints:
         client = TestClient(app)
         res = client.get("/broker/health")
         assert res.status_code == 200
-        assert res.json() == {"available": True}
+        assert res.json()["available"] is True
+        assert res.json()["provider"] == "local_paper"
+        assert res.json()["trading_mode"] == "PAPER"
 
     def test_broker_health_unavailable_when_injected(self):
         from fastapi.testclient import TestClient
@@ -705,7 +707,8 @@ class TestBrokerEndpoints:
         client = TestClient(app)
         res = client.get("/broker/health")
         assert res.status_code == 200
-        assert res.json() == {"available": False}
+        assert res.json()["available"] is False
+        assert res.json()["trading_mode"] == "PAPER"
 
     def test_paper_portfolio_returns_200(self):
         from fastapi.testclient import TestClient
@@ -718,6 +721,41 @@ class TestBrokerEndpoints:
         data = res.json()
         assert "cash" in data
         assert "positions" in data
+
+    def test_paper_account_returns_cash_and_buying_power(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.get("/broker/paper-account")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["cash"] == "100000.00000000"
+        assert data["buying_power"] == "100000.00000000"
+
+    def test_open_orders_returns_pending_paper_orders(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        post_res = client.post(
+            "/broker/orders",
+            json={
+                "idempotency_key": "e2e-open-limit",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": "5",
+                "order_type": "LIMIT",
+                "limit_price": "50.00",
+            },
+        )
+        assert post_res.status_code == 200
+
+        res = client.get("/broker/open-orders")
+        assert res.status_code == 200
+        assert res.json()[0]["status"] == "SUBMITTED"
 
     def test_internal_token_rejected_when_set(self, monkeypatch):
         monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "secret")

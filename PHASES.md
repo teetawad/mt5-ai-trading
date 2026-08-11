@@ -317,6 +317,27 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 16.5 — Alpaca Paper Dashboard Integration
+
+- [x] Dashboard API aggregation for PAPER TRADING state
+- [x] Alpaca paper account connection status
+- [x] Paper buying power and cash
+- [x] Current US stock prices
+- [x] Pending trade proposals
+- [x] Risk results
+- [x] Approve/reject actions
+- [x] Alpaca paper orders and order status
+- [x] Fills
+- [x] Positions
+- [x] Realized and unrealized P&L
+- [x] Market data freshness
+- [x] Reconciliation status
+- [x] Kill switch control
+- [x] No live trading or real-money execution
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

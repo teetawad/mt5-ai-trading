@@ -104,3 +104,17 @@ class PaperPortfolio(BaseModel):
     @field_serializer("positions")
     def _ser_pos(self, v: dict[str, Decimal]) -> dict[str, str]:
         return {k: _fmt(val) for k, val in v.items()}
+
+
+class PaperAccount(BaseModel):
+    cash: Decimal
+    buying_power: Decimal
+    account_id: str | None = None
+    currency: str | None = None
+    status: str | None = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @field_serializer("cash", "buying_power")
+    def _ser_account_dec(self, v: Decimal) -> str:
+        return _fmt(v)

@@ -252,6 +252,14 @@ export async function getOrder(
   return res.json() as Promise<OrderResultDTO>;
 }
 
+export async function getBrokerOpenOrders(requestId?: string): Promise<OrderResultDTO[]> {
+  const res = await engineFetch('/broker/open-orders', requestId);
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<OrderResultDTO[]>;
+}
+
 export async function cancelOrder(
   brokerOrderId: string,
   requestId?: string,
@@ -268,12 +276,14 @@ export async function cancelOrder(
   return res.json() as Promise<OrderResultDTO>;
 }
 
-export async function getBrokerHealth(requestId?: string): Promise<{ available: boolean }> {
+export async function getBrokerHealth(
+  requestId?: string,
+): Promise<{ available: boolean; provider?: string; trading_mode?: string }> {
   const res = await engineFetch('/broker/health', requestId);
   if (!res.ok) {
     throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
   }
-  return res.json() as Promise<{ available: boolean }>;
+  return res.json() as Promise<{ available: boolean; provider?: string; trading_mode?: string }>;
 }
 
 export async function getPaperPortfolio(requestId?: string): Promise<PaperPortfolioDTO> {
@@ -282,6 +292,22 @@ export async function getPaperPortfolio(requestId?: string): Promise<PaperPortfo
     throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
   }
   return res.json() as Promise<PaperPortfolioDTO>;
+}
+
+export interface PaperAccountDTO {
+  cash: string;
+  buying_power: string;
+  account_id?: string | null;
+  currency?: string | null;
+  status?: string | null;
+}
+
+export async function getPaperAccount(requestId?: string): Promise<PaperAccountDTO> {
+  const res = await engineFetch('/broker/paper-account', requestId);
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<PaperAccountDTO>;
 }
 
 // ── Signals ───────────────────────────────────────────────────────────────────

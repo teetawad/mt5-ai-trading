@@ -193,6 +193,19 @@ class PaperBrokerAdapter(BrokerAdapter):
                 positions=dict(self._paper_positions),
             )
 
+    def get_open_orders(self) -> list[OrderResult]:
+        with self._lock:
+            return [
+                order
+                for order in self._orders.values()
+                if order.status
+                in {
+                    OrderStatus.PENDING,
+                    OrderStatus.SUBMITTED,
+                    OrderStatus.PARTIALLY_FILLED,
+                }
+            ]
+
     def check_pending_orders(
         self, symbol: str, current_price: Decimal
     ) -> list[OrderResult]:
