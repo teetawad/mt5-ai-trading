@@ -35,7 +35,11 @@ function getToken(): string {
   return process.env.INTERNAL_SERVICE_TOKEN ?? '';
 }
 
-async function engineFetch(path: string, requestId?: string): Promise<Response> {
+async function engineFetch(
+  path: string,
+  requestId?: string,
+  options: Omit<RequestInit, 'headers' | 'signal'> = {},
+): Promise<Response> {
   const url = `${getBaseUrl()}${path}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -47,7 +51,7 @@ async function engineFetch(path: string, requestId?: string): Promise<Response> 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    return await fetch(url, { headers, signal: controller.signal });
+    return await fetch(url, { ...options, headers, signal: controller.signal });
   } catch (err) {
     if ((err as Error).name === 'AbortError') {
       throw new TradingEngineError('Trading engine request timed out');
@@ -86,4 +90,110 @@ export async function getTrackedSymbols(requestId?: string): Promise<string[]> {
     throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
   }
   return res.json() as Promise<string[]>;
+}
+
+// ── Broker ────────────────────────────────────────────────────────────────────
+
+export type OrderSide = 'BUY' | 'SELL';
+export type OrderType = 'MARKET' | 'LIMIT';
+export type OrderStatus =
+  | 'PENDING'
+  | 'SUBMITTED'
+  | 'PARTIALLY_FILLED'
+  | 'FILLED'
+  | 'CANCELLED'
+  | 'REJECTED'
+  | 'ERROR';
+
+export interface OrderRequestDTO {
+  idempotency_key: string;
+  symbol: string;
+  side: OrderSide;
+  quantity: string;
+  order_type: OrderType;
+  limit_price?: string;
+}
+
+export interface FillEventDTO {
+  order_id: string;
+  fill_id: string;
+  quantity: string;
+  price: string;
+  fee: string;
+  is_partial: boolean;
+  filled_at: string;
+}
+
+export interface OrderResultDTO {
+  broker_order_id: string;
+  status: OrderStatus;
+  fills: FillEventDTO[];
+  rejected_reason?: string;
+  error_message?: string;
+}
+
+export interface PaperPortfolioDTO {
+  cash: string;
+  positions: Record<string, string>;
+}
+
+export async function submitOrder(
+  request: OrderRequestDTO,
+  requestId?: string,
+): Promise<OrderResultDTO> {
+  const res = await engineFetch('/broker/orders', requestId, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<OrderResultDTO>;
+}
+
+export async function getOrder(
+  brokerOrderId: string,
+  requestId?: string,
+): Promise<OrderResultDTO | null> {
+  const res = await engineFetch(
+    `/broker/orders/${encodeURIComponent(brokerOrderId)}`,
+    requestId,
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<OrderResultDTO>;
+}
+
+export async function cancelOrder(
+  brokerOrderId: string,
+  requestId?: string,
+): Promise<OrderResultDTO | null> {
+  const res = await engineFetch(
+    `/broker/orders/${encodeURIComponent(brokerOrderId)}/cancel`,
+    requestId,
+    { method: 'POST' },
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<OrderResultDTO>;
+}
+
+export async function getBrokerHealth(requestId?: string): Promise<{ available: boolean }> {
+  const res = await engineFetch('/broker/health', requestId);
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<{ available: boolean }>;
+}
+
+export async function getPaperPortfolio(requestId?: string): Promise<PaperPortfolioDTO> {
+  const res = await engineFetch('/broker/paper-portfolio', requestId);
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<PaperPortfolioDTO>;
 }

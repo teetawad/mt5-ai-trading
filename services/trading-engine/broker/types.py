@@ -1,0 +1,106 @@
+from decimal import Decimal
+from enum import StrEnum
+
+from pydantic import BaseModel, field_serializer
+
+
+class OrderSide(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderType(StrEnum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+class OrderStatus(StrEnum):
+    PENDING = "PENDING"
+    SUBMITTED = "SUBMITTED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    ERROR = "ERROR"
+
+
+class BrokerError(StrEnum):
+    INSUFFICIENT_FUNDS = "INSUFFICIENT_FUNDS"
+    INSUFFICIENT_POSITION = "INSUFFICIENT_POSITION"
+    UNAVAILABLE = "UNAVAILABLE"
+    UNKNOWN_SYMBOL = "UNKNOWN_SYMBOL"
+
+
+def _fmt(value: Decimal) -> str:
+    return str(value.quantize(Decimal("0.00000001")))
+
+
+class OrderRequest(BaseModel):
+    idempotency_key: str
+    symbol: str
+    side: OrderSide
+    quantity: Decimal
+    order_type: OrderType
+    limit_price: Decimal | None = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @field_serializer("quantity")
+    def _ser_qty(self, v: Decimal) -> str:
+        return _fmt(v)
+
+    @field_serializer("limit_price")
+    def _ser_limit(self, v: Decimal | None) -> str | None:
+        return _fmt(v) if v is not None else None
+
+
+class FillEvent(BaseModel):
+    order_id: str
+    fill_id: str
+    quantity: Decimal
+    price: Decimal
+    fee: Decimal
+    is_partial: bool
+    filled_at: str  # ISO 8601 UTC
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @field_serializer("quantity", "price", "fee")
+    def _ser_dec(self, v: Decimal) -> str:
+        return _fmt(v)
+
+
+class OrderResult(BaseModel):
+    broker_order_id: str
+    status: OrderStatus
+    fills: list[FillEvent] = []
+    rejected_reason: str | None = None
+    error_message: str | None = None
+
+
+class PaperBrokerConfig(BaseModel):
+    fee_per_share: Decimal = Decimal("0.005")
+    min_fee: Decimal = Decimal("1.00")
+    slippage_bps: int = 5
+    enable_partial_fills: bool = True
+    partial_fill_probability: float = 0.1
+    enable_rejections: bool = True
+    rejection_probability: float = 0.01
+    random_seed: int | None = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class PaperPortfolio(BaseModel):
+    cash: Decimal
+    positions: dict[str, Decimal]
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @field_serializer("cash")
+    def _ser_cash(self, v: Decimal) -> str:
+        return _fmt(v)
+
+    @field_serializer("positions")
+    def _ser_pos(self, v: dict[str, Decimal]) -> dict[str, str]:
+        return {k: _fmt(val) for k, val in v.items()}

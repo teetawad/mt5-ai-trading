@@ -1,0 +1,740 @@
+"""Unit and integration tests for the paper broker.
+
+All tests run without a database or network connection.
+"""
+
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+
+from broker.adapter import BrokerAdapter, OrderNotFoundError
+from broker.paper_broker import PaperBrokerAdapter
+from broker.types import (
+    BrokerError,
+    OrderRequest,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PaperBrokerConfig,
+)
+from market_data.provider import MarketDataProvider, SymbolNotFoundError
+from market_data.snapshot import MarketSnapshot
+
+# ── Mock market data provider ─────────────────────────────────────────────────
+
+class MockMarketDataProvider(MarketDataProvider):
+    def __init__(self, prices: dict[str, Decimal] | None = None) -> None:
+        self._prices: dict[str, Decimal] = prices or {"AAPL": Decimal("150.00")}
+
+    def get_snapshot(self, symbol: str) -> MarketSnapshot:
+        if symbol not in self._prices:
+            raise SymbolNotFoundError(f"Unknown symbol: {symbol}")
+        price = self._prices[symbol]
+        return MarketSnapshot(
+            symbol=symbol,
+            price=price,
+            bid=price * Decimal("0.999"),
+            ask=price * Decimal("1.001"),
+            volume=1000,
+            timestamp=datetime.now(tz=UTC),
+        )
+
+    def get_all_snapshots(self) -> list[MarketSnapshot]:
+        return [self.get_snapshot(s) for s in self._prices]
+
+    def tracked_symbols(self) -> list[str]:
+        return list(self._prices.keys())
+
+    def set_price(self, symbol: str, price: Decimal) -> None:
+        self._prices[symbol] = price
+
+
+# ── Factory helpers ───────────────────────────────────────────────────────────
+
+def _make_broker(
+    prices: dict[str, Decimal] | None = None,
+    initial_cash: Decimal = Decimal("100000.00"),
+    simulation_mode: bool = True,
+    config: PaperBrokerConfig | None = None,
+) -> tuple[PaperBrokerAdapter, MockMarketDataProvider]:
+    md = MockMarketDataProvider(prices)
+    cfg = config or PaperBrokerConfig(
+        random_seed=42,
+        enable_partial_fills=False,
+        enable_rejections=False,
+    )
+    broker = PaperBrokerAdapter(
+        market_data=md,
+        config=cfg,
+        initial_cash=initial_cash,
+        simulation_mode=simulation_mode,
+    )
+    return broker, md
+
+
+def _req(
+    symbol: str = "AAPL",
+    side: OrderSide = OrderSide.BUY,
+    quantity: Decimal = Decimal("10"),
+    order_type: OrderType = OrderType.MARKET,
+    limit_price: Decimal | None = None,
+    idem_key: str = "k-1",
+) -> OrderRequest:
+    return OrderRequest(
+        idempotency_key=idem_key,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        order_type=order_type,
+        limit_price=limit_price,
+    )
+
+
+# ── BrokerAdapter interface ───────────────────────────────────────────────────
+
+class TestBrokerAdapterInterface:
+    def test_paper_broker_is_broker_adapter(self):
+        broker, _ = _make_broker()
+        assert isinstance(broker, BrokerAdapter)
+
+    def test_all_abstract_methods_implemented(self):
+        broker, _ = _make_broker()
+        assert callable(broker.submit_order)
+        assert callable(broker.get_order)
+        assert callable(broker.cancel_order)
+        assert callable(broker.is_available)
+
+
+# ── Market orders ─────────────────────────────────────────────────────────────
+
+class TestMarketOrders:
+    def test_market_buy_returns_filled(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(side=OrderSide.BUY, quantity=Decimal("10")))
+        assert result.status == OrderStatus.FILLED
+        assert len(result.fills) == 1
+
+    def test_market_sell_returns_filled(self):
+        broker, md = _make_broker(initial_cash=Decimal("200000.00"))
+        # Buy first to get a position
+        broker.submit_order(_req(side=OrderSide.BUY, quantity=Decimal("10"), idem_key="buy"))
+        result = broker.submit_order(
+            _req(side=OrderSide.SELL, quantity=Decimal("10"), idem_key="sell")
+        )
+        assert result.status == OrderStatus.FILLED
+        assert len(result.fills) == 1
+
+    def test_slippage_applied_to_buy(self):
+        broker, _ = _make_broker(
+            config=PaperBrokerConfig(
+                slippage_bps=100,
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            )
+        )
+        result = broker.submit_order(_req())
+        fill_price = result.fills[0].price
+        expected = Decimal("150.00") * Decimal("1.0100")
+        assert fill_price > Decimal("150.00")
+        assert abs(fill_price - expected) < Decimal("0.001")
+
+    def test_slippage_applied_to_sell(self):
+        broker, _ = _make_broker(
+            initial_cash=Decimal("200000.00"),
+            config=PaperBrokerConfig(
+                slippage_bps=100,
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            ),
+        )
+        broker.submit_order(_req(side=OrderSide.BUY, quantity=Decimal("10"), idem_key="buy"))
+        result = broker.submit_order(
+            _req(side=OrderSide.SELL, quantity=Decimal("10"), idem_key="sell")
+        )
+        fill_price = result.fills[0].price
+        assert fill_price < Decimal("150.00")
+
+    def test_fee_deducted_from_cash(self):
+        broker, _ = _make_broker(
+            config=PaperBrokerConfig(
+                fee_per_share=Decimal("0.01"),
+                min_fee=Decimal("0.00"),
+                slippage_bps=0,
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            )
+        )
+        broker.submit_order(_req(quantity=Decimal("100")))
+        portfolio = broker.get_paper_portfolio()
+        # cost = 100 * 150 + 100 * 0.01 = 15001
+        assert portfolio.cash == Decimal("100000.00") - Decimal("15001.00")
+
+    def test_min_fee_applied(self):
+        broker, _ = _make_broker(
+            config=PaperBrokerConfig(
+                fee_per_share=Decimal("0.001"),
+                min_fee=Decimal("5.00"),
+                slippage_bps=0,
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            )
+        )
+        # 1 share * 0.001 < min_fee 5.00 → min_fee used
+        broker.submit_order(_req(quantity=Decimal("1")))
+        portfolio = broker.get_paper_portfolio()
+        # cost = 1 * 150 + 5.00 = 155.00
+        portfolio_cost = Decimal("100000.00") - portfolio.cash
+        assert portfolio_cost == Decimal("155.00")
+
+    def test_fill_event_fields(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req())
+        fill = result.fills[0]
+        assert fill.order_id == result.broker_order_id
+        assert fill.fill_id != ""
+        assert fill.quantity == Decimal("10")
+        assert fill.price > 0
+        assert fill.fee > 0
+        assert fill.is_partial is False
+        assert fill.filled_at != ""
+
+    def test_fill_serialises_decimals_as_strings(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req())
+        data = result.model_dump()
+        fill_data = data["fills"][0]
+        assert isinstance(fill_data["quantity"], str)
+        assert isinstance(fill_data["price"], str)
+        assert isinstance(fill_data["fee"], str)
+
+
+# ── Insufficient funds / position ─────────────────────────────────────────────
+
+class TestFundsAndPositionChecks:
+    def test_insufficient_funds_rejects_buy(self):
+        broker, _ = _make_broker(initial_cash=Decimal("1.00"))
+        result = broker.submit_order(_req(side=OrderSide.BUY, quantity=Decimal("10")))
+        assert result.status == OrderStatus.REJECTED
+        assert result.rejected_reason is not None
+        assert "funds" in result.rejected_reason.lower()
+
+    def test_insufficient_position_rejects_sell(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(
+            _req(side=OrderSide.SELL, quantity=Decimal("10"), idem_key="sell")
+        )
+        assert result.status == OrderStatus.REJECTED
+        assert result.rejected_reason is not None
+        assert "position" in result.rejected_reason.lower()
+
+    def test_cash_updated_after_buy(self):
+        broker, _ = _make_broker(
+            config=PaperBrokerConfig(
+                slippage_bps=0,
+                fee_per_share=Decimal("0.00"),
+                min_fee=Decimal("0.00"),
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            )
+        )
+        broker.submit_order(_req(quantity=Decimal("10")))
+        portfolio = broker.get_paper_portfolio()
+        assert portfolio.cash == Decimal("100000.00") - Decimal("1500.00")
+
+    def test_position_updated_after_buy(self):
+        broker, _ = _make_broker()
+        broker.submit_order(_req(quantity=Decimal("10")))
+        portfolio = broker.get_paper_portfolio()
+        assert portfolio.positions.get("AAPL", Decimal("0")) == Decimal("10")
+
+    def test_cash_and_position_updated_after_sell(self):
+        broker, _ = _make_broker(
+            initial_cash=Decimal("200000.00"),
+            config=PaperBrokerConfig(
+                slippage_bps=0,
+                fee_per_share=Decimal("0.00"),
+                min_fee=Decimal("0.00"),
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            ),
+        )
+        broker.submit_order(_req(quantity=Decimal("10"), idem_key="buy"))
+        broker.submit_order(
+            _req(side=OrderSide.SELL, quantity=Decimal("10"), idem_key="sell")
+        )
+        portfolio = broker.get_paper_portfolio()
+        assert portfolio.positions.get("AAPL", Decimal("0")) == Decimal("0")
+        assert portfolio.cash == Decimal("200000.00")  # net zero (no fees/slippage)
+
+
+# ── Idempotency ───────────────────────────────────────────────────────────────
+
+class TestIdempotency:
+    def test_same_key_returns_same_result(self):
+        broker, _ = _make_broker()
+        r1 = broker.submit_order(_req(idem_key="dup"))
+        r2 = broker.submit_order(_req(idem_key="dup"))
+        assert r1.broker_order_id == r2.broker_order_id
+        assert r1.status == r2.status
+
+    def test_idempotency_does_not_double_fill(self):
+        broker, _ = _make_broker(
+            config=PaperBrokerConfig(
+                slippage_bps=0,
+                fee_per_share=Decimal("0.00"),
+                min_fee=Decimal("0.00"),
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            )
+        )
+        broker.submit_order(_req(quantity=Decimal("10"), idem_key="dup"))
+        broker.submit_order(_req(quantity=Decimal("10"), idem_key="dup"))
+        portfolio = broker.get_paper_portfolio()
+        assert portfolio.positions.get("AAPL", Decimal("0")) == Decimal("10")
+
+    def test_rejection_idempotent(self):
+        broker, _ = _make_broker(initial_cash=Decimal("1.00"))
+        r1 = broker.submit_order(_req(idem_key="rej"))
+        r2 = broker.submit_order(_req(idem_key="rej"))
+        assert r1.broker_order_id == r2.broker_order_id
+        assert r1.status == OrderStatus.REJECTED
+
+
+# ── Partial fill simulation ───────────────────────────────────────────────────
+
+class TestPartialFills:
+    def test_inject_partial_fill(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_partial_fill("NEXT_ORDER", Decimal("0.5"))
+        result = broker.submit_order(_req(quantity=Decimal("10")))
+        assert result.status == OrderStatus.PARTIALLY_FILLED
+        assert result.fills[0].is_partial is True
+        assert result.fills[0].quantity == Decimal("5")
+
+    def test_injection_consumed_once(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_partial_fill("NEXT_ORDER", Decimal("0.5"))
+        broker.submit_order(_req(quantity=Decimal("10"), idem_key="p"))
+        result2 = broker.submit_order(_req(quantity=Decimal("10"), idem_key="p2"))
+        assert result2.status == OrderStatus.FILLED
+
+    def test_partial_fill_injection_requires_simulation_mode(self):
+        broker, _ = _make_broker(simulation_mode=False)
+        with pytest.raises(RuntimeError, match="simulation_mode"):
+            broker.inject_partial_fill("x", Decimal("0.5"))
+
+
+# ── Rejection simulation ──────────────────────────────────────────────────────
+
+class TestRejectionSimulation:
+    def test_inject_rejection(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_rejection("NEXT_ORDER", "Symbol not tradeable")
+        result = broker.submit_order(_req())
+        assert result.status == OrderStatus.REJECTED
+        assert result.rejected_reason == "Symbol not tradeable"
+
+    def test_inject_rejection_requires_simulation_mode(self):
+        broker, _ = _make_broker(simulation_mode=False)
+        with pytest.raises(RuntimeError, match="simulation_mode"):
+            broker.inject_rejection("x", "reason")
+
+    def test_inject_error_insufficient_funds(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_error("NEXT_ORDER", BrokerError.INSUFFICIENT_FUNDS)
+        result = broker.submit_order(_req())
+        assert result.status == OrderStatus.REJECTED
+        assert "funds" in (result.rejected_reason or "").lower()
+
+    def test_inject_error_insufficient_position(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_error("NEXT_ORDER", BrokerError.INSUFFICIENT_POSITION)
+        result = broker.submit_order(_req())
+        assert result.status == OrderStatus.REJECTED
+        assert "position" in (result.rejected_reason or "").lower()
+
+    def test_inject_error_unknown_returns_error_status(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_error("NEXT_ORDER", BrokerError.UNAVAILABLE)
+        result = broker.submit_order(_req())
+        assert result.status == OrderStatus.ERROR
+
+    def test_inject_error_requires_simulation_mode(self):
+        broker, _ = _make_broker(simulation_mode=False)
+        with pytest.raises(RuntimeError, match="simulation_mode"):
+            broker.inject_error("x", BrokerError.INSUFFICIENT_FUNDS)
+
+
+# ── Unavailability ────────────────────────────────────────────────────────────
+
+class TestUnavailability:
+    def test_is_available_true_by_default(self):
+        broker, _ = _make_broker()
+        assert broker.is_available() is True
+
+    def test_inject_unavailable_makes_broker_unavailable(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_unavailable(duration_seconds=9999)
+        assert broker.is_available() is False
+
+    def test_unavailable_broker_returns_error_result(self):
+        broker, _ = _make_broker(simulation_mode=True)
+        broker.inject_unavailable(duration_seconds=9999)
+        result = broker.submit_order(_req())
+        assert result.status == OrderStatus.ERROR
+        assert result.error_message is not None
+
+    def test_inject_unavailable_requires_simulation_mode(self):
+        broker, _ = _make_broker(simulation_mode=False)
+        with pytest.raises(RuntimeError, match="simulation_mode"):
+            broker.inject_unavailable(duration_seconds=5)
+
+
+# ── Unknown symbol ────────────────────────────────────────────────────────────
+
+class TestUnknownSymbol:
+    def test_unknown_symbol_rejected(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(symbol="ZZZZZ"))
+        assert result.status == OrderStatus.REJECTED
+        assert result.rejected_reason is not None
+        assert "ZZZZZ" in result.rejected_reason
+
+
+# ── Limit orders ──────────────────────────────────────────────────────────────
+
+class TestLimitOrders:
+    def test_limit_buy_fills_immediately_when_limit_gte_market(self):
+        broker, _ = _make_broker()  # AAPL at 150
+        result = broker.submit_order(
+            _req(
+                order_type=OrderType.LIMIT,
+                limit_price=Decimal("155.00"),  # above market → immediate fill
+            )
+        )
+        assert result.status == OrderStatus.FILLED
+        assert result.fills[0].price == Decimal("155.00")
+
+    def test_limit_sell_fills_immediately_when_limit_lte_market(self):
+        broker, _ = _make_broker(initial_cash=Decimal("200000.00"))
+        broker.submit_order(_req(quantity=Decimal("10"), idem_key="buy"))
+        result = broker.submit_order(
+            _req(
+                side=OrderSide.SELL,
+                order_type=OrderType.LIMIT,
+                limit_price=Decimal("145.00"),  # below market → immediate fill
+                idem_key="sell",
+            )
+        )
+        assert result.status == OrderStatus.FILLED
+
+    def test_limit_buy_queued_when_limit_lt_market(self):
+        broker, _ = _make_broker()  # AAPL at 150
+        result = broker.submit_order(
+            _req(
+                order_type=OrderType.LIMIT,
+                limit_price=Decimal("140.00"),  # below market → queued
+            )
+        )
+        assert result.status == OrderStatus.SUBMITTED
+        assert result.fills == []
+
+    def test_limit_sell_queued_when_limit_gt_market(self):
+        broker, _ = _make_broker(initial_cash=Decimal("200000.00"))
+        broker.submit_order(_req(quantity=Decimal("10"), idem_key="buy"))
+        result = broker.submit_order(
+            _req(
+                side=OrderSide.SELL,
+                order_type=OrderType.LIMIT,
+                limit_price=Decimal("160.00"),  # above market → queued
+                idem_key="sell",
+            )
+        )
+        assert result.status == OrderStatus.SUBMITTED
+
+    def test_queued_limit_fills_on_price_cross_via_get_order(self):
+        broker, md = _make_broker()  # AAPL at 150
+        result = broker.submit_order(
+            _req(order_type=OrderType.LIMIT, limit_price=Decimal("140.00"))
+        )
+        assert result.status == OrderStatus.SUBMITTED
+        md.set_price("AAPL", Decimal("138.00"))  # price dropped below limit
+        updated = broker.get_order(result.broker_order_id)
+        assert updated.status == OrderStatus.FILLED
+
+    def test_queued_limit_fills_via_check_pending_orders(self):
+        broker, _ = _make_broker()  # AAPL at 150
+        result = broker.submit_order(
+            _req(order_type=OrderType.LIMIT, limit_price=Decimal("140.00"))
+        )
+        assert result.status == OrderStatus.SUBMITTED
+        filled = broker.check_pending_orders("AAPL", Decimal("138.00"))
+        assert len(filled) == 1
+        assert filled[0].status == OrderStatus.FILLED
+
+    def test_limit_order_missing_price_rejected(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(order_type=OrderType.LIMIT, limit_price=None))
+        assert result.status == OrderStatus.REJECTED
+        assert "Limit price required" in (result.rejected_reason or "")
+
+    def test_check_pending_orders_only_matches_symbol(self):
+        broker, _ = _make_broker(prices={"AAPL": Decimal("150"), "MSFT": Decimal("300")})
+        broker.submit_order(
+            _req(
+                symbol="AAPL",
+                order_type=OrderType.LIMIT,
+                limit_price=Decimal("140.00"),
+                idem_key="aapl",
+            )
+        )
+        filled = broker.check_pending_orders("MSFT", Decimal("100.00"))
+        assert len(filled) == 0
+
+
+# ── Order cancellation ────────────────────────────────────────────────────────
+
+class TestOrderCancellation:
+    def test_cancel_pending_limit_order(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(
+            _req(order_type=OrderType.LIMIT, limit_price=Decimal("140.00"))
+        )
+        assert result.status == OrderStatus.SUBMITTED
+        cancelled = broker.cancel_order(result.broker_order_id)
+        assert cancelled.status == OrderStatus.CANCELLED
+
+    def test_cancel_filled_order_is_noop(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req())
+        assert result.status == OrderStatus.FILLED
+        noop = broker.cancel_order(result.broker_order_id)
+        assert noop.status == OrderStatus.FILLED
+
+    def test_cancel_cancelled_order_is_noop(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(
+            _req(order_type=OrderType.LIMIT, limit_price=Decimal("140.00"))
+        )
+        broker.cancel_order(result.broker_order_id)
+        noop = broker.cancel_order(result.broker_order_id)
+        assert noop.status == OrderStatus.CANCELLED
+
+    def test_cancel_unknown_order_raises(self):
+        broker, _ = _make_broker()
+        with pytest.raises(OrderNotFoundError):
+            broker.cancel_order("nonexistent-id")
+
+    def test_cancelled_order_not_filled_on_price_cross(self):
+        broker, md = _make_broker()
+        result = broker.submit_order(
+            _req(order_type=OrderType.LIMIT, limit_price=Decimal("140.00"))
+        )
+        broker.cancel_order(result.broker_order_id)
+        md.set_price("AAPL", Decimal("130.00"))
+        # check_pending_orders should not fill a cancelled order
+        filled = broker.check_pending_orders("AAPL", Decimal("130.00"))
+        assert len(filled) == 0
+
+
+# ── get_order ─────────────────────────────────────────────────────────────────
+
+class TestGetOrder:
+    def test_get_order_returns_result(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req())
+        fetched = broker.get_order(result.broker_order_id)
+        assert fetched.broker_order_id == result.broker_order_id
+
+    def test_get_order_not_found_raises(self):
+        broker, _ = _make_broker()
+        with pytest.raises(OrderNotFoundError):
+            broker.get_order("nonexistent")
+
+
+# ── Paper portfolio ───────────────────────────────────────────────────────────
+
+class TestPaperPortfolio:
+    def test_initial_cash(self):
+        broker, _ = _make_broker(initial_cash=Decimal("50000.00"))
+        p = broker.get_paper_portfolio()
+        assert p.cash == Decimal("50000.00")
+        assert p.positions == {}
+
+    def test_portfolio_serialises_decimals_as_strings(self):
+        broker, _ = _make_broker()
+        broker.submit_order(_req())
+        data = broker.get_paper_portfolio().model_dump()
+        assert isinstance(data["cash"], str)
+        assert isinstance(list(data["positions"].values())[0], str)
+
+    def test_portfolio_reflects_fills(self):
+        broker, _ = _make_broker()
+        broker.submit_order(_req(quantity=Decimal("5"), idem_key="b1"))
+        broker.submit_order(_req(quantity=Decimal("3"), idem_key="b2"))
+        p = broker.get_paper_portfolio()
+        assert p.positions.get("AAPL", Decimal("0")) == Decimal("8")
+
+
+# ── FastAPI endpoint integration ──────────────────────────────────────────────
+
+class TestBrokerEndpoints:
+    @pytest.fixture(autouse=True)
+    def setup_broker(self):
+        from broker.registry import init_broker
+        from market_data.registry import init_provider
+        from market_data.synthetic import SyntheticMarketDataProvider
+
+        init_provider(
+            SyntheticMarketDataProvider(
+                symbols={"AAPL": Decimal("150.00")},
+                tick_interval_seconds=9999,
+                random_seed=42,
+            )
+        )
+        broker, _ = _make_broker(simulation_mode=True)
+        init_broker(broker)
+        self._broker = broker
+
+    def test_submit_order_returns_200(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.post(
+            "/broker/orders",
+            json={
+                "idempotency_key": "e2e-1",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": "10",
+                "order_type": "MARKET",
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "FILLED"
+        assert len(data["fills"]) == 1
+
+    def test_get_order_returns_200(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        post_res = client.post(
+            "/broker/orders",
+            json={
+                "idempotency_key": "e2e-2",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": "10",
+                "order_type": "MARKET",
+            },
+        )
+        order_id = post_res.json()["broker_order_id"]
+        get_res = client.get(f"/broker/orders/{order_id}")
+        assert get_res.status_code == 200
+        assert get_res.json()["broker_order_id"] == order_id
+
+    def test_get_order_404_for_unknown(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.get("/broker/orders/nonexistent-id")
+        assert res.status_code == 404
+
+    def test_cancel_order_returns_200(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        post_res = client.post(
+            "/broker/orders",
+            json={
+                "idempotency_key": "e2e-limit",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": "5",
+                "order_type": "LIMIT",
+                "limit_price": "50.00",  # far below market → queued
+            },
+        )
+        order_id = post_res.json()["broker_order_id"]
+        cancel_res = client.post(f"/broker/orders/{order_id}/cancel")
+        assert cancel_res.status_code == 200
+        assert cancel_res.json()["status"] == "CANCELLED"
+
+    def test_cancel_order_404_for_unknown(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.post("/broker/orders/nonexistent-id/cancel")
+        assert res.status_code == 404
+
+    def test_broker_health_returns_available(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.get("/broker/health")
+        assert res.status_code == 200
+        assert res.json() == {"available": True}
+
+    def test_broker_health_unavailable_when_injected(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        self._broker.inject_unavailable(duration_seconds=9999)
+        client = TestClient(app)
+        res = client.get("/broker/health")
+        assert res.status_code == 200
+        assert res.json() == {"available": False}
+
+    def test_paper_portfolio_returns_200(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.get("/broker/paper-portfolio")
+        assert res.status_code == 200
+        data = res.json()
+        assert "cash" in data
+        assert "positions" in data
+
+    def test_internal_token_rejected_when_set(self, monkeypatch):
+        monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "secret")
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.get("/broker/health")
+        assert res.status_code == 403
+
+    def test_internal_token_accepted(self, monkeypatch):
+        monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "secret")
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        res = client.get("/broker/health", headers={"X-Internal-Token": "secret"})
+        assert res.status_code == 200

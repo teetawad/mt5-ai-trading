@@ -3,7 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from broker.registry import init_broker
 from market_data.registry import init_provider
+from routers.broker import router as broker_router
 from routers.health import router as health_router
 from routers.market_data import router as market_data_router
 
@@ -11,6 +13,7 @@ from routers.market_data import router as market_data_router
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     init_provider()
+    init_broker()
     yield
 
 
@@ -23,6 +26,7 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(market_data_router)
+app.include_router(broker_router)
 
 
 @app.get("/")

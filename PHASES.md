@@ -109,20 +109,20 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ## Phase 5 — Paper Broker
 
-- [ ] `BrokerAdapter` interface defined
-- [ ] `PaperBrokerAdapter` implementation
-- [ ] Market order simulation
-- [ ] Limit order simulation
-- [ ] Pending order queue
-- [ ] Fill simulation
-- [ ] Partial fill simulation
-- [ ] Order cancellation
-- [ ] Rejection simulation
-- [ ] Configurable simulated fees
-- [ ] Configurable slippage
-- [ ] Insufficient funds simulation
-- [ ] Deterministic test mode (seeded)
-- [ ] Tests
+- [x] `BrokerAdapter` interface defined
+- [x] `PaperBrokerAdapter` implementation
+- [x] Market order simulation
+- [x] Limit order simulation
+- [x] Pending order queue
+- [x] Fill simulation
+- [x] Partial fill simulation
+- [x] Order cancellation
+- [x] Rejection simulation
+- [x] Configurable simulated fees
+- [x] Configurable slippage
+- [x] Insufficient funds simulation
+- [x] Deterministic test mode (seeded)
+- [x] Tests (60 Python pass; Node client extended)
 - [ ] Owner review
 
 ---
