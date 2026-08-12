@@ -68,12 +68,44 @@ if errorlevel 1 goto fail
 
 echo.
 echo Checking Docker...
-docker info >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Docker does not appear to be running.
-    echo Start Docker Desktop, wait for it to finish starting, then run this file again.
-    goto fail
-)
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "function Test-DockerReady {" ^
+  "  try {" ^
+  "    $null = docker info 2>$null;" ^
+  "    return $LASTEXITCODE -eq 0;" ^
+  "  } catch {" ^
+  "    return $false;" ^
+  "  }" ^
+  "}" ^
+  "if (Test-DockerReady) { Write-Host 'OK: Docker Engine is running.'; exit 0 }" ^
+  "Write-Host 'Docker Engine is not running. Trying to launch Docker Desktop...';" ^
+  "$candidates = @(" ^
+  "  (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe')," ^
+  "  (Join-Path ${env:ProgramFiles(x86)} 'Docker\Docker\Docker Desktop.exe')," ^
+  "  (Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe')" ^
+  ") | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) };" ^
+  "$dockerDesktop = $candidates | Select-Object -First 1;" ^
+  "if ($dockerDesktop) {" ^
+  "  if (-not (Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)) {" ^
+  "    Write-Host ('Launching Docker Desktop: ' + $dockerDesktop);" ^
+  "    Start-Process -FilePath $dockerDesktop;" ^
+  "  } else {" ^
+  "    Write-Host 'Docker Desktop is already starting or running. Waiting for the engine...';" ^
+  "  }" ^
+  "} else {" ^
+  "  Write-Host 'WARNING: Docker Desktop launcher was not found in the standard install locations.';" ^
+  "  Write-Host 'If Docker Desktop is installed elsewhere, start it manually while this countdown continues.';" ^
+  "}" ^
+  "for ($remaining = 120; $remaining -ge 0; $remaining--) {" ^
+  "  if (Test-DockerReady) { Write-Host 'OK: Docker Engine is ready.'; exit 0 }" ^
+  "  if ($remaining -eq 0) { break }" ^
+  "  Write-Host ('Waiting for Docker Engine... ' + $remaining + ' seconds remaining.');" ^
+  "  Start-Sleep -Seconds 1;" ^
+  "}" ^
+  "Write-Host 'ERROR: Docker Engine did not become ready within 120 seconds.';" ^
+  "Write-Host 'Start Docker Desktop manually, wait until it is fully running, then run start-trade.bat again.';" ^
+  "exit 1;"
+if errorlevel 1 goto fail
 echo OK: Docker is running.
 
 echo.
@@ -84,6 +116,47 @@ if errorlevel 1 (
     goto fail
 )
 echo OK: PostgreSQL start command completed.
+
+echo.
+echo Waiting for PostgreSQL to become ready...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference = 'Stop';" ^
+  "$root = $env:TRADE_PROJECT_ROOT;" ^
+  "$envPath = Join-Path $root '.env';" ^
+  "$settings = @{ POSTGRES_HOST = 'localhost'; POSTGRES_PORT = '5432' };" ^
+  "if (Test-Path -LiteralPath $envPath -PathType Leaf) {" ^
+  "  Get-Content -LiteralPath $envPath | ForEach-Object {" ^
+  "    if ($_ -match '^\s*(POSTGRES_HOST|POSTGRES_PORT)\s*=\s*(.+?)\s*$') {" ^
+  "      $settings[$matches[1]] = $matches[2].Trim([char]34, [char]39);" ^
+  "    }" ^
+  "  }" ^
+  "}" ^
+  "$hostName = $settings.POSTGRES_HOST;" ^
+  "$port = [int] $settings.POSTGRES_PORT;" ^
+  "$deadline = (Get-Date).AddSeconds(60);" ^
+  "do {" ^
+  "  $health = docker inspect --format '{{.State.Health.Status}}' trade_postgres 2>$null;" ^
+  "  if ($LASTEXITCODE -eq 0 -and $health -eq 'healthy') {" ^
+  "    Write-Host 'OK: PostgreSQL container healthcheck is healthy.';" ^
+  "    exit 0;" ^
+  "  }" ^
+  "  $client = [Net.Sockets.TcpClient]::new();" ^
+  "  try {" ^
+  "    $connect = $client.BeginConnect($hostName, $port, $null, $null);" ^
+  "    if ($connect.AsyncWaitHandle.WaitOne(1000)) {" ^
+  "      $client.EndConnect($connect);" ^
+  "      Write-Host ('PostgreSQL is accepting TCP connections at ' + $hostName + ':' + $port + '; waiting for container healthcheck...');" ^
+  "    }" ^
+  "  } catch {" ^
+  "  } finally {" ^
+  "    $client.Close();" ^
+  "  }" ^
+  "  Start-Sleep -Seconds 1;" ^
+  "} while ((Get-Date) -lt $deadline);" ^
+  "Write-Host 'ERROR: PostgreSQL container did not report healthy within 60 seconds.';" ^
+  "Write-Host ('Last checked endpoint: ' + $hostName + ':' + $port);" ^
+  "exit 1;"
+if errorlevel 1 goto fail
 
 echo.
 echo Applying database migrations...
