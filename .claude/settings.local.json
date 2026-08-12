@@ -36,7 +36,23 @@
       "Bash(.venv/Scripts/python.exe -m ruff check strategy/ routers/signals.py main.py)",
       "Bash(.venv/Scripts/python.exe -m mypy strategy/ routers/signals.py main.py)",
       "Bash(.venv/Scripts/python.exe -m ruff check strategy/ routers/signals.py main.py --fix)",
-      "Bash(python -m pytest tests/test_risk.py -v)"
+      "Bash(python -m pytest tests/test_risk.py -v)",
+      "Bash(.venv/Scripts/uvicorn.exe --help)",
+      "Bash(.venv/Scripts/python.exe -c \"import watchfiles; print\\(watchfiles.__file__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Read(//c/Users/Teetawad/AppData/Local/Temp/**)",
+      "Bash(curl -s -o /tmp/index.html -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s http://localhost:4000/health)",
+      "Bash(curl -s -L -o /tmp/index2.html -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(.venv/Scripts/python.exe -m pytest -q)",
+      "Bash(.venv/Scripts/python.exe -m ruff check .)",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 560160 -Force -ErrorAction SilentlyContinue; Write-Host done\")",
+      "Bash(rm -rf .output)",
+      "Bash(curl -s -L -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Get-NetTCPConnection *)"
     ]
   }
 }
