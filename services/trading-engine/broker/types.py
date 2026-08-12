@@ -79,6 +79,7 @@ class OrderResult(BaseModel):
     broker_order_id: str
     status: OrderStatus
     fills: list[FillEvent] = []
+    bracket_order_ids: dict[str, str] | None = None
     rejected_reason: str | None = None
     error_message: str | None = None
 

@@ -25,6 +25,17 @@ export async function findLatestSnapshot(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export async function findLatestSnapshotBefore(
+  db: Pool | PoolClient,
+  cutoff: Date,
+): Promise<PortfolioSnapshot | null> {
+  const { rows } = await db.query(
+    'SELECT * FROM portfolio_snapshots WHERE created_at < $1 ORDER BY created_at DESC LIMIT 1',
+    [cutoff],
+  );
+  return rows.length ? mapRow(rows[0]) : null;
+}
+
 export async function findSnapshotById(
   db: Pool | PoolClient,
   id: string,

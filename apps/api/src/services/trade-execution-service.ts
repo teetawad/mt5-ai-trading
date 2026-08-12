@@ -12,12 +12,13 @@ import {
   findOrderByExecution,
   updateOrderStatus,
 } from '../db/repositories/orders';
-import { createSnapshot } from '../db/repositories/portfolio-snapshots';
+import { createSnapshot, findLatestSnapshotBefore } from '../db/repositories/portfolio-snapshots';
 import {
   findPositionBySymbolForUpdate,
   findOpenPositions,
   upsertPosition,
 } from '../db/repositories/positions';
+import { findOpenBracketOrders } from '../db/repositories/orders';
 import { getSettingValue } from '../db/repositories/system-settings';
 import {
   findProposalByIdForUpdate,
@@ -27,6 +28,8 @@ import { Execution, Fill, Order, Position, TradeProposal } from '../db/types';
 import { assertValidProposalTransition, InvalidStateTransitionError } from './proposal-state-machine';
 import {
   FillEventDTO,
+  getAllMarketSnapshots,
+  getOrder as getBrokerOrder,
   getPaperPortfolio,
   OrderResultDTO,
   submitOrder,
@@ -56,11 +59,23 @@ export class ExecutionBlockedError extends Error {
   }
 }
 
+export class PositionAccountingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PositionAccountingError';
+  }
+}
+
 export interface ActorContext {
-  actorId: string;
+  actorId: string | null;
   actorEmail: string;
   requestId?: string | null;
 }
+
+export const SYSTEM_RECONCILIATION_ACTOR: ActorContext = {
+  actorId: null,
+  actorEmail: 'system-reconciliation@internal',
+};
 
 export interface ExecutionWorkflowResult {
   proposal: TradeProposal;
@@ -223,6 +238,12 @@ export function calculatePositionAccounting(
         ? new Decimal(0)
         : currentCost.plus(addedCost).div(quantity);
     } else {
+      if (fillQuantity.gt(quantity)) {
+        throw new PositionAccountingError(
+          `SELL fill quantity ${fillQuantity.toString()} exceeds tracked position quantity `
+          + `${quantity.toString()}`,
+        );
+      }
       realizedPnl = realizedPnl.plus(fillPrice.minus(averageEntryPrice).times(fillQuantity)).minus(fee);
       quantity = quantity.minus(fillQuantity);
       if (quantity.lte(0)) {
@@ -248,16 +269,21 @@ export function calculatePositionAccounting(
 export function calculatePortfolioPnl(
   initialCash: string,
   cash: string,
-  openPositions: Pick<Position, 'quantity' | 'averageEntryPrice' | 'lastPrice'>[],
+  openPositions: Pick<Position, 'symbol' | 'quantity' | 'averageEntryPrice' | 'lastPrice'>[],
+  livePrices: Record<string, string> = {},
 ): PortfolioPnlResult {
+  const priceFor = (position: Pick<Position, 'symbol' | 'lastPrice'>): Decimal => {
+    const live = livePrices[position.symbol];
+    return live !== undefined ? decimal(live) : decimal(position.lastPrice);
+  };
   const positionMarketValue = openPositions.reduce(
-    (sum, position) => sum.plus(decimal(position.quantity).times(decimal(position.lastPrice))),
+    (sum, position) => sum.plus(decimal(position.quantity).times(priceFor(position))),
     new Decimal(0),
   );
   const unrealizedPnl = openPositions.reduce(
     (sum, position) => (
       sum.plus(
-        decimal(position.lastPrice)
+        priceFor(position)
           .minus(decimal(position.averageEntryPrice))
           .times(decimal(position.quantity)),
       )
@@ -272,6 +298,32 @@ export function calculatePortfolioPnl(
     realizedPnl: money(realizedPnl),
     unrealizedPnl: money(unrealizedPnl),
   };
+}
+
+function startOfUtcDay(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
+export async function getDayStartEquity(
+  db: Pool | PoolClient,
+  now: Date,
+  fallbackInitialCash: string,
+): Promise<Decimal> {
+  const baseline = await findLatestSnapshotBefore(db, startOfUtcDay(now));
+  return baseline ? decimal(baseline.portfolioEquity) : decimal(fallbackInitialCash);
+}
+
+export async function livePriceMap(requestId: string | undefined): Promise<Record<string, string>> {
+  try {
+    const snapshots = await getAllMarketSnapshots(requestId);
+    const prices: Record<string, string> = {};
+    for (const snapshot of snapshots) {
+      prices[snapshot.symbol] = snapshot.price;
+    }
+    return prices;
+  } catch {
+    return {};
+  }
 }
 
 async function persistFills(
@@ -327,12 +379,16 @@ async function writePortfolioSnapshot(
   requestId: string | undefined,
   reason: string,
 ): Promise<void> {
-  const [portfolio, openPositions] = await Promise.all([
+  const [portfolio, openPositions, livePrices] = await Promise.all([
     getPaperPortfolio(requestId),
     findOpenPositions(client),
+    livePriceMap(requestId),
   ]);
   const initialCash = String(await getSettingValue(client, 'initial_paper_cash_usd') ?? '100000');
-  const pnl = calculatePortfolioPnl(initialCash, portfolio.cash, openPositions);
+  const pnl = calculatePortfolioPnl(initialCash, portfolio.cash, openPositions, livePrices);
+  const now = new Date();
+  const dayStartEquity = await getDayStartEquity(client, now, initialCash);
+  const dailyPnl = decimal(pnl.portfolioEquity).minus(dayStartEquity);
 
   await createSnapshot(client, {
     cashBalance: portfolio.cash,
@@ -341,7 +397,7 @@ async function writePortfolioSnapshot(
     pendingOrders: [],
     realizedPnl: pnl.realizedPnl,
     unrealizedPnl: pnl.unrealizedPnl,
-    dailyPnl: pnl.realizedPnl,
+    dailyPnl: money(dailyPnl),
     snapshotReason: reason,
   });
 }
@@ -585,6 +641,71 @@ export async function recordApprovedBracketExit(
       idempotent: false,
     };
   });
+}
+
+export interface BracketReconciliationResult {
+  checked: number;
+  reconciled: number;
+  errors: number;
+}
+
+/**
+ * Polls the broker for every locally-open bracket order (entry filled, no
+ * exit recorded yet) and records the exit locally when a leg has filled.
+ *
+ * Alpaca hosts the SL/TP OCO server-side, so a filled leg is invisible to
+ * this app until something polls for it — this is that poll. Safe to call
+ * repeatedly (recordApprovedBracketExit is idempotent per broker fill_id) and
+ * safe to call with brackets that are still pending (no-op for those).
+ * Never throws: one bracket's broker error must not block the others or the
+ * caller (dashboard load / startup) that triggered reconciliation.
+ */
+export async function reconcileBracketOrders(
+  pool: Pool,
+  actor: ActorContext = SYSTEM_RECONCILIATION_ACTOR,
+  requestId?: string,
+): Promise<BracketReconciliationResult> {
+  const result: BracketReconciliationResult = { checked: 0, reconciled: 0, errors: 0 };
+  let openBrackets: Awaited<ReturnType<typeof findOpenBracketOrders>>;
+  try {
+    openBrackets = await findOpenBracketOrders(pool);
+  } catch {
+    return result;
+  }
+
+  for (const bracket of openBrackets) {
+    const takeProfitId = bracket.bracketOrderIds.take_profit;
+    const stopLossId = bracket.bracketOrderIds.stop_loss;
+    if (!takeProfitId || !stopLossId) continue;
+    result.checked += 1;
+
+    try {
+      const [takeProfitResult, stopLossResult] = await Promise.all([
+        getBrokerOrder(takeProfitId, requestId),
+        getBrokerOrder(stopLossId, requestId),
+      ]);
+
+      const filledLeg = takeProfitResult?.status === 'FILLED'
+        ? { exitReason: 'TAKE_PROFIT' as const, order: takeProfitResult }
+        : stopLossResult?.status === 'FILLED'
+          ? { exitReason: 'STOP_LOSS' as const, order: stopLossResult }
+          : null;
+      if (!filledLeg || filledLeg.order.fills.length === 0) continue;
+
+      await recordApprovedBracketExit(
+        pool,
+        bracket.proposalId,
+        filledLeg.exitReason,
+        filledLeg.order.fills[0],
+        actor,
+      );
+      result.reconciled += 1;
+    } catch {
+      result.errors += 1;
+    }
+  }
+
+  return result;
 }
 
 async function updateProposalStatusAfterSubmission(

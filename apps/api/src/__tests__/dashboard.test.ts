@@ -70,6 +70,12 @@ describe('GET /dashboard/paper', () => {
     vi.clearAllMocks();
     if (!SKIP) {
       await pool.query('TRUNCATE portfolio_snapshots RESTART IDENTITY CASCADE');
+      // trading_kill_switch_enabled is a single global row shared by the whole
+      // test database; another suite's MAX_DAILY_LOSS circuit breaker (Milestone
+      // 1b) can legitimately flip it, so pin a known value for this assertion.
+      await pool.query(
+        "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'trading_kill_switch_enabled'",
+      );
       await createSnapshot(pool, {
         cashBalance: '50000.25000000',
         portfolioEquity: '50000.25000000',

@@ -2,6 +2,7 @@ import random
 import threading
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 
@@ -18,6 +19,23 @@ from broker.types import (
     PaperPortfolio,
 )
 from market_data.provider import MarketDataProvider, SymbolNotFoundError
+
+
+@dataclass
+class _BracketLegs:
+    """Tracks the two virtual exit legs of a bracket order (BUY entries only).
+
+    Evaluated lazily — mirrors the existing pending-limit-order pattern — on
+    every get_order/get_open_orders/check_pending_orders call rather than via
+    a background scheduler, since none exists in this service.
+    """
+
+    symbol: str
+    quantity: Decimal
+    stop_loss_price: Decimal
+    take_profit_price: Decimal
+    take_profit_id: str
+    stop_loss_id: str
 
 
 class PaperBrokerAdapter(BrokerAdapter):
@@ -37,6 +55,8 @@ class PaperBrokerAdapter(BrokerAdapter):
         self._orders: dict[str, OrderResult] = {}
         self._idempotency_index: dict[str, str] = {}
         self._pending_limit_orders: dict[str, OrderRequest] = {}
+        self._pending_brackets: dict[str, _BracketLegs] = {}
+        self._bracket_leg_parent: dict[str, str] = {}
         self._paper_cash: Decimal = initial_cash
         self._paper_positions: dict[str, Decimal] = {}
 
@@ -151,6 +171,12 @@ class PaperBrokerAdapter(BrokerAdapter):
 
             if request.order_type == OrderType.MARKET:
                 result = self._execute_market(broker_order_id, request, current_price)
+                if (
+                    request.bracket is not None
+                    and request.side == OrderSide.BUY
+                    and result.status == OrderStatus.FILLED
+                ):
+                    result = self._register_bracket(broker_order_id, request, result)
             else:
                 result = self._handle_limit(broker_order_id, request, current_price)
 
@@ -163,6 +189,9 @@ class PaperBrokerAdapter(BrokerAdapter):
                 raise OrderNotFoundError(f"Order not found: {broker_order_id}")
             if broker_order_id in self._pending_limit_orders:
                 self._lazy_fill_limit(broker_order_id)
+            parent_id = self._bracket_leg_parent.get(broker_order_id)
+            if parent_id is not None:
+                self._evaluate_bracket(parent_id)
             return self._orders[broker_order_id]
 
     def cancel_order(self, broker_order_id: str) -> OrderResult:
@@ -195,6 +224,8 @@ class PaperBrokerAdapter(BrokerAdapter):
 
     def get_open_orders(self) -> list[OrderResult]:
         with self._lock:
+            for parent_id in list(self._pending_brackets.keys()):
+                self._evaluate_bracket(parent_id)
             return [
                 order
                 for order in self._orders.values()
@@ -209,7 +240,8 @@ class PaperBrokerAdapter(BrokerAdapter):
     def check_pending_orders(
         self, symbol: str, current_price: Decimal
     ) -> list[OrderResult]:
-        """Evaluate pending limit orders for a symbol against current_price.
+        """Evaluate pending limit orders and bracket exit legs for a symbol
+        against current_price.
 
         Returns a list of OrderResults for any orders that were filled.
         """
@@ -232,6 +264,16 @@ class PaperBrokerAdapter(BrokerAdapter):
                     self._orders[oid] = result
                     del self._pending_limit_orders[oid]
                     filled.append(result)
+
+            bracket_parent_ids = [
+                parent_id
+                for parent_id, bracket in list(self._pending_brackets.items())
+                if bracket.symbol == symbol
+            ]
+            for parent_id in bracket_parent_ids:
+                bracket_result = self._evaluate_bracket(parent_id, price=current_price)
+                if bracket_result is not None:
+                    filled.append(bracket_result)
         return filled
 
     # ── Private helpers ───────────────────────────────────────────────────────
@@ -333,6 +375,139 @@ class PaperBrokerAdapter(BrokerAdapter):
             status=OrderStatus.FILLED,
             fills=[fill],
         )
+
+    def _register_bracket(
+        self, parent_id: str, request: OrderRequest, result: OrderResult
+    ) -> OrderResult:
+        """Register the SL/TP exit legs for a filled bracket BUY entry.
+
+        Only BUY-entry brackets reach here (the Node caller only ever builds a
+        bracket for BUY proposals). The two exit legs are virtual pending
+        orders evaluated lazily, mirroring _lazy_fill_limit.
+        """
+        bracket = request.bracket
+        if bracket is None:
+            return result
+        stop_loss_price = bracket.get("stop_loss_price")
+        take_profit_price = bracket.get("take_profit_price")
+        if stop_loss_price is None or take_profit_price is None:
+            return result
+
+        take_profit_id = str(uuid.uuid4())
+        stop_loss_id = str(uuid.uuid4())
+        legs = _BracketLegs(
+            symbol=request.symbol,
+            quantity=request.quantity,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            take_profit_id=take_profit_id,
+            stop_loss_id=stop_loss_id,
+        )
+        self._pending_brackets[parent_id] = legs
+        self._bracket_leg_parent[take_profit_id] = parent_id
+        self._bracket_leg_parent[stop_loss_id] = parent_id
+        self._bracket_leg_parent[parent_id] = parent_id
+
+        bracket_ids = {
+            "parent": parent_id,
+            "take_profit": take_profit_id,
+            "stop_loss": stop_loss_id,
+        }
+        self._orders[take_profit_id] = OrderResult(
+            broker_order_id=take_profit_id,
+            status=OrderStatus.PENDING,
+            fills=[],
+            bracket_order_ids=bracket_ids,
+        )
+        self._orders[stop_loss_id] = OrderResult(
+            broker_order_id=stop_loss_id,
+            status=OrderStatus.PENDING,
+            fills=[],
+            bracket_order_ids=bracket_ids,
+        )
+        return result.model_copy(update={"bracket_order_ids": bracket_ids})
+
+    def _evaluate_bracket(
+        self, parent_id: str, price: Decimal | None = None
+    ) -> OrderResult | None:
+        """Check whether a pending bracket's SL or TP has been crossed.
+
+        Assumes the caller already holds self._lock (called only from within
+        locked sections, matching _lazy_fill_limit). Returns the OrderResult
+        of whichever leg filled, or None if the bracket is still pending or
+        already resolved.
+        """
+        legs = self._pending_brackets.get(parent_id)
+        if legs is None:
+            return None
+        if price is None:
+            try:
+                snapshot = self._market_data.get_snapshot(legs.symbol)
+            except SymbolNotFoundError:
+                return None
+            price = snapshot.price
+
+        if price >= legs.take_profit_price:
+            return self._fill_bracket_leg(parent_id, legs, "take_profit", price)
+        if price <= legs.stop_loss_price:
+            return self._fill_bracket_leg(parent_id, legs, "stop_loss", price)
+        return None
+
+    def _fill_bracket_leg(
+        self,
+        parent_id: str,
+        legs: _BracketLegs,
+        triggered_reason: str,
+        trigger_price: Decimal,
+    ) -> OrderResult:
+        slippage = Decimal(self._config.slippage_bps) / Decimal("10000")
+        fill_price = (trigger_price * (1 - slippage)).quantize(Decimal("0.00000001"))
+        fee = max(
+            legs.quantity * self._config.fee_per_share,
+            self._config.min_fee,
+        ).quantize(Decimal("0.00000001"))
+
+        exit_request = OrderRequest(
+            idempotency_key=f"bracket-exit:{parent_id}:{triggered_reason}",
+            symbol=legs.symbol,
+            side=OrderSide.SELL,
+            quantity=legs.quantity,
+            order_type=OrderType.MARKET,
+        )
+        self._apply_fill(exit_request, legs.quantity, fill_price, fee)
+
+        is_take_profit = triggered_reason == "take_profit"
+        filled_leg_id = legs.take_profit_id if is_take_profit else legs.stop_loss_id
+        cancelled_leg_id = legs.stop_loss_id if is_take_profit else legs.take_profit_id
+        bracket_ids = {
+            "parent": parent_id,
+            "take_profit": legs.take_profit_id,
+            "stop_loss": legs.stop_loss_id,
+        }
+        fill = FillEvent(
+            order_id=filled_leg_id,
+            fill_id=str(uuid.uuid4()),
+            quantity=legs.quantity,
+            price=fill_price,
+            fee=fee,
+            is_partial=False,
+            filled_at=datetime.now(tz=UTC).isoformat(),
+        )
+        filled_result = OrderResult(
+            broker_order_id=filled_leg_id,
+            status=OrderStatus.FILLED,
+            fills=[fill],
+            bracket_order_ids=bracket_ids,
+        )
+        self._orders[filled_leg_id] = filled_result
+        self._orders[cancelled_leg_id] = OrderResult(
+            broker_order_id=cancelled_leg_id,
+            status=OrderStatus.CANCELLED,
+            fills=[],
+            bracket_order_ids=bracket_ids,
+        )
+        del self._pending_brackets[parent_id]
+        return filled_result
 
     def _lazy_fill_limit(self, broker_order_id: str) -> None:
         """Evaluate one pending limit order using the current market price."""

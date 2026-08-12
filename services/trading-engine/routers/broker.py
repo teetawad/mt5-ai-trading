@@ -2,8 +2,9 @@ import os
 from decimal import Decimal
 from typing import Protocol, cast
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from auth import verify_internal_token
 from broker.adapter import OrderNotFoundError
 from broker.registry import get_broker
 from broker.types import OrderRequest, OrderResult, PaperAccount, PaperPortfolio
@@ -26,16 +27,10 @@ class OpenOrdersBroker(Protocol):
         ...
 
 
-def _verify_internal_token(x_internal_token: str | None = Header(default=None)) -> None:
-    expected = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
-    if expected and x_internal_token != expected:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-
 @router.post("/orders", response_model=OrderResult)
 async def submit_order(
     request: OrderRequest,
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> OrderResult:
     return get_broker().submit_order(request)
 
@@ -43,7 +38,7 @@ async def submit_order(
 @router.get("/orders/{broker_order_id}", response_model=OrderResult)
 async def get_order(
     broker_order_id: str,
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> OrderResult:
     try:
         return get_broker().get_order(broker_order_id)
@@ -54,7 +49,7 @@ async def get_order(
 @router.post("/orders/{broker_order_id}/cancel", response_model=OrderResult)
 async def cancel_order(
     broker_order_id: str,
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> OrderResult:
     try:
         return get_broker().cancel_order(broker_order_id)
@@ -64,7 +59,7 @@ async def cancel_order(
 
 @router.get("/health")
 async def broker_health(
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> dict[str, bool | str]:
     provider = os.environ.get("BROKER_PROVIDER", "local_paper")
     return {
@@ -76,7 +71,7 @@ async def broker_health(
 
 @router.get("/paper-portfolio", response_model=PaperPortfolio)
 async def paper_portfolio(
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> PaperPortfolio:
     broker = get_broker()
     if not hasattr(broker, "get_paper_portfolio"):
@@ -86,7 +81,7 @@ async def paper_portfolio(
 
 @router.get("/paper-account", response_model=PaperAccount)
 async def paper_account(
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> PaperAccount:
     broker = get_broker()
     if hasattr(broker, "get_account"):
@@ -110,7 +105,7 @@ async def paper_account(
 
 @router.get("/open-orders", response_model=list[OrderResult])
 async def open_orders(
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> list[OrderResult]:
     broker = get_broker()
     if not hasattr(broker, "get_open_orders"):

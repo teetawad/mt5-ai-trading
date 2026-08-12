@@ -88,6 +88,37 @@ export async function findOrderByExecution(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export interface OpenBracketOrder {
+  orderId: string;
+  proposalId: string;
+  symbol: string;
+  bracketOrderIds: Record<string, string | null>;
+}
+
+export async function findOpenBracketOrders(
+  db: Pool | PoolClient,
+): Promise<OpenBracketOrder[]> {
+  const { rows } = await db.query(
+    `SELECT o.id AS order_id, e.proposal_id AS proposal_id, o.symbol, o.bracket_order_ids
+     FROM orders o
+     JOIN executions e ON e.id = o.execution_id
+     WHERE o.side = 'BUY'
+       AND o.status = 'FILLED'
+       AND NULLIF(o.bracket_order_ids ->> 'take_profit', '') IS NOT NULL
+       AND NULLIF(o.bracket_order_ids ->> 'stop_loss', '') IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM orders x
+         WHERE x.execution_id = o.execution_id AND x.exit_reason IS NOT NULL
+       )`,
+  );
+  return rows.map((row) => ({
+    orderId: row.order_id as string,
+    proposalId: row.proposal_id as string,
+    symbol: row.symbol as string,
+    bracketOrderIds: row.bracket_order_ids as Record<string, string | null>,
+  }));
+}
+
 export async function findActiveOrdersBySymbol(
   db: Pool | PoolClient,
   symbol: string,

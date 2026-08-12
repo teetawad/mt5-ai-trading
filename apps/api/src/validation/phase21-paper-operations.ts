@@ -12,7 +12,7 @@ import { getSettingValue, setSetting } from '../db/repositories/system-settings'
 import { findAllStrategies } from '../db/repositories/strategies';
 import { AuditLog, Order, Position } from '../db/types';
 import { approveProposal, createSignalAndProposal } from '../services/trade-proposal-service';
-import { calculatePortfolioPnl, executeApprovedProposal } from '../services/trade-execution-service';
+import { calculatePortfolioPnl, executeApprovedProposal, livePriceMap } from '../services/trade-execution-service';
 import {
   evaluateRisk,
   getAllMarketSnapshots,
@@ -445,7 +445,13 @@ export async function runPhase21Validation(env: Env = process.env): Promise<Phas
     }, {});
     const orderDrift = orderFillDrift(orders, fillSumsByOrderId);
     const positionDrift = brokerPositionDrift(positions, portfolio.positions);
-    const expectedPnl = calculatePortfolioPnl(String(initialCash ?? '100000'), portfolio.cash, positions);
+    const livePrices = await livePriceMap(undefined);
+    const expectedPnl = calculatePortfolioPnl(
+      String(initialCash ?? '100000'),
+      portfolio.cash,
+      positions,
+      livePrices,
+    );
     const pnlMatches = latestSnapshot
       ? decimal(latestSnapshot.realizedPnl).eq(expectedPnl.realizedPnl)
         && decimal(latestSnapshot.unrealizedPnl).eq(expectedPnl.unrealizedPnl)

@@ -25,6 +25,16 @@ from strategy.registry import (
 from strategy.signal import Signal, SignalSide, SignalType
 from strategy.us_stock_factor import USStockFactorConfig, USStockFactorStrategy
 
+TEST_INTERNAL_TOKEN = "test-internal-token"
+
+
+@pytest.fixture(autouse=True)
+def _internal_service_token(monkeypatch):
+    """Every HTTP-layer test needs INTERNAL_SERVICE_TOKEN set now that the
+    dependency fails closed; individual token tests override this locally."""
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", TEST_INTERNAL_TOKEN)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 STRATEGY_DIR = pathlib.Path(__file__).parent.parent / "strategy"
@@ -528,7 +538,7 @@ class TestSignalEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/signals/strategies")
         assert res.status_code == 200
         data = res.json()
@@ -540,7 +550,7 @@ class TestSignalEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.post("/signals/generate", json={"strategy_name": None})
         assert res.status_code == 200
         assert isinstance(res.json(), list)
@@ -550,7 +560,7 @@ class TestSignalEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.post(
             "/signals/generate", json={"strategy_name": self._mac.name}
         )
@@ -562,7 +572,7 @@ class TestSignalEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.post(
             "/signals/generate", json={"strategy_name": "nonexistent_strategy"}
         )
@@ -574,7 +584,7 @@ class TestSignalEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/signals/strategies")
         assert res.status_code == 403
 
@@ -584,7 +594,7 @@ class TestSignalEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get(
             "/signals/strategies", headers={"X-Internal-Token": "secret"}
         )

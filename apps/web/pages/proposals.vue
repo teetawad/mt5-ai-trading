@@ -64,7 +64,20 @@
                 </div>
               </td>
             </tr>
-            <tr v-if="!safeProposals.length">
+            <tr
+              v-for="malformed in malformedProposals"
+              :key="`malformed-${malformed.id}`"
+              class="border-t border-slate-800 bg-rose-500/5"
+            >
+              <td
+                colspan="6"
+                class="px-4 py-3 text-rose-200"
+              >
+                Proposal {{ malformed.id }} ({{ malformed.status }}) has malformed data and cannot be displayed safely.
+              </td>
+              <td class="px-4 py-3 text-right text-xs font-semibold text-rose-300">Needs attention</td>
+            </tr>
+            <tr v-if="!safeProposals.length && !malformedProposals.length">
               <td
                 colspan="7"
                 class="px-4 py-8 text-center text-slate-500"
@@ -240,6 +253,19 @@ const safeProposals = computed(() => {
   if (!Array.isArray(list)) return [];
   return list.filter(isRenderableProposal);
 });
+const malformedProposals = computed(() => {
+  const list = proposals.value?.proposals;
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((item) => !isRenderableProposal(item))
+    .map((item) => {
+      const record = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+      return {
+        id: stringValue(record.id) ?? 'unknown-id',
+        status: stringValue(record.status) ?? 'UNKNOWN',
+      };
+    });
+});
 const pageError = computed(() => {
   if (actionError.value) return actionError.value;
   if (error.value) return error.value.message;
@@ -247,9 +273,9 @@ const pageError = computed(() => {
   if (raw !== undefined && !Array.isArray(raw)) {
     return 'Trade proposal API returned an invalid proposals list.';
   }
-  const invalidCount = Array.isArray(raw) ? raw.length - safeProposals.value.length : 0;
+  const invalidCount = malformedProposals.value.length;
   if (invalidCount > 0) {
-    return `${invalidCount} malformed proposal${invalidCount === 1 ? '' : 's'} could not be rendered.`;
+    return `${invalidCount} malformed proposal${invalidCount === 1 ? '' : 's'} shown below cannot be fully displayed — still pending your attention.`;
   }
   return '';
 });

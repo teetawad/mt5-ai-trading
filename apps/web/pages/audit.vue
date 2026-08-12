@@ -4,6 +4,12 @@
       <h1 class="text-2xl font-semibold">Audit Log</h1>
       <p class="mt-1 text-sm text-slate-400">Owner actions and system events.</p>
     </div>
+    <div
+      v-if="error"
+      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+    >
+      Failed to load audit log. Please refresh the page.
+    </div>
     <section class="rounded border border-slate-800 bg-slate-900">
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -46,7 +52,7 @@
 <script setup lang="ts">
 type AuditLog = { id: string; eventType: string; action: string; actorEmail: string | null; entityType: string | null; createdAt: string };
 const { apiFetch } = useApi();
-const { data } = await useAsyncData<{ auditLogs: AuditLog[] }>('audit-page', () => apiFetch('/audit-logs?limit=50'));
+const { data, error } = await useAsyncData<{ auditLogs: AuditLog[] }>('audit-page', () => apiFetch('/audit-logs?limit=50'));
 function date(value: string): string {
   return new Date(value).toLocaleString();
 }

@@ -172,6 +172,52 @@ controlled by a `simulation_mode: bool` flag on the adapter.
 
 ---
 
+## Bracket Orders (Stop-Loss / Take-Profit)
+
+Added in phase 22/23 alongside the AI-assisted decision layer. A bracket order is
+a BUY entry paired with a stop-loss and a take-profit exit price, computed
+server-side by `phase22RiskControls` (Node) from `phase22_stop_loss_pct` /
+`phase22_take_profit_pct`. Only BUY entries carry a bracket — the broker layer
+never registers one for a SELL.
+
+**local_paper (`PaperBrokerAdapter`, default `BROKER_PROVIDER`):**
+- On a filled BUY entry with `request.bracket` set, the adapter fills the entry
+  immediately (as any market order) and registers two virtual pending exit
+  legs — `take_profit` and `stop_loss` — each with its own synthetic
+  `broker_order_id`, returned to the caller as `bracket_order_ids: {parent,
+  take_profit, stop_loss}`.
+- The legs are evaluated **lazily** — the same pattern used for queued limit
+  orders (`_lazy_fill_limit`) — inside `get_order`, `get_open_orders`, and
+  `check_pending_orders`. There is no background scheduler in this service;
+  a leg only resolves when something polls for order state.
+- When the current price crosses the take-profit level (or drops to/below the
+  stop-loss level), that leg fills at the trigger price (with the configured
+  slippage/fee) and the opposite leg is marked `CANCELLED` — a local OCO
+  (one-cancels-other) simulation.
+
+**alpaca_paper (`AlpacaPaperBrokerAdapter`):**
+- Submits a native Alpaca `order_class: "bracket"` order. Alpaca hosts the
+  OCO relationship **server-side** — the stop-loss and take-profit legs live
+  and resolve on Alpaca's infrastructure independent of whether this app is
+  running.
+- `_map_order` reads Alpaca's `legs` array on the parent order response to
+  recover each leg's own `broker_order_id`, populating the same
+  `bracket_order_ids` shape as the local broker so the rest of the stack does
+  not need to special-case which broker is active.
+
+**Reconciliation (both brokers):** the Node API never learns about a filled
+exit leg on its own — something has to ask. `reconcileBracketOrders`
+(`apps/api/src/services/trade-execution-service.ts`) finds every locally-open
+bracket (entry `FILLED`, both leg IDs present, no exit recorded yet), polls
+`GET /broker/orders/:id` for each leg, and calls `recordApprovedBracketExit`
+with the correct `TAKE_PROFIT`/`STOP_LOSS` reason and fill data the moment a
+leg reports `FILLED`. It runs once at API process startup (restart recovery)
+and again on every `GET /dashboard/paper` request, so bracket state self-heals
+without any dedicated scheduler. It is idempotent (keyed by the broker's own
+`fill_id`) and never lets one bracket's error block the rest.
+
+---
+
 ## API Endpoints (trading-engine internal)
 
 ```

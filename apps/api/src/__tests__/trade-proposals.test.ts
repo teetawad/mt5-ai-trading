@@ -9,10 +9,13 @@ import { createStrategy } from '../db/repositories/strategies';
 import { getTestPool, setupTestDb } from './db/setup';
 import { executeApprovedProposal } from '../services/trade-execution-service';
 import { recordApprovedBracketExit } from '../services/trade-execution-service';
+import { getDayStartEquity } from '../services/trade-execution-service';
+import { reconcileBracketOrders } from '../services/trade-execution-service';
 import { approveProposal } from '../services/trade-proposal-service';
 import {
   evaluateRisk,
   getMarketSnapshot,
+  getOrder,
   getPaperPortfolio,
   getTrackedSymbols,
   submitOrder,
@@ -25,6 +28,7 @@ vi.mock('../services/trading-engine-client', async () => {
   return {
     ...actual,
     getMarketSnapshot: vi.fn(),
+    getOrder: vi.fn(),
     getPaperPortfolio: vi.fn(),
     getTrackedSymbols: vi.fn(),
     evaluateRisk: vi.fn(),
@@ -239,15 +243,29 @@ describe('Phase 8 signal to proposal workflow', () => {
       await pool.query(
         "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'phase22_prevent_duplicate_exposure'",
       );
+      await pool.query(
+        "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'trading_kill_switch_enabled'",
+      );
+      // Milestone 1b's auto-disable circuit breaker stamps updated_by with the
+      // triggering owner; clear it so the owner row can be deleted below.
+      await pool.query('UPDATE system_settings SET updated_by = NULL WHERE updated_by = $1', [OWNER_ID]);
       await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
       await pool.end();
     }
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     _clearDenylistForTest();
     vi.clearAllMocks();
     mockEngine('PASS');
+    // The MAX_DAILY_LOSS auto-disable circuit breaker is a real cross-request
+    // safety feature (Milestone 1b) — it can legitimately trip from a prior
+    // test's cumulative daily P&L in this shared, sequentially-run test DB.
+    // Reset it here so each test starts from a known-good state, matching
+    // how a fresh trading day would reset it in production.
+    await pool.query(
+      "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'trading_kill_switch_enabled'",
+    );
   });
 
   it.skipIf(SKIP)('POST /signals creates a signal, risk check, and pending proposal on risk pass', async () => {
@@ -615,6 +633,79 @@ describe('Phase 8 signal to proposal workflow', () => {
     expect(exit.position?.quantity).toBe('0.00000000');
     expect(exit.order?.exitReason).toBe('STOP_LOSS');
     expect(exit.order?.bracketOrderIds.cancelled_leg).toBe('take_profit');
+  });
+
+  it.skipIf(SKIP)('reconcileBracketOrders closes a position when the broker reports a filled take-profit leg', async () => {
+    await resetTradingLedger(pool);
+    mockEngineSequence('PASS', 'PASS');
+    vi.mocked(submitOrder).mockResolvedValueOnce({
+      broker_order_id: `reconcile-parent-${BROKER_RUN_ID}`,
+      status: 'FILLED',
+      bracket_order_ids: {
+        parent: `reconcile-parent-${BROKER_RUN_ID}`,
+        take_profit: `reconcile-tp-${BROKER_RUN_ID}`,
+        stop_loss: `reconcile-sl-${BROKER_RUN_ID}`,
+      },
+      fills: [
+        {
+          order_id: `reconcile-parent-${BROKER_RUN_ID}`,
+          fill_id: `reconcile-entry-fill-${BROKER_RUN_ID}`,
+          quantity: '1.00000000',
+          price: '100.00000000',
+          fee: '1.00000000',
+          is_partial: false,
+          filled_at: '2024-01-15T10:31:00.000Z',
+        },
+      ],
+    });
+
+    const created = await request(app)
+      .post('/signals/ai-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+    await request(app)
+      .post(`/trade-proposals/${created.body.proposal.id}/approve`)
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ requestId: 'reconcile-approve' });
+
+    vi.mocked(getOrder).mockImplementation(async (brokerOrderId: string) => {
+      if (brokerOrderId === `reconcile-tp-${BROKER_RUN_ID}`) {
+        return {
+          broker_order_id: brokerOrderId,
+          status: 'FILLED',
+          fills: [
+            {
+              order_id: brokerOrderId,
+              fill_id: `reconcile-tp-fill-${BROKER_RUN_ID}`,
+              quantity: '1.00000000',
+              price: '104.00000000',
+              fee: '1.00000000',
+              is_partial: false,
+              filled_at: '2024-01-15T10:36:00.000Z',
+            },
+          ],
+        };
+      }
+      return { broker_order_id: brokerOrderId, status: 'CANCELLED', fills: [] };
+    });
+
+    const outcome = await reconcileBracketOrders(pool);
+
+    expect(outcome.checked).toBe(1);
+    expect(outcome.reconciled).toBe(1);
+    expect(outcome.errors).toBe(0);
+
+    const order = await pool.query(
+      `SELECT exit_reason FROM orders WHERE symbol = 'AAPL' AND side = 'SELL' ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(order.rows[0].exit_reason).toBe('TAKE_PROFIT');
+
+    const position = await pool.query("SELECT quantity FROM positions WHERE symbol = 'AAPL'");
+    expect(position.rows[0].quantity).toBe('0.00000000');
+
+    // idempotent: a second reconciliation pass finds nothing left to do
+    const second = await reconcileBracketOrders(pool);
+    expect(second.checked).toBe(0);
   });
 
   it.skipIf(SKIP)('Phase 23 approved AI plan is immutable', async () => {
@@ -1560,5 +1651,73 @@ describe('Phase 8 signal to proposal workflow', () => {
     expect(recovered.body.proposal.status).toBe('FILLED');
     expect(recovered.body.execution.id).toBe(failed.body.execution.id);
     expect(vi.mocked(submitOrder)).toHaveBeenCalledTimes(2);
+  });
+
+  it.skipIf(SKIP)('getDayStartEquity uses the latest snapshot strictly before today, not a same-day one', async () => {
+    await resetTradingLedger(pool);
+
+    const fallback = await getDayStartEquity(pool, new Date(), '50000');
+    expect(fallback.toFixed(8)).toBe('50000.00000000');
+
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO portfolio_snapshots
+         (cash_balance, portfolio_equity, open_positions, pending_orders,
+          realized_pnl, unrealized_pnl, daily_pnl, snapshot_reason, created_at)
+       VALUES ($1, $2, '[]'::jsonb, '[]'::jsonb, $3, '0.00000000', $3, 'TEST_PRIOR_DAY', $4)`,
+      ['49500.00000000', '49500.00000000', '-500.00000000', twoDaysAgo],
+    );
+    await pool.query(
+      `INSERT INTO portfolio_snapshots
+         (cash_balance, portfolio_equity, open_positions, pending_orders,
+          realized_pnl, unrealized_pnl, daily_pnl, snapshot_reason)
+       VALUES ($1, $2, '[]'::jsonb, '[]'::jsonb, $3, '0.00000000', $3, 'TEST_TODAY')`,
+      ['51000.00000000', '51000.00000000', '1000.00000000'],
+    );
+
+    const dayStart = await getDayStartEquity(pool, new Date(), '50000');
+    expect(dayStart.toFixed(8)).toBe('49500.00000000');
+
+    await resetTradingLedger(pool);
+  });
+
+  it.skipIf(SKIP)('a MAX_DAILY_LOSS breach rejects the proposal and auto-disables the kill switch', async () => {
+    await resetTradingLedger(pool);
+    mockEngine('PASS');
+    await pool.query(
+      "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'trading_kill_switch_enabled'",
+    );
+    await pool.query(
+      `INSERT INTO portfolio_snapshots
+         (cash_balance, portfolio_equity, open_positions, pending_orders,
+          realized_pnl, unrealized_pnl, daily_pnl, snapshot_reason)
+       VALUES ('48000.00000000', '48000.00000000', '[]'::jsonb, '[]'::jsonb,
+               '-2000.00000000', '0.00000000', '-2000.00000000', 'TEST_DAILY_LOSS_BASELINE')`,
+    );
+
+    const res = await request(app)
+      .post('/signals/manual-test')
+      .set('Authorization', `Bearer ${token()}`)
+      .set('X-Request-ID', 'daily-loss-breach')
+      .send({ symbol: 'AAPL', side: 'BUY', quantity: '1.00000000' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.proposal.status).toBe('RISK_REJECTED');
+    expect(res.body.riskCheck.failedRules).toContain('PHASE22_MAX_DAILY_LOSS');
+
+    const setting = await pool.query(
+      "SELECT value FROM system_settings WHERE key = 'trading_kill_switch_enabled'",
+    );
+    expect(setting.rows[0].value).toBe(false);
+
+    const audit = await pool.query(
+      "SELECT * FROM audit_logs WHERE event_type = 'KILL_SWITCH_AUTO_DISABLED_DAILY_LOSS' ORDER BY created_at DESC LIMIT 1",
+    );
+    expect(audit.rows.length).toBe(1);
+
+    await pool.query(
+      "UPDATE system_settings SET value = 'true'::jsonb WHERE key = 'trading_kill_switch_enabled'",
+    );
+    await resetTradingLedger(pool);
   });
 });

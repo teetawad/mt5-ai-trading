@@ -20,6 +20,16 @@ from market_data.registry import get_provider, init_provider
 from market_data.snapshot import MarketBar, MarketQuote, MarketSnapshot, MarketTrade
 from market_data.synthetic import SyntheticMarketDataProvider
 
+TEST_INTERNAL_TOKEN = "test-internal-token"
+
+
+@pytest.fixture(autouse=True)
+def _internal_service_token(monkeypatch):
+    """Every HTTP-layer test needs INTERNAL_SERVICE_TOKEN set now that the
+    dependency fails closed; individual token tests override this locally."""
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", TEST_INTERNAL_TOKEN)
+
+
 # ── SyntheticMarketDataProvider ────────────────────────────────────────────────
 
 class TestSyntheticProvider:
@@ -412,7 +422,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/market-data/snapshot/AAPL")
         assert res.status_code == 200
         data = res.json()
@@ -428,7 +438,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/market-data/snapshot/ZZZZZ")
         assert res.status_code == 404
 
@@ -436,7 +446,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/market-data/snapshots")
         assert res.status_code == 200
         data = res.json()
@@ -449,7 +459,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/market-data/symbols")
         assert res.status_code == 200
         data = res.json()
@@ -460,7 +470,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/market-data/snapshot/AAPL")
         assert res.status_code == 403
 
@@ -469,7 +479,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get(
             "/market-data/snapshot/AAPL",
             headers={"X-Internal-Token": "secret-token"},
@@ -517,7 +527,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get(
             "/market-data/bars/AAPL?timeframe=1Min&start=2026-08-10T13:30:00Z&limit=1"
         )
@@ -557,7 +567,7 @@ class TestMarketDataEndpoints:
         from fastapi.testclient import TestClient
 
         from main import app
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
 
         quote = client.get("/market-data/quote/AAPL")
         trade = client.get("/market-data/trade/AAPL")

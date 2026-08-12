@@ -144,6 +144,30 @@ stateDiagram-v2
 
 ---
 
+## Bracket Exit Reconciliation (orders sub-state, phase 22/23)
+
+A bracket proposal's own state machine is unaffected by its exit — it still
+transitions `SUBMITTED → FILLED` on the entry fill and stays terminal at
+`FILLED`. What happens next lives on the `orders` table, one level below the
+proposal:
+
+- The entry order gets `bracket_order_ids: {parent, take_profit, stop_loss}`
+  when submitted (see "Bracket Orders" in `docs/PAPER_BROKER.md`).
+- When the broker reports either exit leg filled, `recordApprovedBracketExit`
+  creates a **new** `orders` row (side `SELL`) for that fill, sets its
+  `exit_reason` to `TAKE_PROFIT` or `STOP_LOSS`, records `cancelled_leg` for
+  the opposite leg in `bracket_order_ids`, and updates the `positions` table
+  and portfolio snapshot accordingly.
+- This is triggered by `reconcileBracketOrders`, not by any proposal-status
+  transition — it runs at API startup and on every dashboard load, so a
+  browser/app restart does not affect an Alpaca-hosted bracket's SL/TP (those
+  live on Alpaca's servers) and the local ledger catches up the next time
+  something polls.
+- `recordApprovedBracketExit` is idempotent per broker `fill_id`: replaying
+  the same exit fill is a no-op on the second call.
+
+---
+
 ## Signal State (separate from Proposal)
 
 Signals have their own simpler state:

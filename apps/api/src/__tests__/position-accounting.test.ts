@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   calculatePortfolioPnl,
   calculatePositionAccounting,
+  PositionAccountingError,
 } from '../services/trade-execution-service';
 import { FillEventDTO } from '../services/trading-engine-client';
 
@@ -83,6 +84,7 @@ describe('position accounting', () => {
 
   it('does not count stale closed-position realized P&L again on a later flat portfolio', () => {
     const staleClosedPosition = {
+      symbol: 'AAPL',
       quantity: '0.00000000',
       averageEntryPrice: null,
       lastPrice: '99.93000000',
@@ -119,6 +121,7 @@ describe('position accounting', () => {
   it('subtracts unrealized P&L from equity when deriving cumulative realized P&L with an open position', () => {
     const openPositions = [
       {
+        symbol: 'AAPL',
         quantity: '1.00000000',
         averageEntryPrice: '101.00000000',
         lastPrice: '110.00000000',
@@ -129,5 +132,51 @@ describe('position accounting', () => {
     expect(pnl.portfolioEquity).toBe('100017.00000000');
     expect(pnl.unrealizedPnl).toBe('9.00000000');
     expect(pnl.realizedPnl).toBe('8.00000000');
+  });
+
+  it('prefers live market price over stale stored lastPrice for unrealized/realized P&L', () => {
+    const openPositions = [
+      {
+        symbol: 'AAPL',
+        quantity: '10.00000000',
+        averageEntryPrice: '100.00000000',
+        lastPrice: '100.00000000',
+      },
+    ];
+    const stale = calculatePortfolioPnl('100000.00000000', '99000.00000000', openPositions);
+    expect(stale.unrealizedPnl).toBe('0.00000000');
+    expect(stale.portfolioEquity).toBe('100000.00000000');
+
+    const live = calculatePortfolioPnl('100000.00000000', '99000.00000000', openPositions, {
+      AAPL: '150.00000000',
+    });
+    expect(live.unrealizedPnl).toBe('500.00000000');
+    expect(live.portfolioEquity).toBe('100500.00000000');
+    expect(live.realizedPnl).toBe('0.00000000');
+  });
+
+  it('falls back to stored lastPrice when a symbol has no live market price', () => {
+    const openPositions = [
+      {
+        symbol: 'MSFT',
+        quantity: '5.00000000',
+        averageEntryPrice: '200.00000000',
+        lastPrice: '210.00000000',
+      },
+    ];
+    const pnl = calculatePortfolioPnl('100000.00000000', '99000.00000000', openPositions, {
+      AAPL: '150.00000000',
+    });
+    expect(pnl.unrealizedPnl).toBe('50.00000000');
+  });
+
+  it('throws instead of fabricating P&L when a SELL fill exceeds the tracked position', () => {
+    const opened = calculatePositionAccounting(null, 'BUY', [fill('1.00000000', '100.00000000', '0.00000000')]);
+
+    expect(() => calculatePositionAccounting(
+      opened,
+      'SELL',
+      [fill('5.00000000', '110.00000000', '0.00000000')],
+    )).toThrow(PositionAccountingError);
   });
 });

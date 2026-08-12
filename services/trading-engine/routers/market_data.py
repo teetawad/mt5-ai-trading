@@ -1,7 +1,6 @@
-import os
+from fastapi import APIRouter, Depends, HTTPException
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-
+from auth import verify_internal_token
 from market_data.provider import (
     MarketDataProviderError,
     MarketDataRateLimitError,
@@ -11,12 +10,6 @@ from market_data.registry import get_provider
 from market_data.snapshot import MarketBar, MarketQuote, MarketSnapshot, MarketTrade
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
-
-
-def _verify_internal_token(x_internal_token: str | None = Header(default=None)) -> None:
-    expected = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
-    if expected and x_internal_token != expected:
-        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 def _provider_error(exc: Exception) -> HTTPException:
@@ -37,7 +30,7 @@ def _provider_error(exc: Exception) -> HTTPException:
 @router.get("/snapshot/{symbol}", response_model=MarketSnapshot)
 async def get_snapshot(
     symbol: str,
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> MarketSnapshot:
     try:
         return get_provider().get_snapshot(symbol.upper())
@@ -49,14 +42,14 @@ async def get_snapshot(
 
 @router.get("/snapshots", response_model=list[MarketSnapshot])
 async def get_all_snapshots(
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> list[MarketSnapshot]:
     return get_provider().get_all_snapshots()
 
 
 @router.get("/symbols", response_model=list[str])
 async def get_tracked_symbols(
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> list[str]:
     return get_provider().tracked_symbols()
 
@@ -68,7 +61,7 @@ async def get_historical_bars(
     start: str,
     end: str | None = None,
     limit: int = 100,
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> list[MarketBar]:
     if limit < 1 or limit > 10_000:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 10000")
@@ -87,7 +80,7 @@ async def get_historical_bars(
 @router.get("/quote/{symbol}", response_model=MarketQuote)
 async def get_latest_quote(
     symbol: str,
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> MarketQuote:
     try:
         return get_provider().get_latest_quote(symbol.upper())
@@ -98,7 +91,7 @@ async def get_latest_quote(
 @router.get("/trade/{symbol}", response_model=MarketTrade)
 async def get_latest_trade(
     symbol: str,
-    _: None = Depends(_verify_internal_token),
+    _: None = Depends(verify_internal_token),
 ) -> MarketTrade:
     try:
         return get_provider().get_latest_trade(symbol.upper())

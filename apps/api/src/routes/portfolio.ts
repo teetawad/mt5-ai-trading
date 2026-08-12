@@ -7,8 +7,13 @@ import {
 } from '../db/repositories/portfolio-snapshots';
 import { findOpenPositions } from '../db/repositories/positions';
 import { getSettingValue } from '../db/repositories/system-settings';
-import { calculatePortfolioPnl } from '../services/trade-execution-service';
+import {
+  calculatePortfolioPnl,
+  getDayStartEquity,
+  livePriceMap,
+} from '../services/trade-execution-service';
 import { getPaperPortfolio } from '../services/trading-engine-client';
+import Decimal from 'decimal.js';
 
 export const portfolioRouter = Router();
 
@@ -49,11 +54,15 @@ portfolioRouter.get('/', async (_req: Request, res: Response) => {
     return;
   }
 
-  const [paperPortfolio, initialCash] = await Promise.all([
+  const [paperPortfolio, initialCashSetting, livePrices] = await Promise.all([
     getPaperPortfolio(),
     getSettingValue(pool, 'initial_paper_cash_usd'),
+    livePriceMap(undefined),
   ]);
-  const pnl = calculatePortfolioPnl(String(initialCash ?? '100000'), paperPortfolio.cash, positions);
+  const initialCash = String(initialCashSetting ?? '100000');
+  const pnl = calculatePortfolioPnl(initialCash, paperPortfolio.cash, positions, livePrices);
+  const dayStartEquity = await getDayStartEquity(pool, new Date(), initialCash);
+  const dailyPnl = new Decimal(pnl.portfolioEquity).minus(dayStartEquity).toDecimalPlaces(8).toFixed(8);
 
   res.json({
     source: 'INTERNAL_LEDGER',
@@ -61,7 +70,7 @@ portfolioRouter.get('/', async (_req: Request, res: Response) => {
     portfolioEquity: pnl.portfolioEquity,
     realizedPnl: pnl.realizedPnl,
     unrealizedPnl: pnl.unrealizedPnl,
-    dailyPnl: pnl.realizedPnl,
+    dailyPnl,
     openPositions: positions,
     pendingOrders: [],
     lastUpdatedAt: null,

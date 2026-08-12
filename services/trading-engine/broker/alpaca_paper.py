@@ -88,7 +88,7 @@ class AlpacaPaperBrokerAdapter(BrokerAdapter):
         if existing is not None:
             return self._map_order(existing)
 
-        payload: dict[str, str] = {
+        payload: dict[str, Any] = {
             "symbol": request.symbol.upper(),
             "qty": str(request.quantity),
             "side": request.side.value.lower(),
@@ -187,7 +187,7 @@ class AlpacaPaperBrokerAdapter(BrokerAdapter):
         path: str,
         *,
         params: dict[str, str] | None = None,
-        json: dict[str, str] | None = None,
+        json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         parsed = self._request(method, path, params=params, json=json)
         if not isinstance(parsed, dict):
@@ -212,7 +212,7 @@ class AlpacaPaperBrokerAdapter(BrokerAdapter):
         path: str,
         *,
         params: dict[str, str] | None = None,
-        json: dict[str, str] | None = None,
+        json: dict[str, Any] | None = None,
         allow_empty: bool = False,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         response = self._client.request(
@@ -256,6 +256,7 @@ class AlpacaPaperBrokerAdapter(BrokerAdapter):
             broker_order_id=broker_order_id,
             status=status,
             fills=_map_fills(order, broker_order_id),
+            bracket_order_ids=_map_bracket_legs(order, broker_order_id),
             rejected_reason=rejected_reason,
         )
 
@@ -310,6 +311,42 @@ def _map_fills(order: dict[str, Any], broker_order_id: str) -> list[FillEvent]:
             filled_at=str(order.get("filled_at") or order.get("updated_at") or ""),
         )
     ]
+
+
+def _map_bracket_legs(order: dict[str, Any], parent_id: str) -> dict[str, str] | None:
+    """Extract child stop-loss/take-profit order IDs from Alpaca's nested
+    `legs` array on a bracket order response.
+
+    Alpaca returns the take-profit leg as a `limit` order and the stop-loss
+    leg as a `stop` (or `stop_limit`) order; each leg has its own order ID
+    that must be polled independently (via get_order) to detect which one
+    fills — Alpaca's own server-side OCO cancels the other automatically.
+    """
+    legs = order.get("legs")
+    if not isinstance(legs, list) or not legs:
+        return None
+
+    take_profit_id: str | None = None
+    stop_loss_id: str | None = None
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        leg_id = str(leg.get("id") or "")
+        if not leg_id:
+            continue
+        leg_type = str(leg.get("type", "")).lower()
+        if leg_type in {"stop", "stop_limit"}:
+            stop_loss_id = leg_id
+        elif leg_type in {"limit", "market"}:
+            take_profit_id = leg_id
+
+    if take_profit_id is None and stop_loss_id is None:
+        return None
+    return {
+        "parent": parent_id,
+        "take_profit": take_profit_id or "",
+        "stop_loss": stop_loss_id or "",
+    }
 
 
 def _safe_json(response: httpx.Response) -> dict[str, Any] | list[Any] | None:

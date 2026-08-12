@@ -4,6 +4,12 @@
       <h1 class="text-2xl font-semibold">Orders</h1>
       <p class="mt-1 text-sm text-slate-400">Paper broker orders and fill progress.</p>
     </div>
+    <div
+      v-if="error"
+      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+    >
+      Failed to load orders. Please refresh the page.
+    </div>
     <section class="rounded border border-slate-800 bg-slate-900">
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -59,7 +65,7 @@ type Order = {
   status: string;
 };
 const { apiFetch } = useApi();
-const { data } = await useAsyncData<{ orders: Order[] }>('orders-page', () => apiFetch('/orders?limit=50'));
+const { data, error } = await useAsyncData<{ orders: Order[] }>('orders-page', () => apiFetch('/orders?limit=50'));
 function money(value?: string | null): string {
   return value ? `$${Number(value).toFixed(2)}` : '-';
 }

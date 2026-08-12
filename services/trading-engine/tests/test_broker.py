@@ -21,6 +21,16 @@ from broker.types import (
 from market_data.provider import MarketDataProvider, SymbolNotFoundError
 from market_data.snapshot import MarketSnapshot
 
+TEST_INTERNAL_TOKEN = "test-internal-token"
+
+
+@pytest.fixture(autouse=True)
+def _internal_service_token(monkeypatch):
+    """Every HTTP-layer test needs INTERNAL_SERVICE_TOKEN set now that the
+    dependency fails closed; individual token tests override this locally."""
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", TEST_INTERNAL_TOKEN)
+
+
 # ── Mock market data provider ─────────────────────────────────────────────────
 
 class MockMarketDataProvider(MarketDataProvider):
@@ -80,6 +90,7 @@ def _req(
     order_type: OrderType = OrderType.MARKET,
     limit_price: Decimal | None = None,
     idem_key: str = "k-1",
+    bracket: dict[str, Decimal] | None = None,
 ) -> OrderRequest:
     return OrderRequest(
         idempotency_key=idem_key,
@@ -88,6 +99,7 @@ def _req(
         quantity=quantity,
         order_type=order_type,
         limit_price=limit_price,
+        bracket=bracket,
     )
 
 
@@ -500,6 +512,115 @@ class TestLimitOrders:
         assert len(filled) == 0
 
 
+# ── Bracket orders (stop-loss / take-profit) ──────────────────────────────────
+
+class TestBracketOrders:
+    def _bracket(self, stop_loss="140.00", take_profit="160.00"):
+        return {
+            "stop_loss_price": Decimal(stop_loss),
+            "take_profit_price": Decimal(take_profit),
+        }
+
+    def test_bracket_entry_fills_and_registers_pending_exit_legs(self):
+        broker, _ = _make_broker()  # AAPL at 150
+        result = broker.submit_order(_req(bracket=self._bracket()))
+
+        assert result.status == OrderStatus.FILLED
+        assert result.bracket_order_ids is not None
+        tp_id = result.bracket_order_ids["take_profit"]
+        sl_id = result.bracket_order_ids["stop_loss"]
+        assert tp_id != sl_id
+        assert broker.get_order(tp_id).status == OrderStatus.PENDING
+        assert broker.get_order(sl_id).status == OrderStatus.PENDING
+
+    def test_bracket_pending_legs_appear_in_open_orders(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        open_ids = {order.broker_order_id for order in broker.get_open_orders()}
+
+        assert result.bracket_order_ids["take_profit"] in open_ids
+        assert result.bracket_order_ids["stop_loss"] in open_ids
+        assert result.broker_order_id not in open_ids  # entry itself is already FILLED
+
+    def test_take_profit_fills_and_cancels_stop_loss_via_get_order(self):
+        broker, md = _make_broker()  # AAPL at 150
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        tp_id = result.bracket_order_ids["take_profit"]
+        sl_id = result.bracket_order_ids["stop_loss"]
+
+        md.set_price("AAPL", Decimal("165.00"))
+        updated_tp = broker.get_order(tp_id)
+        updated_sl = broker.get_order(sl_id)
+
+        assert updated_tp.status == OrderStatus.FILLED
+        assert updated_sl.status == OrderStatus.CANCELLED
+        assert len(updated_tp.fills) == 1
+        # slippage_bps default = 5 (0.05%): 165.00 * (1 - 0.0005)
+        assert updated_tp.fills[0].price == Decimal("164.91750000")
+        assert updated_tp.fills[0].fee == Decimal("1.00000000")
+        assert broker.get_paper_portfolio().positions.get("AAPL", Decimal("0")) == Decimal("0")
+
+    def test_stop_loss_fills_and_cancels_take_profit_via_get_order(self):
+        broker, md = _make_broker()  # AAPL at 150
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        tp_id = result.bracket_order_ids["take_profit"]
+        sl_id = result.bracket_order_ids["stop_loss"]
+
+        md.set_price("AAPL", Decimal("130.00"))
+        updated_sl = broker.get_order(sl_id)
+        updated_tp = broker.get_order(tp_id)
+
+        assert updated_sl.status == OrderStatus.FILLED
+        assert updated_tp.status == OrderStatus.CANCELLED
+        assert len(updated_sl.fills) == 1
+        assert updated_sl.fills[0].price == Decimal("129.93500000")
+        assert broker.get_paper_portfolio().positions.get("AAPL", Decimal("0")) == Decimal("0")
+
+    def test_bracket_leg_fills_via_check_pending_orders(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+
+        filled = broker.check_pending_orders("AAPL", Decimal("165.00"))
+
+        assert len(filled) == 1
+        assert filled[0].broker_order_id == result.bracket_order_ids["take_profit"]
+        assert filled[0].status == OrderStatus.FILLED
+
+    def test_bracket_leg_fills_via_get_open_orders(self):
+        broker, md = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        md.set_price("AAPL", Decimal("165.00"))
+
+        open_ids = {order.broker_order_id for order in broker.get_open_orders()}
+
+        assert result.bracket_order_ids["take_profit"] not in open_ids
+        assert result.bracket_order_ids["stop_loss"] not in open_ids
+
+    def test_bracket_not_triggered_while_price_stays_between_legs(self):
+        broker, md = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        md.set_price("AAPL", Decimal("152.00"))
+
+        tp = broker.get_order(result.bracket_order_ids["take_profit"])
+        sl = broker.get_order(result.bracket_order_ids["stop_loss"])
+        assert tp.status == OrderStatus.PENDING
+        assert sl.status == OrderStatus.PENDING
+
+    def test_bracket_only_registered_for_buy_entries(self):
+        broker, _ = _make_broker(initial_cash=Decimal("200000.00"))
+        broker.submit_order(_req(quantity=Decimal("10"), idem_key="buy-first"))
+        result = broker.submit_order(
+            _req(
+                side=OrderSide.SELL,
+                quantity=Decimal("10"),
+                idem_key="sell-with-bracket",
+                bracket=self._bracket(),
+            )
+        )
+        assert result.status == OrderStatus.FILLED
+        assert result.bracket_order_ids is None
+
+
 # ── Order cancellation ────────────────────────────────────────────────────────
 
 class TestOrderCancellation:
@@ -609,7 +730,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.post(
             "/broker/orders",
             json={
@@ -630,7 +751,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         post_res = client.post(
             "/broker/orders",
             json={
@@ -651,7 +772,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/broker/orders/nonexistent-id")
         assert res.status_code == 404
 
@@ -660,7 +781,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         post_res = client.post(
             "/broker/orders",
             json={
@@ -682,7 +803,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.post("/broker/orders/nonexistent-id/cancel")
         assert res.status_code == 404
 
@@ -691,7 +812,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/broker/health")
         assert res.status_code == 200
         assert res.json()["available"] is True
@@ -704,7 +825,7 @@ class TestBrokerEndpoints:
         from main import app
 
         self._broker.inject_unavailable(duration_seconds=9999)
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/broker/health")
         assert res.status_code == 200
         assert res.json()["available"] is False
@@ -715,7 +836,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/broker/paper-portfolio")
         assert res.status_code == 200
         data = res.json()
@@ -727,7 +848,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/broker/paper-account")
         assert res.status_code == 200
         data = res.json()
@@ -739,7 +860,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         post_res = client.post(
             "/broker/orders",
             json={
@@ -763,7 +884,7 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/broker/health")
         assert res.status_code == 403
 
@@ -773,6 +894,6 @@ class TestBrokerEndpoints:
 
         from main import app
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/broker/health", headers={"X-Internal-Token": "secret"})
         assert res.status_code == 200

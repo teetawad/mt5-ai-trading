@@ -10,10 +10,20 @@
  * Idempotent: exits cleanly if an owner with that email already exists.
  */
 
+import { loadEnvFile } from 'node:process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { createPool } from '../db/client';
 import { runMigrations } from '../db/migrate';
 import { findUserByEmail, createUser } from '../db/repositories/users';
 import { hashPassword } from '../auth/password';
+
+// trade/.env
+const envPath = path.resolve(__dirname, '../../../../.env');
+if (existsSync(envPath)) {
+  loadEnvFile(envPath);
+  console.log(`[bootstrap] Loaded environment from ${envPath}`);
+}
 
 async function main() {
   const email = (process.argv[2] ?? process.env.BOOTSTRAP_EMAIL ?? '').trim().toLowerCase();

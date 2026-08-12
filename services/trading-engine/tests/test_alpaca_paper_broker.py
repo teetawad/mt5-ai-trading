@@ -183,6 +183,72 @@ class TestAlpacaPaperBrokerAdapter:
 
         assert result.status == OrderStatus.FILLED
 
+    def test_bracket_order_response_legs_populate_bracket_order_ids(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/orders:by_client_order_id"):
+                return httpx.Response(404, json={})
+            response = _order()
+            response["legs"] = [
+                {"id": "leg-take-profit-1", "type": "limit", "status": "new"},
+                {"id": "leg-stop-loss-1", "type": "stop", "status": "new"},
+            ]
+            return httpx.Response(200, json=response)
+
+        broker = AlpacaPaperBrokerAdapter(
+            key_id="key",
+            secret_key="secret",
+            base_url="https://paper-api.alpaca.markets",
+            client=_client(handler),
+        )
+
+        result = broker.submit_order(_req(bracket={
+            "stop_loss_price": Decimal("98.00"),
+            "take_profit_price": Decimal("106.00"),
+        }))
+
+        assert result.bracket_order_ids == {
+            "parent": "alpaca-order-1",
+            "take_profit": "leg-take-profit-1",
+            "stop_loss": "leg-stop-loss-1",
+        }
+
+    def test_order_without_legs_has_no_bracket_order_ids(self) -> None:
+        broker = AlpacaPaperBrokerAdapter(
+            key_id="key",
+            secret_key="secret",
+            base_url="https://paper-api.alpaca.markets",
+            client=_client(lambda _request: httpx.Response(200, json=_order())),
+        )
+
+        result = broker.submit_order(_req())
+
+        assert result.bracket_order_ids is None
+
+    def test_polling_a_filled_take_profit_leg_returns_its_own_fill(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v2/orders/leg-take-profit-1"
+            return httpx.Response(
+                200,
+                json=_order(
+                    order_id="leg-take-profit-1",
+                    status="filled",
+                    filled_qty="10",
+                    filled_avg_price="106.00",
+                ),
+            )
+
+        broker = AlpacaPaperBrokerAdapter(
+            key_id="key",
+            secret_key="secret",
+            base_url="https://paper-api.alpaca.markets",
+            client=_client(handler),
+        )
+
+        result = broker.get_order("leg-take-profit-1")
+
+        assert result.status == OrderStatus.FILLED
+        assert result.fills[0].price == Decimal("106.00")
+
     def test_cancel_order_uses_paper_cancel_endpoint_and_refetches(self) -> None:
         calls: list[tuple[str, str]] = []
 

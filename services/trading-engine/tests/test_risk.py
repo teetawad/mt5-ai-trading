@@ -667,10 +667,10 @@ class TestRiskEndpoint:
     def client(self):
         import os
 
-        os.environ.pop("INTERNAL_SERVICE_TOKEN", None)
+        os.environ["INTERNAL_SERVICE_TOKEN"] = "test-internal-token"
         from main import app
 
-        return TestClient(app)
+        return TestClient(app, headers={"X-Internal-Token": "test-internal-token"})
 
     def test_evaluate_returns_200(self, client):
         payload = {

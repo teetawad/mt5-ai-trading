@@ -4,6 +4,12 @@
       <h1 class="text-2xl font-semibold">Portfolio</h1>
       <p class="mt-1 text-sm text-slate-400">Internal ledger equity, cash, P&L, and reconciliation snapshots.</p>
     </div>
+    <div
+      v-if="portfolioError || snapshotsError"
+      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+    >
+      Failed to load portfolio data. Please refresh the page.
+    </div>
     <div class="grid gap-3 md:grid-cols-4">
       <div
         v-for="metric in metrics"
@@ -77,8 +83,8 @@ type Portfolio = {
 };
 type Snapshot = Portfolio & { id: string; snapshotReason: string; createdAt: string };
 const { apiFetch } = useApi();
-const { data: portfolio } = await useAsyncData<Portfolio>('portfolio-page-summary', () => apiFetch('/portfolio'));
-const { data: snapshots } = await useAsyncData<{ snapshots: Snapshot[] }>('portfolio-page-snapshots', () => apiFetch('/portfolio/snapshots?limit=50'));
+const { data: portfolio, error: portfolioError } = await useAsyncData<Portfolio>('portfolio-page-summary', () => apiFetch('/portfolio'));
+const { data: snapshots, error: snapshotsError } = await useAsyncData<{ snapshots: Snapshot[] }>('portfolio-page-snapshots', () => apiFetch('/portfolio/snapshots?limit=50'));
 
 const metrics = computed(() => [
   { label: 'Internal Cash', value: money(portfolio.value?.cashBalance), className: '' },

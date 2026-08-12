@@ -1,18 +1,24 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from decimal import Decimal
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from broker.registry import init_broker
-from market_data.registry import init_provider
-from routers.broker import router as broker_router
-from routers.health import router as health_router
-from routers.market_data import router as market_data_router
-from routers.risk import router as risk_router
-from routers.signals import router as signals_router
-from strategy.moving_average_crossover import MovingAverageCrossoverStrategy
-from strategy.registry import register_strategy
+_ROOT_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
+if _ROOT_ENV_PATH.exists():
+    load_dotenv(_ROOT_ENV_PATH)
+
+from broker.registry import init_broker  # noqa: E402
+from market_data.registry import init_provider  # noqa: E402
+from routers.broker import router as broker_router  # noqa: E402
+from routers.health import router as health_router  # noqa: E402
+from routers.market_data import router as market_data_router  # noqa: E402
+from routers.risk import router as risk_router  # noqa: E402
+from routers.signals import router as signals_router  # noqa: E402
+from strategy.moving_average_crossover import MovingAverageCrossoverStrategy  # noqa: E402
+from strategy.registry import register_strategy  # noqa: E402
 
 
 @asynccontextmanager

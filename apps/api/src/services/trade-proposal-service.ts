@@ -7,7 +7,7 @@ import { findLatestSnapshot } from '../db/repositories/portfolio-snapshots';
 import { createRiskCheck, linkRiskCheckToProposal } from '../db/repositories/risk-checks';
 import { createSignal, updateSignalStatus } from '../db/repositories/signals';
 import { findStrategyById, upsertStrategy } from '../db/repositories/strategies';
-import { getSettingValue } from '../db/repositories/system-settings';
+import { getSettingValue, setSetting } from '../db/repositories/system-settings';
 import {
   createApproval,
   findApprovalByProposalAndRequestId,
@@ -337,6 +337,31 @@ async function phase22RiskControls(
   };
 }
 
+const DAILY_LOSS_RULES = new Set(['MAX_DAILY_LOSS', 'PHASE22_MAX_DAILY_LOSS']);
+
+async function maybeAutoDisableKillSwitchOnDailyLoss(
+  client: PoolClient,
+  failedRules: string[],
+  actor: ActorContext,
+  requestId: string | null | undefined,
+): Promise<void> {
+  if (!failedRules.some((rule) => DAILY_LOSS_RULES.has(rule))) return;
+
+  const currentlyEnabled = await getSettingValue<boolean>(client, 'trading_kill_switch_enabled') ?? true;
+  if (!currentlyEnabled) return;
+
+  await setSetting(client, 'trading_kill_switch_enabled', false, actor.actorId);
+  await createAuditLog(client, {
+    eventType: 'KILL_SWITCH_AUTO_DISABLED_DAILY_LOSS',
+    actorId: actor.actorId,
+    actorEmail: actor.actorEmail,
+    entityType: 'system_setting',
+    action: 'AUTO_DISABLE_KILL_SWITCH',
+    afterData: { key: 'trading_kill_switch_enabled', reason: 'MAX_DAILY_LOSS breached', failedRules },
+    requestId: requestId ?? null,
+  });
+}
+
 function proposalSnapshot(proposal: TradeProposal): Record<string, unknown> {
   return {
     id: proposal.id,
@@ -474,6 +499,8 @@ export async function createSignalAndProposal(
       aiDecision: input.aiDecision ?? null,
       phase22: phase22.snapshot,
     };
+
+    await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, actor.requestId);
 
     const riskCheck = await createRiskCheck(client, {
       signalId: signal.id,
@@ -764,6 +791,8 @@ export async function approveProposal(
       reason: [riskResult.reason, phase22.reason].filter(Boolean).join('; ') || null,
       phase22: phase22.snapshot,
     };
+
+    await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, requestId);
 
     const riskCheck = await createRiskCheck(client, {
       signalId: proposal.signalId,

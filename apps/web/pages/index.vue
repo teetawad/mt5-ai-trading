@@ -36,6 +36,12 @@
       {{ error.message }}
     </div>
     <div
+      v-if="actionError"
+      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+    >
+      {{ actionError }}
+    </div>
+    <div
       v-if="message"
       class="rounded border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100"
     >
@@ -174,7 +180,7 @@
           >
             <td class="px-4 py-3">{{ risk.stage }}</td>
             <td class="px-4 py-3"><StatusPill :label="risk.result" /></td>
-            <td class="px-4 py-3">{{ risk.failedRules.length ? risk.failedRules.join(', ') : '-' }}</td>
+            <td class="px-4 py-3">{{ Array.isArray(risk.failedRules) && risk.failedRules.length ? risk.failedRules.join(', ') : '-' }}</td>
             <td class="px-4 py-3">{{ dateTime(risk.createdAt) }}</td>
           </tr>
         </DataTable>
@@ -247,7 +253,7 @@
         >
           <td class="px-4 py-3 font-medium">{{ order.broker_order_id }}</td>
           <td class="px-4 py-3"><StatusPill :label="order.status" /></td>
-          <td class="px-4 py-3">{{ order.fills.length }}</td>
+          <td class="px-4 py-3">{{ Array.isArray(order.fills) ? order.fills.length : 0 }}</td>
           <td class="px-4 py-3">{{ order.rejected_reason ?? '-' }}</td>
           <td class="px-4 py-3">{{ order.error_message ?? '-' }}</td>
         </tr>
@@ -464,13 +470,22 @@ async function refreshDashboard() {
   }
 }
 
+const actionError = ref('');
+
+function describeError(err: unknown): string {
+  return err instanceof Error && err.message ? err.message : 'Request failed. Please try again.';
+}
+
 async function approve(id: string) {
   busy.value = true;
   message.value = '';
+  actionError.value = '';
   try {
     await apiFetch(`/trade-proposals/${id}/approve`, { method: 'POST', body: { requestId: crypto.randomUUID() } });
     message.value = 'PAPER TRADING proposal approved.';
     await refresh();
+  } catch (err) {
+    actionError.value = `Approve failed: ${describeError(err)}`;
   } finally {
     busy.value = false;
   }
@@ -479,6 +494,7 @@ async function approve(id: string) {
 async function reject(id: string) {
   busy.value = true;
   message.value = '';
+  actionError.value = '';
   try {
     await apiFetch(`/trade-proposals/${id}/reject`, {
       method: 'POST',
@@ -486,6 +502,8 @@ async function reject(id: string) {
     });
     message.value = 'PAPER TRADING proposal rejected.';
     await refresh();
+  } catch (err) {
+    actionError.value = `Reject failed: ${describeError(err)}`;
   } finally {
     busy.value = false;
   }
@@ -495,6 +513,7 @@ async function toggleKillSwitch() {
   if (!dashboard.value) return;
   busy.value = true;
   message.value = '';
+  actionError.value = '';
   try {
     await apiFetch('/settings/kill-switch', {
       method: 'PUT',
@@ -502,6 +521,8 @@ async function toggleKillSwitch() {
     });
     message.value = 'PAPER TRADING kill switch updated.';
     await refresh();
+  } catch (err) {
+    actionError.value = `Kill switch update failed: ${describeError(err)}`;
   } finally {
     busy.value = false;
   }

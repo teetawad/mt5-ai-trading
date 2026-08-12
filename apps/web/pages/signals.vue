@@ -73,7 +73,7 @@
       </div>
 
       <div
-        v-if="aiResult"
+        v-if="aiResult && aiResult.aiDecision"
         class="mt-4 grid gap-4 lg:grid-cols-2"
       >
         <div class="rounded border border-slate-800 bg-slate-950 p-4">
@@ -134,7 +134,7 @@
             <div class="text-xs uppercase text-slate-500">Analysis reasons</div>
             <ul class="mt-2 space-y-2 text-sm text-slate-300">
               <li
-                v-for="reason in aiResult.aiDecision.reasons"
+                v-for="reason in aiReasons(aiResult)"
                 :key="reason"
               >
                 {{ reason }}
@@ -519,6 +519,10 @@ function quantityText(value: string | null | undefined): string {
 function numberText(value: string | null | undefined): string {
   if (!value) return '-';
   return Number(value).toLocaleString();
+}
+function aiReasons(result: AiDecisionResult | null): string[] {
+  const reasons = result?.aiDecision?.reasons;
+  return Array.isArray(reasons) ? reasons.filter((reason): reason is string => typeof reason === 'string') : [];
 }
 function phase22(result: AiDecisionResult | null): Phase22Risk | null {
   return result?.proposal?.riskSnapshot?.phase22 ?? result?.riskResult?.phase22 ?? null;

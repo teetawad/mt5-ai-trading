@@ -9,6 +9,7 @@ import { findOpenPositions } from '../db/repositories/positions';
 import { listRiskChecks } from '../db/repositories/risk-checks';
 import { getSetting } from '../db/repositories/system-settings';
 import { listProposals } from '../db/repositories/trade-proposals';
+import { reconcileBracketOrders } from '../services/trade-execution-service';
 import {
   getAllMarketSnapshots,
   getBrokerOpenOrders,
@@ -57,6 +58,8 @@ function cashReconciliation(
 
 dashboardRouter.get('/paper', async (req: Request, res: Response) => {
   const pool = getPool();
+  await reconcileBracketOrders(pool, undefined, requestId(req));
+
   const [
     latestPortfolio,
     positions,

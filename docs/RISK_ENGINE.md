@@ -171,6 +171,65 @@ Kill switch state is always checked **server-side**. Frontend display is informa
 
 ---
 
+## Phase 22 Advanced Risk Controls (Node-side)
+
+A second layer of risk controls runs entirely in `apps/api`
+(`phase22RiskControls` in `trade-proposal-service.ts`), in addition to the
+Python rules above — both must PASS for a proposal to proceed. Unlike the
+Python rules, these are computed fresh at both proposal-creation and
+approval-revalidation time using live bid/ask data:
+
+- **PHASE22_FRESH_MARKET_DATA** — market snapshot must not be stale.
+- **PHASE22_BID_ASK_SPREAD** — spread must stay under `phase22_max_bid_ask_spread_pct`.
+- **PHASE22_ESTIMATED_SLIPPAGE** — estimated slippage must stay under `phase22_max_estimated_slippage_pct`.
+- **PHASE22_DUPLICATE_PENDING_ORDER** — no other non-terminal order may exist for the same symbol.
+- **PHASE22_DUPLICATE_EXPOSURE** — no existing position or pending BUY proposal for the symbol (when `phase22_prevent_duplicate_exposure` is enabled).
+- **PHASE22_COOLDOWN** — time since the symbol's last fill must exceed `cooldown_between_trades_seconds`.
+- **PHASE22_MAX_DAILY_LOSS** — same day-boundary `dailyPnl` used by the Python `MAX_DAILY_LOSS` rule (see below) must stay within `max_daily_loss_usd`.
+- **PHASE22_MAX_LOSS_PER_TRADE** — position size is sized down so that `quantity × (entry − stopLoss)` stays within `phase22_max_loss_per_trade_usd`; if the resulting quantity is 0, **PHASE22_POSITION_SIZE** also fails.
+
+This layer also computes the stop-loss/take-profit prices
+(`phase22_stop_loss_pct` / `phase22_take_profit_pct` from entry) that become
+the bracket order sent to the broker on approval — see "Bracket Orders" in
+`docs/PAPER_BROKER.md`. These prices are frozen into the proposal's
+`riskSnapshot` at creation time and are immutable once `PENDING_APPROVAL`
+(enforced by a DB trigger) — approval re-validates that the trade is still
+within risk limits at the current price, but does not silently substitute new
+SL/TP numbers for what the owner reviewed.
+
+### Daily P&L and the auto-disable circuit breaker
+
+`daily_pnl` (Python) / the dailyPnl used by `PHASE22_MAX_DAILY_LOSS` (Node)
+is **not** cumulative P&L since account inception — it is `current equity −
+equity at the start of the current UTC day`, computed from the latest
+`portfolio_snapshots` row older than today (falling back to
+`initial_paper_cash_usd` on day one). The reset boundary is midnight UTC.
+
+When either `MAX_DAILY_LOSS` (Python) or `PHASE22_MAX_DAILY_LOSS` (Node)
+fails, `trading_kill_switch_enabled` is set to `false` server-side
+(`maybeAutoDisableKillSwitchOnDailyLoss` in `trade-proposal-service.ts`) and
+an audit event (`KILL_SWITCH_AUTO_DISABLED_DAILY_LOSS`) is recorded — this is
+the "Auto-disable triggers: Daily loss limit exceeded" behavior referenced
+below, now implemented rather than just documented. It halts **all** further
+trading platform-wide, not just the triggering proposal; the owner must
+manually re-enable the kill switch via Settings.
+
+---
+
+## AI-Assisted Decision Layer (phase 23)
+
+`ai-decision-service.ts`'s `analyzeUsStock` is a pure, deterministic function
+(BUY/SELL/HOLD + confidence + reasons from market snapshot data). It has no
+import of, or call into, any broker/execution module — it only returns an
+`AiDecision` that `createAiDecisionAndProposal` feeds through the exact same
+signal → risk (Python + phase22) → proposal pipeline as a manually-created
+signal. A HOLD decision creates no signal or proposal at all. The AI can
+neither bypass risk evaluation nor execute a trade directly, and once a
+proposal reaches `PENDING_APPROVAL` its AI-suggested quantity/SL/TP are
+covered by the same field-immutability trigger as any other proposal.
+
+---
+
 ## Risk Configuration API
 
 ```
@@ -189,7 +248,8 @@ GET  /risk/checks/:id         — specific risk check detail
 - **Trading session timezone:** Which timezone should `trading_session_start/end` use?
   Owner must decide. Defaulting to UTC until configured.
 - **Cooldown granularity:** Per-symbol, per-strategy, or global? Currently per-symbol.
-- **Max daily loss auto-reset:** Does the daily loss counter reset at midnight UTC?
-  Currently yes — needs owner confirmation.
+- **Max daily loss auto-reset:** Resolved — resets at midnight UTC, computed from
+  the latest `portfolio_snapshots` row before the current UTC day. See
+  "Daily P&L and the auto-disable circuit breaker" above.
 - **Concentration calculation:** Does it include pending orders in notional?
   Currently yes (conservative) — needs owner confirmation.

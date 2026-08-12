@@ -21,6 +21,23 @@ async function main() {
     console.log(`[api] Paper Trading API running at http://${HOST}:${PORT}`);
     console.log('[api] Mode: PAPER TRADING — no real-money execution');
   });
+
+  // Restart recovery: reconcile any bracket order whose SL/TP leg filled on
+  // the broker side while this process was down. Best-effort — never blocks
+  // startup or crashes the process on failure.
+  try {
+    const { getPool } = await import('./db/client');
+    const { reconcileBracketOrders } = await import('./services/trade-execution-service');
+    const outcome = await reconcileBracketOrders(getPool());
+    if (outcome.checked > 0) {
+      console.log(
+        `[api] Bracket reconciliation on startup: checked ${outcome.checked}, `
+        + `reconciled ${outcome.reconciled}, errors ${outcome.errors}`,
+      );
+    }
+  } catch (err) {
+    console.error('[api] Bracket reconciliation on startup failed (non-fatal):', err);
+  }
 }
 
 main().catch((error) => {

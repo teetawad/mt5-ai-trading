@@ -4,6 +4,12 @@
       <h1 class="text-2xl font-semibold">Risk</h1>
       <p class="mt-1 text-sm text-slate-400">Current rule settings and recent risk checks.</p>
     </div>
+    <div
+      v-if="settingsError || checksError"
+      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+    >
+      Failed to load risk data. Please refresh the page.
+    </div>
     <div class="grid gap-6 xl:grid-cols-2">
       <section class="rounded border border-slate-800 bg-slate-900">
         <div class="border-b border-slate-800 px-4 py-3"><h2 class="font-semibold">Rules</h2></div>
@@ -38,7 +44,7 @@
               >
                 <td class="px-4 py-3">{{ check.stage }}</td>
                 <td class="px-4 py-3"><StatusPill :label="check.result" /></td>
-                <td class="px-4 py-3">{{ check.failedRules.join(', ') || '-' }}</td>
+                <td class="px-4 py-3">{{ Array.isArray(check.failedRules) && check.failedRules.length ? check.failedRules.join(', ') : '-' }}</td>
                 <td class="px-4 py-3">{{ date(check.createdAt) }}</td>
               </tr>
               <tr v-if="!(checks?.length)">
@@ -61,8 +67,8 @@
 type Setting = { key: string; value: unknown };
 type RiskCheck = { id: string; stage: string; result: string; failedRules: string[]; createdAt: string };
 const { apiFetch } = useApi();
-const { data: settings } = await useAsyncData<Setting[]>('risk-settings-page', () => apiFetch('/risk/settings'));
-const { data: checks } = await useAsyncData<RiskCheck[]>('risk-checks-page', () => apiFetch('/risk/checks?limit=30'));
+const { data: settings, error: settingsError } = await useAsyncData<Setting[]>('risk-settings-page', () => apiFetch('/risk/settings'));
+const { data: checks, error: checksError } = await useAsyncData<RiskCheck[]>('risk-checks-page', () => apiFetch('/risk/checks?limit=30'));
 function date(value: string): string {
   return new Date(value).toLocaleString();
 }
