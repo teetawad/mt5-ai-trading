@@ -1,19 +1,10 @@
 import { Router, Request, Response } from 'express';
+import Decimal from 'decimal.js';
 import { requireAuth } from '../auth/middleware';
 import { getPool } from '../db/client';
-import {
-  findLatestSnapshot,
-  listSnapshots,
-} from '../db/repositories/portfolio-snapshots';
-import { findOpenPositions } from '../db/repositories/positions';
+import { listSnapshots } from '../db/repositories/portfolio-snapshots';
 import { getSettingValue } from '../db/repositories/system-settings';
-import {
-  calculatePortfolioPnl,
-  getDayStartEquity,
-  livePriceMap,
-} from '../services/trade-execution-service';
-import { getPaperPortfolio } from '../services/trading-engine-client';
-import Decimal from 'decimal.js';
+import { getDayStartEquity, getLivePortfolioView } from '../services/trade-execution-service';
 
 export const portfolioRouter = Router();
 
@@ -34,46 +25,38 @@ function pagination(req: Request): { limit: number; offset: number } | null {
   return { limit, offset };
 }
 
-portfolioRouter.get('/', async (_req: Request, res: Response) => {
+function requestId(req: Request): string | undefined {
+  return req.headers['x-request-id'] as string | undefined;
+}
+
+async function currentDailyPnl(pool: ReturnType<typeof getPool>, portfolioEquity: string): Promise<string> {
+  const initialCashSetting = await getSettingValue(pool, 'initial_paper_cash_usd');
+  const dayStartEquity = await getDayStartEquity(pool, new Date(), String(initialCashSetting ?? '100000'));
+  return new Decimal(portfolioEquity).minus(dayStartEquity).toDecimalPlaces(8).toFixed(8);
+}
+
+/**
+ * Current portfolio figures, computed live from getLivePortfolioView — the
+ * same authoritative source GET /positions and GET /dashboard/paper read
+ * from, so the three can never disagree. Persisted portfolio_snapshots rows
+ * are historical only (see /snapshots below and getDayStartEquity's baseline
+ * lookup); they must never drive these "current" figures.
+ */
+portfolioRouter.get('/', async (req: Request, res: Response) => {
   const pool = getPool();
-  const latest = await findLatestSnapshot(pool);
-  const positions = await findOpenPositions(pool);
-
-  if (latest) {
-    res.json({
-      source: 'INTERNAL_LEDGER',
-      cashBalance: latest.cashBalance,
-      portfolioEquity: latest.portfolioEquity,
-      realizedPnl: latest.realizedPnl,
-      unrealizedPnl: latest.unrealizedPnl,
-      dailyPnl: latest.dailyPnl,
-      openPositions: positions,
-      pendingOrders: latest.pendingOrders,
-      lastUpdatedAt: latest.createdAt,
-    });
-    return;
-  }
-
-  const [paperPortfolio, initialCashSetting, livePrices] = await Promise.all([
-    getPaperPortfolio(),
-    getSettingValue(pool, 'initial_paper_cash_usd'),
-    livePriceMap(undefined),
-  ]);
-  const initialCash = String(initialCashSetting ?? '100000');
-  const pnl = calculatePortfolioPnl(initialCash, paperPortfolio.cash, positions, livePrices);
-  const dayStartEquity = await getDayStartEquity(pool, new Date(), initialCash);
-  const dailyPnl = new Decimal(pnl.portfolioEquity).minus(dayStartEquity).toDecimalPlaces(8).toFixed(8);
+  const view = await getLivePortfolioView(pool, requestId(req));
+  const dailyPnl = await currentDailyPnl(pool, view.portfolioEquity);
 
   res.json({
     source: 'INTERNAL_LEDGER',
-    cashBalance: paperPortfolio.cash,
-    portfolioEquity: pnl.portfolioEquity,
-    realizedPnl: pnl.realizedPnl,
-    unrealizedPnl: pnl.unrealizedPnl,
+    cashBalance: view.cashBalance,
+    portfolioEquity: view.portfolioEquity,
+    realizedPnl: view.realizedPnl,
+    unrealizedPnl: view.unrealizedPnl,
     dailyPnl,
-    openPositions: positions,
+    openPositions: view.positions,
     pendingOrders: [],
-    lastUpdatedAt: null,
+    lastUpdatedAt: view.asOf,
   });
 });
 
@@ -86,11 +69,13 @@ portfolioRouter.get('/snapshots', async (req: Request, res: Response) => {
   res.json({ snapshots: await listSnapshots(getPool(), page.limit, page.offset), ...page });
 });
 
-portfolioRouter.get('/pnl', async (_req: Request, res: Response) => {
-  const latest = await findLatestSnapshot(getPool());
+portfolioRouter.get('/pnl', async (req: Request, res: Response) => {
+  const pool = getPool();
+  const view = await getLivePortfolioView(pool, requestId(req));
+  const dailyPnl = await currentDailyPnl(pool, view.portfolioEquity);
   res.json({
-    realizedPnl: latest?.realizedPnl ?? '0.00000000',
-    unrealizedPnl: latest?.unrealizedPnl ?? '0.00000000',
-    dailyPnl: latest?.dailyPnl ?? '0.00000000',
+    realizedPnl: view.realizedPnl,
+    unrealizedPnl: view.unrealizedPnl,
+    dailyPnl,
   });
 });

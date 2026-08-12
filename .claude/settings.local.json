@@ -52,7 +52,14 @@
       "Bash(rm -rf .output)",
       "Bash(curl -s -L -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/)",
       "PowerShell(Stop-Process *)",
-      "PowerShell(Get-NetTCPConnection *)"
+      "PowerShell(Get-NetTCPConnection *)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npm run test:api)",
+      "Bash(DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npm run test:api)",
+      "Bash(DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run --workspace=apps/api src/__tests__/portfolio.test.ts src/__tests__/dashboard.test.ts)",
+      "Bash(DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run src/__tests__/portfolio.test.ts)",
+      "Bash(xargs -I{} grep -l \"vitest\\\\|test:api\\\\|npm test\" {})",
+      "Bash(DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run src/__tests__/portfolio.test.ts src/__tests__/positions.test.ts src/__tests__/dashboard.test.ts src/__tests__/position-accounting.test.ts --pool=forks --poolOptions.forks.singleFork)",
+      "Bash(curl -s -o /dev/null -w \"web HTTP %{http_code}\\\\n\" -L http://localhost:3000/)"
     ]
   }
 }
