@@ -6,6 +6,7 @@ All routers and services import `get_provider()` to access market data.
 
 import os
 from pathlib import Path
+from typing import Any
 
 from .provider import MarketDataProvider
 from .synthetic import SyntheticMarketDataProvider
@@ -46,3 +47,20 @@ def get_provider() -> MarketDataProvider:
     if _provider is None:
         raise RuntimeError("MarketDataProvider has not been initialised — call init_provider()")
     return _provider
+
+
+def get_market_data_status() -> dict[str, Any]:
+    """Report connection/freshness state for the active provider.
+
+    Providers that stream (currently only AlpacaMarketDataProvider once a
+    stream is attached) implement `connection_status()`. Pull-based providers
+    (synthetic, CSV, Alpaca without a stream attached) have no persistent
+    connection to be up/down, so they report as always "connected" — their
+    per-symbol freshness is already covered by MarketSnapshot.is_stale.
+    """
+    provider = get_provider()
+    status_fn = getattr(provider, "connection_status", None)
+    if callable(status_fn):
+        result: dict[str, Any] = status_fn()
+        return result
+    return {"mode": "poll", "connected": True, "last_message_at": None}

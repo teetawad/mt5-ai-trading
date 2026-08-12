@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth import verify_internal_token
@@ -6,7 +8,7 @@ from market_data.provider import (
     MarketDataRateLimitError,
     SymbolNotFoundError,
 )
-from market_data.registry import get_provider
+from market_data.registry import get_market_data_status, get_provider
 from market_data.snapshot import MarketBar, MarketQuote, MarketSnapshot, MarketTrade
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
@@ -45,6 +47,13 @@ async def get_all_snapshots(
     _: None = Depends(verify_internal_token),
 ) -> list[MarketSnapshot]:
     return get_provider().get_all_snapshots()
+
+
+@router.get("/status")
+async def get_market_data_stream_status(
+    _: None = Depends(verify_internal_token),
+) -> dict[str, Any]:
+    return get_market_data_status()
 
 
 @router.get("/symbols", response_model=list[str])

@@ -2,13 +2,19 @@
   <div class="space-y-6">
     <div>
       <h1 class="text-2xl font-semibold">Positions</h1>
-      <p class="mt-1 text-sm text-slate-400">Open paper positions reconciled from fills.</p>
+      <p class="mt-1 text-sm text-slate-400">Open paper positions, priced live from the current market data source.</p>
     </div>
     <div
       v-if="error"
       class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
     >
       Failed to load positions. Please refresh the page.
+    </div>
+    <div
+      v-else-if="data && !data.marketDataStatus.connected"
+      class="rounded border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100"
+    >
+      DISCONNECTED — the market-data stream is down. Prices below may be out of date.
     </div>
     <section class="rounded border border-slate-800 bg-slate-900">
       <div class="overflow-x-auto">
@@ -21,11 +27,12 @@
               <th class="px-4 py-3">Last Price</th>
               <th class="px-4 py-3">Realized P&L</th>
               <th class="px-4 py-3">Unrealized P&L</th>
+              <th class="px-4 py-3">Freshness</th>
             </tr>
           </thead>
           <tbody>
             <tr
-              v-for="position in data ?? []"
+              v-for="position in data?.positions ?? []"
               :key="position.id"
               class="border-t border-slate-800"
             >
@@ -45,10 +52,13 @@
               >
                 {{ money(position.unrealizedPnl) }}
               </td>
+              <td class="px-4 py-3">
+                <StatusPill :label="position.isStale ? 'STALE' : 'LIVE'" />
+              </td>
             </tr>
-            <tr v-if="!(data?.length)">
+            <tr v-if="!(data?.positions?.length)">
               <td
-                colspan="6"
+                colspan="7"
                 class="px-4 py-8 text-center text-slate-500"
               >
                 No open positions
@@ -70,9 +80,22 @@ type Position = {
   lastPrice: string | null;
   realizedPnl: string;
   unrealizedPnl: string;
+  isStale: boolean;
+  priceAsOf: string | null;
+};
+type MarketDataStatus = {
+  mode: 'stream' | 'poll';
+  connected: boolean;
+  last_message_at: string | null;
+};
+type PositionsResponse = {
+  positions: Position[];
+  marketDataStatus: MarketDataStatus;
+  asOf: string;
 };
 const { apiFetch } = useApi();
-const { data, error } = await useAsyncData<Position[]>('positions-page', () => apiFetch('/positions'));
+const { data, error, refresh } = await useAsyncData<PositionsResponse>('positions-page', () => apiFetch('/positions'));
+useAutoRefresh(refresh, 5000);
 function money(value?: string | null): string {
   return value ? `$${Number(value).toFixed(2)}` : '-';
 }

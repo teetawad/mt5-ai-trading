@@ -1,14 +1,24 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../auth/middleware';
 import { getPool } from '../db/client';
-import { findOpenPositions, findPositionBySymbol } from '../db/repositories/positions';
+import { findPositionBySymbol } from '../db/repositories/positions';
+import { getLivePortfolioView, liveMarketData, mergeLivePosition } from '../services/trade-execution-service';
 
 export const positionsRouter = Router();
 
 positionsRouter.use(requireAuth);
 
-positionsRouter.get('/', async (_req: Request, res: Response) => {
-  res.json(await findOpenPositions(getPool()));
+function requestId(req: Request): string | undefined {
+  return req.headers['x-request-id'] as string | undefined;
+}
+
+positionsRouter.get('/', async (req: Request, res: Response) => {
+  const view = await getLivePortfolioView(getPool(), requestId(req));
+  res.json({
+    positions: view.positions,
+    marketDataStatus: view.marketDataStatus,
+    asOf: view.asOf,
+  });
 });
 
 positionsRouter.get('/:symbol', async (req: Request, res: Response) => {
@@ -23,5 +33,10 @@ positionsRouter.get('/:symbol', async (req: Request, res: Response) => {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Position not found' });
     return;
   }
-  res.json(position);
+  if (Number(position.quantity) === 0) {
+    res.json({ ...position, isStale: false, priceAsOf: null });
+    return;
+  }
+  const market = await liveMarketData(requestId(req));
+  res.json(mergeLivePosition(position, market));
 });

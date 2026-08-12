@@ -12,7 +12,11 @@ import {
   findOrderByExecution,
   updateOrderStatus,
 } from '../db/repositories/orders';
-import { createSnapshot, findLatestSnapshotBefore } from '../db/repositories/portfolio-snapshots';
+import {
+  createSnapshot,
+  findLatestSnapshot,
+  findLatestSnapshotBefore,
+} from '../db/repositories/portfolio-snapshots';
 import {
   findPositionBySymbolForUpdate,
   findOpenPositions,
@@ -29,8 +33,11 @@ import { assertValidProposalTransition, InvalidStateTransitionError } from './pr
 import {
   FillEventDTO,
   getAllMarketSnapshots,
+  getMarketDataStatus,
   getOrder as getBrokerOrder,
   getPaperPortfolio,
+  MarketDataStatusDTO,
+  MarketSnapshotDTO,
   OrderResultDTO,
   submitOrder,
 } from './trading-engine-client';
@@ -313,17 +320,117 @@ export async function getDayStartEquity(
   return baseline ? decimal(baseline.portfolioEquity) : decimal(fallbackInitialCash);
 }
 
-export async function livePriceMap(requestId: string | undefined): Promise<Record<string, string>> {
+export interface LiveMarketData {
+  prices: Record<string, string>;
+  timestamps: Record<string, string>;
+  staleSymbols: Set<string>;
+  snapshots: MarketSnapshotDTO[];
+  /** Set when the underlying getAllMarketSnapshots call failed, so callers
+   * that need to distinguish "no tracked symbols" from "fetch failed" (e.g.
+   * for an external-reachability status field) don't have to fetch twice. */
+  fetchError: unknown;
+}
+
+export async function liveMarketData(requestId: string | undefined): Promise<LiveMarketData> {
   try {
     const snapshots = await getAllMarketSnapshots(requestId);
     const prices: Record<string, string> = {};
+    const timestamps: Record<string, string> = {};
+    const staleSymbols = new Set<string>();
     for (const snapshot of snapshots) {
       prices[snapshot.symbol] = snapshot.price;
+      timestamps[snapshot.symbol] = snapshot.timestamp;
+      if (snapshot.is_stale) staleSymbols.add(snapshot.symbol);
     }
-    return prices;
-  } catch {
-    return {};
+    return { prices, timestamps, staleSymbols, snapshots, fetchError: null };
+  } catch (err) {
+    return { prices: {}, timestamps: {}, staleSymbols: new Set(), snapshots: [], fetchError: err };
   }
+}
+
+export async function livePriceMap(requestId: string | undefined): Promise<Record<string, string>> {
+  return (await liveMarketData(requestId)).prices;
+}
+
+export interface LivePosition extends Position {
+  isStale: boolean;
+  priceAsOf: string | null;
+}
+
+export interface LivePortfolioView {
+  cashBalance: string;
+  portfolioEquity: string;
+  realizedPnl: string;
+  unrealizedPnl: string;
+  positions: LivePosition[];
+  marketDataStatus: MarketDataStatusDTO;
+  marketSnapshots: MarketSnapshotDTO[];
+  marketFetchError: unknown;
+  asOf: string;
+}
+
+const DISCONNECTED_STATUS: MarketDataStatusDTO = {
+  mode: 'poll',
+  connected: false,
+  last_message_at: null,
+};
+
+export function mergeLivePosition(position: Position, market: LiveMarketData): LivePosition {
+  const livePrice = market.prices[position.symbol];
+  const priceKnown = livePrice !== undefined;
+  const lastPrice = priceKnown ? livePrice : position.lastPrice;
+  const unrealizedPnl = lastPrice && position.averageEntryPrice
+    ? money(decimal(lastPrice).minus(decimal(position.averageEntryPrice)).times(decimal(position.quantity)))
+    : position.unrealizedPnl;
+  return {
+    ...position,
+    lastPrice: lastPrice ?? position.lastPrice,
+    unrealizedPnl,
+    isStale: !priceKnown || market.staleSymbols.has(position.symbol),
+    priceAsOf: market.timestamps[position.symbol]
+      ?? (position.lastPriceAt ? position.lastPriceAt.toISOString() : null),
+  };
+}
+
+/**
+ * Read-only, on-demand view of the portfolio and open positions priced at
+ * current market data. Never writes to the database — positions.last_price
+ * and portfolio_snapshots are only ever updated by actual trade/bracket-exit
+ * events (see writePortfolioSnapshot / updatePositionFromFills). This is the
+ * single source both the positions route and the dashboard route read from,
+ * so they can never disagree.
+ */
+export async function getLivePortfolioView(
+  pool: Pool,
+  requestId: string | undefined,
+): Promise<LivePortfolioView> {
+  const [paperPortfolioResult, openPositions, market, marketDataStatus, initialCashSetting] = await Promise.all([
+    getPaperPortfolio(requestId).catch(() => null),
+    findOpenPositions(pool),
+    liveMarketData(requestId),
+    getMarketDataStatus(requestId).catch(() => DISCONNECTED_STATUS),
+    getSettingValue(pool, 'initial_paper_cash_usd'),
+  ]);
+  const initialCash = String(initialCashSetting ?? '100000');
+  // Broker/paper-portfolio unavailability must not take the positions/dashboard
+  // routes down with it — fall back to the last persisted cash figure so the
+  // page still renders (with live prices) instead of 500ing.
+  const paperPortfolio = paperPortfolioResult
+    ?? { cash: (await findLatestSnapshot(pool))?.cashBalance ?? initialCash, positions: {} };
+  const pnl = calculatePortfolioPnl(initialCash, paperPortfolio.cash, openPositions, market.prices);
+  const positions = openPositions.map((position) => mergeLivePosition(position, market));
+
+  return {
+    cashBalance: paperPortfolio.cash,
+    portfolioEquity: pnl.portfolioEquity,
+    realizedPnl: pnl.realizedPnl,
+    unrealizedPnl: pnl.unrealizedPnl,
+    positions,
+    marketDataStatus,
+    marketSnapshots: market.snapshots,
+    marketFetchError: market.fetchError,
+    asOf: new Date().toISOString(),
+  };
 }
 
 async function persistFills(

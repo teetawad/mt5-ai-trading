@@ -47,6 +47,12 @@
     >
       {{ message }}
     </div>
+    <div
+      v-if="dashboard && dashboard.marketData.streamMode === 'stream' && !dashboard.marketData.streamConnected"
+      class="rounded border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100"
+    >
+      DISCONNECTED — the market-data stream is down. Prices shown may be out of date.
+    </div>
 
     <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
       <MetricBox
@@ -431,6 +437,9 @@ type Dashboard = {
     status: ExternalStatus;
     freshness: 'FRESH' | 'STALE';
     staleCount: number;
+    streamMode: 'stream' | 'poll';
+    streamConnected: boolean;
+    streamLastMessageAt: string | null;
     snapshots: MarketSnapshot[];
   };
   reconciliation: {
@@ -460,6 +469,7 @@ const message = ref('');
 const busy = ref(false);
 const refreshing = ref(false);
 const { data: dashboard, error, refresh } = await useAsyncData<Dashboard>('paper-dashboard', () => apiFetch('/dashboard/paper'));
+useAutoRefresh(refresh, 5000);
 
 async function refreshDashboard() {
   refreshing.value = true;

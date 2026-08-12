@@ -4,14 +4,11 @@ import { requireAuth } from '../auth/middleware';
 import { getPool } from '../db/client';
 import { listRecentFills } from '../db/repositories/fills';
 import { listOrders } from '../db/repositories/orders';
-import { findLatestSnapshot } from '../db/repositories/portfolio-snapshots';
-import { findOpenPositions } from '../db/repositories/positions';
 import { listRiskChecks } from '../db/repositories/risk-checks';
-import { getSetting } from '../db/repositories/system-settings';
+import { getSetting, getSettingValue } from '../db/repositories/system-settings';
 import { listProposals } from '../db/repositories/trade-proposals';
-import { reconcileBracketOrders } from '../services/trade-execution-service';
+import { getDayStartEquity, getLivePortfolioView, reconcileBracketOrders } from '../services/trade-execution-service';
 import {
-  getAllMarketSnapshots,
   getBrokerOpenOrders,
   getBrokerHealth,
   getPaperAccount,
@@ -58,42 +55,35 @@ function cashReconciliation(
 
 dashboardRouter.get('/paper', async (req: Request, res: Response) => {
   const pool = getPool();
-  await reconcileBracketOrders(pool, undefined, requestId(req));
+  const requestIdentifier = requestId(req);
+  await reconcileBracketOrders(pool, undefined, requestIdentifier);
 
   const [
-    latestPortfolio,
-    positions,
+    view,
     pendingProposals,
     orders,
     fills,
     riskChecks,
     killSwitchSetting,
+    initialCashSetting,
   ] = await Promise.all([
-    findLatestSnapshot(pool),
-    findOpenPositions(pool),
+    getLivePortfolioView(pool, requestIdentifier),
     listProposals(pool, { status: 'PENDING_APPROVAL', limit: 20 }),
     listOrders(pool, { limit: 20 }),
     listRecentFills(pool, 20),
     listRiskChecks(pool, 20),
     getSetting(pool, 'trading_kill_switch_enabled'),
+    getSettingValue(pool, 'initial_paper_cash_usd'),
   ]);
 
-  const requestIdentifier = requestId(req);
-  const [
-    brokerHealthResult,
-    paperAccountResult,
-    marketSnapshotsResult,
-    brokerOpenOrdersResult,
-  ] = await Promise.allSettled([
+  const [brokerHealthResult, paperAccountResult, brokerOpenOrdersResult] = await Promise.allSettled([
     getBrokerHealth(requestIdentifier),
     getPaperAccount(requestIdentifier),
-    getAllMarketSnapshots(requestIdentifier),
     getBrokerOpenOrders(requestIdentifier),
   ]);
 
   const brokerHealth = brokerHealthResult.status === 'fulfilled' ? brokerHealthResult.value : null;
   const paperAccount = paperAccountResult.status === 'fulfilled' ? paperAccountResult.value : null;
-  const marketSnapshots = marketSnapshotsResult.status === 'fulfilled' ? marketSnapshotsResult.value : [];
   const brokerOpenOrders = brokerOpenOrdersResult.status === 'fulfilled'
     ? brokerOpenOrdersResult.value
     : [];
@@ -104,12 +94,18 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
   const accountStatus: ExternalStatus = paperAccountResult.status === 'fulfilled'
     ? 'CONNECTED'
     : statusFromError(paperAccountResult.reason);
-  const marketDataStatus: ExternalStatus = marketSnapshotsResult.status === 'fulfilled'
-    ? 'CONNECTED'
-    : statusFromError(marketSnapshotsResult.reason);
-  const staleCount = marketSnapshots.filter((snapshot) => snapshot.is_stale).length;
-  const internalCash = latestPortfolio?.cashBalance ?? null;
-  const internalEquity = latestPortfolio?.portfolioEquity ?? null;
+  const marketDataStatus: ExternalStatus = view.marketFetchError
+    ? statusFromError(view.marketFetchError)
+    : 'CONNECTED';
+  const staleCount = view.marketSnapshots.filter((snapshot) => snapshot.is_stale).length;
+  const dayStartEquity = await getDayStartEquity(
+    pool,
+    new Date(),
+    String(initialCashSetting ?? '100000'),
+  );
+  const dailyPnl = new Decimal(view.portfolioEquity).minus(dayStartEquity).toDecimalPlaces(8).toFixed(8);
+  const internalCash = view.cashBalance;
+  const internalEquity = view.portfolioEquity;
   const brokerCash = paperAccount?.cash ?? null;
   const brokerBuyingPower = paperAccount?.buying_power ?? paperAccount?.cash ?? null;
   const reconciliation = cashReconciliation(accountStatus, brokerCash, internalCash);
@@ -131,18 +127,23 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
     },
     portfolio: {
       source: 'INTERNAL_LEDGER',
-      cashBalance: internalCash ?? '0.00000000',
-      portfolioEquity: internalEquity ?? '0.00000000',
-      realizedPnl: latestPortfolio?.realizedPnl ?? '0.00000000',
-      unrealizedPnl: latestPortfolio?.unrealizedPnl ?? '0.00000000',
-      dailyPnl: latestPortfolio?.dailyPnl ?? '0.00000000',
-      lastUpdatedAt: latestPortfolio?.createdAt?.toISOString() ?? null,
+      cashBalance: internalCash,
+      portfolioEquity: internalEquity,
+      realizedPnl: view.realizedPnl,
+      unrealizedPnl: view.unrealizedPnl,
+      dailyPnl,
+      lastUpdatedAt: view.asOf,
     },
     marketData: {
       status: marketDataStatus,
       freshness: staleCount > 0 ? 'STALE' : 'FRESH',
       staleCount,
-      snapshots: marketSnapshots.map((snapshot) => ({
+      // Stream connection state (Python trading-engine <-> Alpaca WebSocket).
+      // Distinct from `status` above, which is Node <-> trading-engine reachability.
+      streamMode: view.marketDataStatus.mode,
+      streamConnected: view.marketDataStatus.connected,
+      streamLastMessageAt: view.marketDataStatus.last_message_at,
+      snapshots: view.marketSnapshots.map((snapshot) => ({
         symbol: snapshot.symbol,
         price: snapshot.price,
         bid: snapshot.bid,
@@ -154,7 +155,7 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
     },
     reconciliation: {
       status: reconciliation.status,
-      checkedAt: new Date().toISOString(),
+      checkedAt: view.asOf,
       brokerCash: brokerCash ?? null,
       brokerBuyingPower: brokerBuyingPower ?? null,
       internalCash,
@@ -162,7 +163,7 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
       cashDifference: reconciliation.difference,
       sourceOfTruth: 'INTERNAL_LEDGER',
       comparedSource: 'ALPACA_PAPER_ACCOUNT',
-      openPositionCount: positions.length,
+      openPositionCount: view.positions.length,
       pendingOrderCount: brokerOpenOrders.length,
     },
     killSwitch: {
@@ -173,6 +174,6 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
     orders,
     brokerOpenOrders,
     fills,
-    positions,
+    positions: view.positions,
   });
 });

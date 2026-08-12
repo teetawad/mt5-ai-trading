@@ -16,7 +16,7 @@ import pytest
 from market_data.alpaca import AlpacaMarketDataProvider, AlpacaMarketDataStream
 from market_data.csv_provider import CSVMarketDataProvider
 from market_data.provider import MarketDataProvider, MarketDataRateLimitError, SymbolNotFoundError
-from market_data.registry import get_provider, init_provider
+from market_data.registry import get_market_data_status, get_provider, init_provider
 from market_data.snapshot import MarketBar, MarketQuote, MarketSnapshot, MarketTrade
 from market_data.synthetic import SyntheticMarketDataProvider
 
@@ -337,6 +337,110 @@ class TestAlpacaProvider:
 
         assert stream.url == "wss://stream.data.alpaca.markets/v2/iex"
 
+    def test_connection_status_without_a_stream_reports_poll_mode(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(200, json={})),
+        )
+
+        assert provider.connection_status() == {
+            "mode": "poll",
+            "connected": True,
+            "last_message_at": None,
+        }
+
+    def test_snapshot_prefers_a_connected_streams_cached_trade_over_rest(self):
+        # REST would return a stale/different price — proves the stream, once
+        # attached and connected, is the source used instead of a REST call.
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(200, json={
+                "snapshot": {
+                    "latestTrade": {"t": "2026-08-10T13:30:00Z", "p": 100.00, "s": 10},
+                    "latestQuote": {"t": "2026-08-10T13:30:00Z", "bp": 99.95, "ap": 100.05},
+                }
+            })),
+        )
+        stream = AlpacaMarketDataStream(key_id="key", secret_key="secret")
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        stream._handle_message(
+            f'{{"T":"t","S":"AAPL","p":191.25,"s":50,"t":"{now}"}}'
+        )
+        stream._handle_message(
+            f'{{"T":"q","S":"AAPL","bp":191.20,"ap":191.30,"t":"{now}"}}'
+        )
+        stream.connected = True
+        provider.attach_stream(stream)
+
+        snapshot = provider.get_snapshot("AAPL")
+
+        assert snapshot.price == Decimal("191.25")
+        assert snapshot.bid == Decimal("191.20")
+        assert snapshot.is_stale is False
+
+    def test_snapshot_falls_back_to_rest_when_stream_disconnected(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(200, json={
+                "snapshot": {
+                    "latestTrade": {"t": "2026-08-10T13:30:00Z", "p": 100.00, "s": 10},
+                    "latestQuote": {"t": "2026-08-10T13:30:00Z", "bp": 99.95, "ap": 100.05},
+                }
+            })),
+        )
+        stream = AlpacaMarketDataStream(key_id="key", secret_key="secret")
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        stream._handle_message(f'{{"T":"t","S":"AAPL","p":191.25,"s":50,"t":"{now}"}}')
+        stream.connected = False  # e.g. just disconnected, reconnect pending
+        provider.attach_stream(stream)
+
+        snapshot = provider.get_snapshot("AAPL")
+
+        assert snapshot.price == Decimal("100.00")
+
+    def test_snapshot_falls_back_to_rest_immediately_after_reconnect_before_first_message(self):
+        # A freshly (re)connected stream has an empty cache — must not serve
+        # stale/absent data as current; REST remains authoritative until the
+        # stream delivers its first message for the symbol.
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(200, json={
+                "snapshot": {
+                    "latestTrade": {"t": "2026-08-10T13:30:00Z", "p": 100.00, "s": 10},
+                    "latestQuote": {"t": "2026-08-10T13:30:00Z", "bp": 99.95, "ap": 100.05},
+                }
+            })),
+        )
+        stream = AlpacaMarketDataStream(key_id="key", secret_key="secret")
+        stream.connected = True  # reconnected, but no messages received yet
+        provider.attach_stream(stream)
+
+        snapshot = provider.get_snapshot("AAPL")
+
+        assert snapshot.price == Decimal("100.00")
+
+    def test_connection_status_reports_attached_stream_state(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(200, json={})),
+        )
+        stream = AlpacaMarketDataStream(key_id="key", secret_key="secret")
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        stream._handle_message(f'{{"T":"t","S":"AAPL","p":191.25,"s":50,"t":"{now}"}}')
+        stream.connected = True
+        provider.attach_stream(stream)
+
+        status = provider.connection_status()
+
+        assert status["mode"] == "stream"
+        assert status["connected"] is True
+        assert status["last_message_at"] is not None
+
 
 class TestAlpacaMarketDataStream:
     def test_stream_message_handler_updates_latest_quote_trade_and_bar(self):
@@ -406,6 +510,32 @@ class TestRegistry:
         init_provider()
         assert isinstance(get_provider(), SyntheticMarketDataProvider)
 
+    def test_market_data_status_defaults_to_connected_poll_mode_for_pull_providers(self):
+        init_provider(
+            SyntheticMarketDataProvider(symbols={"SPY": Decimal("500.00")}, random_seed=0)
+        )
+
+        assert get_market_data_status() == {
+            "mode": "poll",
+            "connected": True,
+            "last_message_at": None,
+        }
+
+    def test_market_data_status_reports_alpaca_stream_state(self):
+        provider = AlpacaMarketDataProvider(
+            key_id="key",
+            secret_key="secret",
+            client=_mock_alpaca(httpx.Response(200, json={})),
+        )
+        stream = AlpacaMarketDataStream(key_id="key", secret_key="secret")
+        stream.connected = False
+        provider.attach_stream(stream)
+        init_provider(provider)
+
+        status = get_market_data_status()
+
+        assert status == {"mode": "stream", "connected": False, "last_message_at": None}
+
 
 # ── FastAPI endpoint integration ──────────────────────────────────────────────
 
@@ -441,6 +571,15 @@ class TestMarketDataEndpoints:
         client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
         res = client.get("/market-data/snapshot/ZZZZZ")
         assert res.status_code == 404
+
+    def test_get_status_returns_poll_mode_for_synthetic_provider(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+        client = TestClient(app, headers={"X-Internal-Token": TEST_INTERNAL_TOKEN})
+        res = client.get("/market-data/status")
+        assert res.status_code == 200
+        assert res.json() == {"mode": "poll", "connected": True, "last_message_at": None}
 
     def test_get_all_snapshots(self):
         from fastapi.testclient import TestClient

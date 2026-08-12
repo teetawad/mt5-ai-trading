@@ -128,6 +128,20 @@ export async function getTrackedSymbols(requestId?: string): Promise<string[]> {
   return res.json() as Promise<string[]>;
 }
 
+export interface MarketDataStatusDTO {
+  mode: 'stream' | 'poll';
+  connected: boolean;
+  last_message_at: string | null;
+}
+
+export async function getMarketDataStatus(requestId?: string): Promise<MarketDataStatusDTO> {
+  const res = await engineFetch('/market-data/status', requestId);
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<MarketDataStatusDTO>;
+}
+
 export async function getHistoricalBars(
   symbol: string,
   params: {

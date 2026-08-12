@@ -6,12 +6,15 @@ import { signToken } from '../auth/tokens';
 import { _clearDenylistForTest } from '../auth/denylist';
 import { closePool } from '../db/client';
 import { createSnapshot } from '../db/repositories/portfolio-snapshots';
+import { upsertPosition } from '../db/repositories/positions';
 import { getTestPool, setupTestDb } from './db/setup';
 import {
   getAllMarketSnapshots,
   getBrokerOpenOrders,
   getBrokerHealth,
+  getMarketDataStatus,
   getPaperAccount,
+  getPaperPortfolio,
 } from '../services/trading-engine-client';
 
 vi.mock('../services/trading-engine-client', async () => {
@@ -23,7 +26,9 @@ vi.mock('../services/trading-engine-client', async () => {
     getAllMarketSnapshots: vi.fn(),
     getBrokerOpenOrders: vi.fn(),
     getBrokerHealth: vi.fn(),
+    getMarketDataStatus: vi.fn(),
     getPaperAccount: vi.fn(),
+    getPaperPortfolio: vi.fn(),
   };
 });
 
@@ -59,6 +64,10 @@ describe('GET /dashboard/paper', () => {
     await closePool();
     if (pool) {
       await pool.query('TRUNCATE portfolio_snapshots RESTART IDENTITY CASCADE');
+      // Scoped delete (not a table-wide TRUNCATE) so this doesn't collide with
+      // other test files that concurrently manage their own rows in the
+      // shared `positions` table (e.g. positions.test.ts).
+      await pool.query("DELETE FROM positions WHERE symbol = 'NVDA'");
       await pool.query('DELETE FROM users WHERE id = $1', [OWNER_ID]);
       await pool.end();
     }
@@ -70,6 +79,10 @@ describe('GET /dashboard/paper', () => {
     vi.clearAllMocks();
     if (!SKIP) {
       await pool.query('TRUNCATE portfolio_snapshots RESTART IDENTITY CASCADE');
+      // Scoped delete (not a table-wide TRUNCATE) so this doesn't collide with
+      // other test files that concurrently manage their own rows in the
+      // shared `positions` table (e.g. positions.test.ts).
+      await pool.query("DELETE FROM positions WHERE symbol = 'NVDA'");
       // trading_kill_switch_enabled is a single global row shared by the whole
       // test database; another suite's MAX_DAILY_LOSS circuit breaker (Milestone
       // 1b) can legitimately flip it, so pin a known value for this assertion.
@@ -117,6 +130,15 @@ describe('GET /dashboard/paper', () => {
         fills: [],
       },
     ]);
+    vi.mocked(getMarketDataStatus).mockResolvedValue({
+      mode: 'stream',
+      connected: true,
+      last_message_at: '2026-08-11T14:30:00.000Z',
+    });
+    vi.mocked(getPaperPortfolio).mockResolvedValue({
+      cash: '50000.25000000',
+      positions: {},
+    });
   });
 
   it('requires authentication', async () => {
@@ -192,6 +214,12 @@ describe('GET /dashboard/paper', () => {
       currency: 'USD',
       status: 'ACTIVE',
     });
+    // Internal ledger's live cash (from the paper broker), independent of the
+    // Alpaca account cash above — that gap is exactly what creates the mismatch.
+    vi.mocked(getPaperPortfolio).mockResolvedValueOnce({
+      cash: '99997.72000000',
+      positions: {},
+    });
 
     const res = await request(app)
       .get('/dashboard/paper')
@@ -207,5 +235,117 @@ describe('GET /dashboard/paper', () => {
       internalEquity: '99997.72000000',
       cashDifference: '2.28000000',
     });
+  });
+
+  it.skipIf(SKIP)('recomputes unrealized P&L and portfolio equity live from the current market price', async () => {
+    await upsertPosition(pool, {
+      symbol: 'NVDA',
+      quantity: '10.00000000',
+      averageEntryPrice: '150.00000000',
+      realizedPnl: '0.00000000',
+      unrealizedPnl: '0.00000000',
+      lastPrice: '150.00000000',
+      lastPriceAt: new Date('2026-08-11T10:00:00.000Z'),
+    });
+    vi.mocked(getPaperPortfolio).mockResolvedValue({
+      cash: '48500.00000000',
+      positions: { NVDA: '10.00000000' },
+    });
+    vi.mocked(getAllMarketSnapshots).mockResolvedValue([
+      {
+        symbol: 'NVDA',
+        price: '191.25000000',
+        bid: '191.20000000',
+        ask: '191.30000000',
+        volume: 1000,
+        timestamp: '2026-08-11T14:30:00.000Z',
+        is_stale: false,
+      },
+    ]);
+
+    const res = await request(app)
+      .get('/dashboard/paper')
+      .set('Authorization', `Bearer ${token()}`);
+
+    expect(res.status).toBe(200);
+    const position = res.body.positions.find((p: { symbol: string }) => p.symbol === 'NVDA');
+    expect(position.lastPrice).toBe('191.25000000');
+    // (191.25 - 150.00) * 10 = 412.50 — live price, not the stale stored 150.00.
+    expect(position.unrealizedPnl).toBe('412.50000000');
+    expect(position.isStale).toBe(false);
+    expect(res.body.portfolio.unrealizedPnl).toBe('412.50000000');
+  });
+
+  it.skipIf(SKIP)('flags a position as stale when its market snapshot reports is_stale', async () => {
+    await upsertPosition(pool, {
+      symbol: 'NVDA',
+      quantity: '10.00000000',
+      averageEntryPrice: '150.00000000',
+      realizedPnl: '0.00000000',
+      unrealizedPnl: '0.00000000',
+      lastPrice: '150.00000000',
+      lastPriceAt: new Date('2026-08-11T10:00:00.000Z'),
+    });
+    vi.mocked(getPaperPortfolio).mockResolvedValue({
+      cash: '48500.00000000',
+      positions: { NVDA: '10.00000000' },
+    });
+    vi.mocked(getAllMarketSnapshots).mockResolvedValue([
+      {
+        symbol: 'NVDA',
+        price: '191.25000000',
+        bid: '191.20000000',
+        ask: '191.30000000',
+        volume: 1000,
+        timestamp: '2026-08-11T09:00:00.000Z',
+        is_stale: true,
+      },
+    ]);
+
+    const res = await request(app)
+      .get('/dashboard/paper')
+      .set('Authorization', `Bearer ${token()}`);
+
+    expect(res.status).toBe(200);
+    const position = res.body.positions.find((p: { symbol: string }) => p.symbol === 'NVDA');
+    expect(position.isStale).toBe(true);
+    expect(res.body.marketData.freshness).toBe('STALE');
+  });
+
+  it.skipIf(SKIP)('reflects the market-data stream reconnecting across two requests', async () => {
+    vi.mocked(getMarketDataStatus).mockResolvedValueOnce({
+      mode: 'stream',
+      connected: false,
+      last_message_at: '2026-08-11T13:00:00.000Z',
+    });
+
+    const disconnected = await request(app)
+      .get('/dashboard/paper')
+      .set('Authorization', `Bearer ${token()}`);
+    expect(disconnected.body.marketData.streamMode).toBe('stream');
+    expect(disconnected.body.marketData.streamConnected).toBe(false);
+
+    vi.mocked(getMarketDataStatus).mockResolvedValueOnce({
+      mode: 'stream',
+      connected: true,
+      last_message_at: '2026-08-11T14:35:00.000Z',
+    });
+
+    const reconnected = await request(app)
+      .get('/dashboard/paper')
+      .set('Authorization', `Bearer ${token()}`);
+    expect(reconnected.body.marketData.streamConnected).toBe(true);
+    expect(reconnected.body.marketData.streamLastMessageAt).toBe('2026-08-11T14:35:00.000Z');
+  });
+
+  it.skipIf(SKIP)('does not fail the dashboard request when the market-data status call itself errors', async () => {
+    vi.mocked(getMarketDataStatus).mockRejectedValueOnce(new Error('trading engine unreachable'));
+
+    const res = await request(app)
+      .get('/dashboard/paper')
+      .set('Authorization', `Bearer ${token()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.marketData.streamConnected).toBe(false);
   });
 });

@@ -75,6 +75,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         self._staleness_threshold = staleness_threshold_seconds
         self._client = client or httpx.Client(timeout=timeout_seconds)
         self._owns_client = client is None
+        self._stream: AlpacaMarketDataStream | None = None
 
     @classmethod
     def from_env(cls) -> AlpacaMarketDataProvider:
@@ -114,7 +115,55 @@ class AlpacaMarketDataProvider(MarketDataProvider):
     ) -> None:
         self.close()
 
+    def attach_stream(self, stream: AlpacaMarketDataStream) -> None:
+        """Wire the WebSocket stream as the preferred price source.
+
+        Once attached, get_snapshot/get_all_snapshots prefer the stream's
+        cached trade/quote over a REST call whenever the stream is connected
+        and has a fresh-enough entry for the symbol. This is the only
+        market-data connection this provider ever opens — REST remains the
+        fallback for symbols the stream hasn't (yet) delivered a message for,
+        which also covers the post-reconnect case: a freshly reconnected
+        stream has an empty cache, so callers transparently fall back to REST
+        until the stream repopulates, instead of serving stale cached data.
+        """
+        self._stream = stream
+
+    def connection_status(self) -> dict[str, object]:
+        if self._stream is None:
+            return {"mode": "poll", "connected": True, "last_message_at": None}
+        last_message_at = self._stream.last_message_at()
+        return {
+            "mode": "stream",
+            "connected": self._stream.connected,
+            "last_message_at": last_message_at.isoformat() if last_message_at else None,
+        }
+
+    def _snapshot_from_stream(self, symbol: str) -> MarketSnapshot | None:
+        if self._stream is None or not self._stream.connected:
+            return None
+        trade = self._stream.latest_trade(symbol)
+        if trade is None or _is_stale(trade.timestamp, self._staleness_threshold):
+            return None
+        quote = self._stream.latest_quote(symbol)
+        bid = quote.bid if quote is not None else trade.price
+        ask = quote.ask if quote is not None else trade.price
+        return MarketSnapshot(
+            symbol=symbol,
+            price=trade.price,
+            bid=bid,
+            ask=ask,
+            volume=trade.size,
+            timestamp=trade.timestamp,
+            is_stale=False,
+        )
+
     def get_snapshot(self, symbol: str) -> MarketSnapshot:
+        symbol = symbol.upper()
+        streamed = self._snapshot_from_stream(symbol)
+        if streamed is not None:
+            return streamed
+
         data = self._request("GET", f"/v2/stocks/{symbol.upper()}/snapshot")
         snapshot = data.get("snapshot") if isinstance(data.get("snapshot"), dict) else data
         if not isinstance(snapshot, dict):
@@ -297,6 +346,7 @@ class AlpacaMarketDataStream:
         self._quotes: dict[str, MarketQuote] = {}
         self._trades: dict[str, MarketTrade] = {}
         self._bars: dict[str, MarketBar] = {}
+        self._last_message_at: datetime | None = None
         self.last_error: str | None = None
         self.connected = False
 
@@ -330,6 +380,10 @@ class AlpacaMarketDataStream:
     def latest_bar(self, symbol: str) -> MarketBar | None:
         with self._lock:
             return self._bars.get(symbol.upper())
+
+    def last_message_at(self) -> datetime | None:
+        with self._lock:
+            return self._last_message_at
 
     async def run_forever(
         self,
@@ -385,6 +439,7 @@ class AlpacaMarketDataStream:
         data = json.loads(decoded)
         messages = data if isinstance(data, list) else [data]
         with self._lock:
+            self._last_message_at = datetime.now(UTC)
             for message in messages:
                 if not isinstance(message, dict):
                     continue
