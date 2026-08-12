@@ -1,29 +1,31 @@
 <template>
   <div class="space-y-6">
     <div>
-      <h1 class="text-2xl font-semibold">Settings</h1>
-      <p class="mt-1 text-sm text-slate-400">Paper trading controls and risk parameters.</p>
+      <p class="text-xs font-bold uppercase tracking-widest text-amber-200">PAPER TRADING ONLY</p>
+      <h1 class="page-title">Settings</h1>
+      <p class="page-subtitle">Paper trading controls and risk parameters. No live trading controls are exposed.</p>
     </div>
     <div
       v-if="message"
-      class="rounded border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100"
+      class="notice-info"
     >
       {{ message }}
     </div>
     <div
       v-if="actionError"
-      class="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100"
+      class="notice-error"
     >
       {{ actionError }}
     </div>
-    <section class="rounded border border-slate-800 bg-slate-900 p-4">
+    <section class="rounded-lg border border-slate-800 bg-slate-900/70 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.28)]">
       <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 class="font-semibold">Kill Switch</h2>
+          <h2 class="font-semibold text-white">Kill Switch</h2>
           <p class="mt-1 text-sm text-slate-400">Controls whether paper trading approvals and execution remain active.</p>
+          <div class="mt-3"><StatusPill :label="killSwitch?.enabled ? 'PAPER ENABLED' : 'PAPER DISABLED'" /></div>
         </div>
         <button
-          class="rounded border px-4 py-2 text-sm font-semibold"
+          class="rounded-lg border px-4 py-2 text-sm font-semibold transition"
           :class="killSwitch?.enabled ? 'border-rose-500/50 text-rose-200 hover:bg-rose-500/10' : 'border-emerald-500/50 text-emerald-200 hover:bg-emerald-500/10'"
           @click="toggleKillSwitch"
         >
@@ -31,8 +33,11 @@
         </button>
       </div>
     </section>
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="border-b border-slate-800 px-4 py-3"><h2 class="font-semibold">System Settings</h2></div>
+    <UiCard
+      title="System Settings"
+      subtitle="Current paper trading and risk configuration."
+      body-class="p-0"
+    >
       <dl class="divide-y divide-slate-800">
         <div
           v-for="setting in settings ?? []"
@@ -40,11 +45,11 @@
           class="grid gap-1 px-4 py-3 md:grid-cols-3"
         >
           <dt class="text-sm text-slate-400">{{ setting.key }}</dt>
-          <dd class="text-sm font-medium md:col-span-1">{{ setting.value }}</dd>
+          <dd class="text-sm font-semibold text-slate-100 md:col-span-1">{{ setting.value }}</dd>
           <dd class="text-sm text-slate-500">{{ setting.description ?? '-' }}</dd>
         </div>
       </dl>
-    </section>
+    </UiCard>
   </div>
 </template>
 

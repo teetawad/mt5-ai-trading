@@ -1,119 +1,143 @@
 <template>
   <div class="space-y-6">
     <div>
-      <h1 class="text-2xl font-semibold">Trade Proposals</h1>
-      <p class="mt-1 text-sm text-slate-400">Review immutable proposals and record owner decisions.</p>
+      <p class="text-xs font-bold uppercase tracking-widest text-amber-200">PAPER TRADING ONLY</p>
+      <h1 class="page-title">Trade Proposals</h1>
+      <p class="page-subtitle">Review immutable paper proposals. AI Decision explains the model recommendation; Risk Engine Decision controls whether owner approval can proceed.</p>
     </div>
 
     <div
       v-if="message"
-      class="rounded border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100"
+      class="notice-info"
     >
       {{ message }}
     </div>
     <div
       v-if="pageError"
-      class="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100"
+      class="notice-error"
     >
       {{ pageError }}
     </div>
 
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="text-left text-xs uppercase text-slate-500">
-            <tr>
-              <th class="px-4 py-3">Symbol</th>
-              <th class="px-4 py-3">Side</th>
-              <th class="px-4 py-3">Quantity</th>
-              <th class="px-4 py-3">Reference</th>
-              <th class="px-4 py-3">Expires</th>
-              <th class="px-4 py-3">Status</th>
-              <th class="px-4 py-3 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="proposal in safeProposals"
-              :key="proposal.id"
-              class="border-t border-slate-800 hover:bg-slate-800/50"
-              @click="selected = proposal"
-            >
-              <td class="px-4 py-3 font-medium">{{ proposal.symbol }}</td>
-              <td class="px-4 py-3">{{ proposal.side }}</td>
-              <td class="px-4 py-3">{{ proposal.quantity }}</td>
-              <td class="px-4 py-3">{{ currency(proposal.referencePrice) }}</td>
-              <td class="px-4 py-3">{{ shortDate(proposal.expiresAt) }}</td>
-              <td class="px-4 py-3"><StatusPill :label="proposal.status" /></td>
-              <td class="px-4 py-3">
-                <div class="flex justify-end gap-2">
-                  <button
-                    class="rounded border border-emerald-500/50 px-3 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40"
-                    :disabled="proposal.status !== 'PENDING_APPROVAL' || busy"
-                    @click.stop="approve(proposal.id)"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    class="rounded border border-rose-500/50 px-3 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/10 disabled:opacity-40"
-                    :disabled="proposal.status !== 'PENDING_APPROVAL' || busy"
-                    @click.stop="reject(proposal.id)"
-                  >
-                    Reject
-                  </button>
-                </div>
-              </td>
-            </tr>
-            <tr
-              v-for="malformed in malformedProposals"
-              :key="`malformed-${malformed.id}`"
-              class="border-t border-slate-800 bg-rose-500/5"
-            >
-              <td
-                colspan="6"
-                class="px-4 py-3 text-rose-200"
-              >
-                Proposal {{ malformed.id }} ({{ malformed.status }}) has malformed data and cannot be displayed safely.
-              </td>
-              <td class="px-4 py-3 text-right text-xs font-semibold text-rose-300">Needs attention</td>
-            </tr>
-            <tr v-if="!safeProposals.length && !malformedProposals.length">
-              <td
-                colspan="7"
-                class="px-4 py-8 text-center text-slate-500"
-              >
-                No proposals
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <div class="grid gap-3 md:grid-cols-3">
+      <MetricBox
+        label="Pending Approval"
+        :value="String(statusCount('PENDING_APPROVAL'))"
+        class-name="text-sky-300"
+      />
+      <MetricBox
+        label="Risk Passed"
+        :value="String(riskPassCount)"
+        class-name="text-emerald-300"
+      />
+      <MetricBox
+        label="Risk Blocked"
+        :value="String(riskBlockedCount)"
+        class-name="text-rose-300"
+      />
+    </div>
 
-    <section
-      v-if="selected"
-      class="rounded border border-slate-800 bg-slate-900 p-4"
+    <UiCard
+      title="Proposal Queue"
+      subtitle="Click any row to inspect AI, risk, stop, target, and approval details."
+      body-class="p-0"
     >
-      <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-        <div>
-          <h2 class="font-semibold">{{ selected.symbol }} Proposal Detail</h2>
-          <p class="mt-1 text-sm text-slate-400">{{ selected.id }}</p>
-        </div>
+      <DataTable
+        :empty="!safeProposals.length && !malformedProposals.length"
+        empty-label="No proposals"
+        :columns="['Symbol', 'Side', 'Qty', 'Reference', 'AI Decision', 'Risk Engine', 'Expires', 'Actions']"
+      >
+        <tr
+          v-for="proposal in safeProposals"
+          :key="proposal.id"
+          class="cursor-pointer border-t border-slate-800/80 hover:bg-slate-800/40"
+          :class="selected?.id === proposal.id ? 'bg-sky-400/5' : ''"
+          @click="selected = proposal"
+        >
+          <td class="px-4 py-3 font-semibold text-white">{{ proposal.symbol }}</td>
+          <td class="px-4 py-3">{{ proposal.side }}</td>
+          <td class="px-4 py-3 tabular-nums">{{ proposal.quantity }}</td>
+          <td class="px-4 py-3 tabular-nums">{{ currency(proposal.referencePrice) }}</td>
+          <td class="px-4 py-3"><StatusPill :label="String(aiDecision(proposal)?.decision ?? 'NO_AI')" /></td>
+          <td class="px-4 py-3"><StatusPill :label="proposal.riskSnapshot?.result ?? proposal.status" /></td>
+          <td class="px-4 py-3 text-slate-400">{{ shortDate(proposal.expiresAt) }}</td>
+          <td class="px-4 py-3">
+            <div class="flex justify-end gap-2">
+              <button
+                class="btn-success"
+                :disabled="proposal.status !== 'PENDING_APPROVAL' || busy"
+                @click.stop="approve(proposal.id)"
+              >
+                Approve
+              </button>
+              <button
+                class="btn-danger"
+                :disabled="proposal.status !== 'PENDING_APPROVAL' || busy"
+                @click.stop="reject(proposal.id)"
+              >
+                Reject
+              </button>
+            </div>
+          </td>
+        </tr>
+        <tr
+          v-for="malformed in malformedProposals"
+          :key="`malformed-${malformed.id}`"
+          class="border-t border-slate-800 bg-rose-500/5"
+        >
+          <td
+            colspan="7"
+            class="px-4 py-3 text-rose-200"
+          >
+            Proposal {{ malformed.id }} ({{ malformed.status }}) has malformed data and cannot be displayed safely.
+          </td>
+          <td class="px-4 py-3 text-right text-xs font-semibold text-rose-300">Needs attention</td>
+        </tr>
+      </DataTable>
+    </UiCard>
+
+    <UiCard
+      v-if="selected"
+      :title="`${selected.symbol} Proposal Detail`"
+      :subtitle="selected.id"
+    >
+      <template #actions>
         <StatusPill :label="selected.status" />
+      </template>
+      <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div class="grid w-full gap-4 lg:grid-cols-2">
+          <div class="rounded-lg border border-emerald-400/30 bg-emerald-400/10 p-4">
+            <p class="text-xs font-bold uppercase tracking-widest text-emerald-300">AI Decision</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <StatusPill :label="String(aiDecision(selected)?.decision ?? 'NO_AI')" />
+              <span class="text-sm text-slate-300">Confidence {{ aiDecision(selected)?.confidence ?? '-' }}</span>
+            </div>
+            <p class="mt-3 text-sm leading-6 text-slate-300">{{ aiReasons(selected) }}</p>
+          </div>
+          <div class="rounded-lg border border-sky-400/30 bg-sky-400/10 p-4">
+            <p class="text-xs font-bold uppercase tracking-widest text-sky-300">Risk Engine Decision</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <StatusPill :label="selected.riskSnapshot?.result ?? 'UNKNOWN'" />
+              <StatusPill :label="String(phase22(selected)?.result ?? 'NO_PHASE22')" />
+            </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-2">
+              <ProgressMeter
+                label="Risk/Reward"
+                :percent="riskRewardPercent(selected)"
+                :value-label="ratio(phase22(selected)?.riskReward)"
+                status-label="R/R"
+              />
+              <ProgressMeter
+                label="Daily Loss Used"
+                :percent="dailyLossPercent(selected)"
+                :value-label="currency(phase22(selected)?.dailyLossUsed)"
+                status-label="LIMIT"
+              />
+            </div>
+          </div>
+        </div>
       </div>
       <dl class="mt-4 grid gap-3 md:grid-cols-4">
-        <div>
-          <dt class="text-xs uppercase text-slate-500">AI Signal</dt>
-          <dd class="mt-1 font-medium">{{ aiDecision(selected)?.decision ?? '-' }}</dd>
-        </div>
-        <div>
-          <dt class="text-xs uppercase text-slate-500">Confidence</dt>
-          <dd class="mt-1 font-medium">{{ aiDecision(selected)?.confidence ?? '-' }}</dd>
-        </div>
-        <div class="md:col-span-2">
-          <dt class="text-xs uppercase text-slate-500">AI Reasons</dt>
-          <dd class="mt-1 font-medium">{{ aiReasons(selected) }}</dd>
-        </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Side</dt>
           <dd class="mt-1 font-medium">{{ selected.side }}</dd>
@@ -195,7 +219,7 @@
           <dd class="mt-1 font-medium">{{ shortDate(selected.expiresAt) }}</dd>
         </div>
       </dl>
-    </section>
+    </UiCard>
   </div>
 </template>
 
@@ -279,6 +303,11 @@ const pageError = computed(() => {
   }
   return '';
 });
+const riskPassCount = computed(() => safeProposals.value.filter((proposal) => String(proposal.riskSnapshot?.result ?? '').includes('PASS')).length);
+const riskBlockedCount = computed(() => safeProposals.value.filter((proposal) => {
+  const result = String(proposal.riskSnapshot?.result ?? '');
+  return result.includes('FAIL') || result.includes('REJECT') || result.includes('BLOCK');
+}).length);
 
 watchEffect(() => {
   const proposalId = typeof route.query.proposalId === 'string' ? route.query.proposalId : '';
@@ -397,6 +426,27 @@ function aiReasons(proposal: Proposal): string {
 function pendingOrderStatus(value?: Phase22Risk): string {
   if (!value) return '-';
   return value.conflictingPendingOrders?.length ? 'BLOCKED' : 'CLEAR';
+}
+
+function statusCount(status: string): number {
+  return safeProposals.value.filter((proposal) => proposal.status === status).length;
+}
+
+function dailyLossPercent(proposal: Proposal): number {
+  const risk = phase22(proposal);
+  const used = numeric(risk?.dailyLossUsed);
+  const limit = numeric(risk?.maxLoss);
+  return limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+}
+
+function riskRewardPercent(proposal: Proposal): number {
+  return Math.min(100, (numeric(phase22(proposal)?.riskReward) / 3) * 100);
+}
+
+function numeric(value?: unknown): number {
+  const text = stringValue(value);
+  const parsed = Number(text ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function shortDate(value: string): string {

@@ -1,24 +1,44 @@
 <template>
-  <div class="min-h-screen bg-slate-950 text-slate-100">
+  <div class="min-h-screen text-slate-100">
     <PaperTradingBanner />
-    <main class="mx-auto flex min-h-[calc(100vh-40px)] w-full max-w-md flex-col justify-center px-4 py-10">
-      <div class="mb-6">
+    <main class="mx-auto grid min-h-[calc(100vh-40px)] w-full max-w-5xl gap-8 px-4 py-10 lg:grid-cols-[1fr_420px] lg:items-center">
+      <div class="hidden lg:block">
         <p class="text-xs font-semibold uppercase text-amber-200">PAPER TRADING ONLY</p>
-        <h1 class="mt-2 text-2xl font-semibold text-white">Owner Login</h1>
-        <p class="mt-1 text-sm text-slate-400">Authenticate to access the paper trading dashboard.</p>
+        <h1 class="mt-2 text-4xl font-semibold tracking-tight text-white">Paper trading control room</h1>
+        <p class="mt-3 max-w-xl text-sm leading-6 text-slate-400">Authenticate to review simulated orders, risk decisions, approvals, positions, and audit events. This interface does not enable live trading.</p>
+        <div class="mt-6 grid max-w-xl gap-3 sm:grid-cols-3">
+          <div class="rounded-lg border border-sky-400/30 bg-sky-400/10 p-3">
+            <p class="text-xs font-bold uppercase tracking-wide text-sky-200">AI Decision</p>
+          </div>
+          <div class="rounded-lg border border-emerald-400/30 bg-emerald-400/10 p-3">
+            <p class="text-xs font-bold uppercase tracking-wide text-emerald-200">Risk Engine</p>
+          </div>
+          <div class="rounded-lg border border-amber-300/30 bg-amber-300/10 p-3">
+            <p class="text-xs font-bold uppercase tracking-wide text-amber-100">Owner Approval</p>
+          </div>
+        </div>
       </div>
 
       <form
-        class="rounded border border-slate-800 bg-slate-900 p-4"
+        class="rounded-lg border border-slate-800 bg-slate-900/80 p-5 shadow-[0_24px_80px_rgba(2,6,23,0.35)]"
         @submit.prevent="submit"
       >
+        <div class="mb-6 lg:hidden">
+          <p class="text-xs font-semibold uppercase text-amber-200">PAPER TRADING ONLY</p>
+          <h1 class="mt-2 text-2xl font-semibold text-white">Owner Login</h1>
+          <p class="mt-1 text-sm text-slate-400">Authenticate to access the paper trading dashboard.</p>
+        </div>
+        <div class="mb-5 hidden lg:block">
+          <h2 class="text-xl font-semibold text-white">Owner Login</h2>
+          <p class="mt-1 text-sm text-slate-400">Use your owner account to continue.</p>
+        </div>
         <div class="space-y-4">
           <label class="block">
             <span class="text-sm font-medium text-slate-200">Email</span>
             <input
               v-model.trim="email"
               autocomplete="username"
-              class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus:border-sky-500"
+              class="field-input"
               name="email"
               required
               type="email"
@@ -30,7 +50,7 @@
             <input
               v-model="password"
               autocomplete="current-password"
-              class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus:border-sky-500"
+              class="field-input"
               name="password"
               required
               type="password"
@@ -39,13 +59,13 @@
 
           <div
             v-if="errorMessage"
-            class="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100"
+            class="notice-error"
           >
             {{ errorMessage }}
           </div>
 
           <button
-            class="w-full rounded border border-sky-500/60 bg-sky-500/10 px-3 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            class="btn-primary w-full"
             :disabled="busy"
             type="submit"
           >

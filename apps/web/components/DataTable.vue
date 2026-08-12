@@ -1,12 +1,12 @@
 <template>
   <div class="overflow-x-auto">
-    <table class="w-full table-fixed text-sm">
-      <thead class="text-left text-xs uppercase text-slate-500">
+    <table class="w-full text-sm">
+      <thead class="text-left text-xs uppercase tracking-wide text-slate-500">
         <tr>
           <th
             v-for="column in columns"
             :key="column"
-            class="px-4 py-3"
+            class="whitespace-nowrap px-4 py-3 font-semibold"
           >
             {{ column }}
           </th>
@@ -19,7 +19,10 @@
             :colspan="columns.length"
             class="border-t border-slate-800 px-4 py-8 text-center text-slate-500"
           >
-            {{ emptyLabel }}
+            <EmptyState
+              :title="emptyLabel"
+              message="The page will update when paper-trading records are available."
+            />
           </td>
         </tr>
       </tbody>

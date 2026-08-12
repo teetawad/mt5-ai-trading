@@ -1,22 +1,22 @@
 <template>
   <div class="space-y-6">
-    <div class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+    <div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
       <div>
-        <p class="text-xs font-semibold uppercase text-amber-200">PAPER TRADING ONLY</p>
-        <h1 class="text-2xl font-semibold text-white">Alpaca Paper Dashboard</h1>
-        <p class="mt-1 text-sm text-slate-400">Paper account, approvals, risk, orders, fills, positions, and reconciliation.</p>
+        <p class="text-xs font-bold uppercase tracking-widest text-amber-200">PAPER TRADING ONLY</p>
+        <h1 class="page-title">Paper Trading Dashboard</h1>
+        <p class="page-subtitle">Internal ledger, Alpaca paper account state, approvals, risk checks, orders, fills, positions, and reconciliation.</p>
       </div>
       <div class="flex flex-wrap gap-2">
         <button
-          class="rounded border border-slate-600 px-3 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-800 disabled:opacity-40"
+          class="btn-primary"
           :disabled="refreshing"
           @click="refreshDashboard"
         >
-          Refresh
+          {{ refreshing ? 'Refreshing...' : 'Refresh' }}
         </button>
         <button
-          class="rounded border px-3 py-2 text-sm font-semibold disabled:opacity-40"
-          :class="dashboard?.killSwitch.enabled ? 'border-rose-500/50 text-rose-200 hover:bg-rose-500/10' : 'border-emerald-500/50 text-emerald-200 hover:bg-emerald-500/10'"
+          class="rounded-lg border px-4 py-2 text-sm font-semibold transition disabled:opacity-40"
+          :class="dashboard?.killSwitch.enabled ? 'border-rose-400/50 bg-rose-400/10 text-rose-100 hover:bg-rose-400/20' : 'border-emerald-400/50 bg-emerald-400/10 text-emerald-100 hover:bg-emerald-400/20'"
           :disabled="busy || !dashboard"
           @click="toggleKillSwitch"
         >
@@ -25,33 +25,38 @@
       </div>
     </div>
 
-    <div class="rounded border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm font-semibold text-amber-100">
+    <div class="notice-warn">
       PAPER TRADING is active on this dashboard. No live trading or real-money execution is available here.
     </div>
-
     <div
       v-if="error"
-      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+      class="notice-error"
     >
       {{ error.message }}
     </div>
     <div
+      v-if="snapshotsError"
+      class="notice-error"
+    >
+      Portfolio history could not be loaded. Current-state cards remain available.
+    </div>
+    <div
       v-if="actionError"
-      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+      class="notice-error"
     >
       {{ actionError }}
     </div>
     <div
       v-if="message"
-      class="rounded border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100"
+      class="notice-info"
     >
       {{ message }}
     </div>
     <div
       v-if="dashboard && dashboard.marketData.streamMode === 'stream' && !dashboard.marketData.streamConnected"
-      class="rounded border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100"
+      class="notice-warn"
     >
-      DISCONNECTED — the market-data stream is down. Prices shown may be out of date.
+      DISCONNECTED - the market-data stream is down. Prices shown may be out of date.
     </div>
 
     <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -61,8 +66,8 @@
         :class-name="statusClass(dashboard?.broker.status)"
       />
       <MetricBox
-        label="Alpaca Buying Power"
-        :value="money(dashboard?.broker.buyingPower)"
+        label="Portfolio Equity"
+        :value="money(dashboard?.portfolio.portfolioEquity)"
       />
       <MetricBox
         label="Internal Ledger Cash"
@@ -75,34 +80,56 @@
       />
     </div>
 
-    <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      <MetricBox
-        label="Realized P&L"
-        :value="money(dashboard?.portfolio.realizedPnl)"
-        :class-name="pnlClass(dashboard?.portfolio.realizedPnl)"
+    <div class="grid gap-4 xl:grid-cols-4">
+      <MiniLineChart
+        class="xl:col-span-2"
+        title="Equity Curve"
+        :points="equityHistory"
+        :value-label="money(dashboard?.portfolio.portfolioEquity)"
+        tone="sky"
       />
-      <MetricBox
-        label="Unrealized P&L"
-        :value="money(dashboard?.portfolio.unrealizedPnl)"
-        :class-name="pnlClass(dashboard?.portfolio.unrealizedPnl)"
+      <MiniLineChart
+        title="Portfolio Value Trend"
+        :points="portfolioValueTrend"
+        :value-label="money(latestSnapshot?.portfolioEquity ?? dashboard?.portfolio.portfolioEquity)"
+        tone="emerald"
       />
-      <MetricBox
-        label="Market Data Freshness"
-        :value="dashboard?.marketData.freshness ?? 'UNKNOWN'"
-        :class-name="dashboard?.marketData.freshness === 'FRESH' ? 'text-emerald-300' : 'text-amber-300'"
-      />
-      <MetricBox
-        label="Reconciliation"
-        :value="dashboard?.reconciliation.status ?? 'UNKNOWN'"
-        :class-name="reconciliationClass(dashboard?.reconciliation.status)"
+      <BarChart
+        title="Realized vs Unrealized P&L"
+        :data="pnlBars"
+        :formatter="moneyNumber"
       />
     </div>
 
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="flex flex-col gap-1 border-b border-slate-800 px-4 py-3 md:flex-row md:items-center md:justify-between">
-        <h2 class="font-semibold">PAPER TRADING Current US Stock Prices</h2>
-        <p class="text-xs text-slate-500">Status: {{ dashboard?.marketData.status ?? 'UNKNOWN' }}</p>
-      </div>
+    <div class="grid gap-4 lg:grid-cols-3">
+      <ProgressMeter
+        label="Cash vs Equity"
+        :percent="cashEquityPercent"
+        :value-label="`${money(dashboard?.portfolio.cashBalance)} cash`"
+        status-label="INTERNAL LEDGER"
+        :helper="`${cashEquityPercent.toFixed(1)}% of current equity is cash.`"
+      />
+      <ProgressMeter
+        label="Open Positions"
+        :percent="positionCapacityPercent"
+        :value-label="`${dashboard?.positions.length ?? 0} open`"
+        status-label="PAPER ONLY"
+        helper="Current open positions from the internal ledger."
+      />
+      <ProgressMeter
+        label="Active Proposals"
+        :percent="proposalPressurePercent"
+        :value-label="`${dashboard?.pendingProposals.length ?? 0} pending`"
+        status-label="OWNER APPROVAL"
+        helper="Pending proposals still require owner approval before paper execution."
+      />
+    </div>
+
+    <UiCard
+      title="Current US Stock Prices"
+      :subtitle="`Freshness: ${dashboard?.marketData.freshness ?? 'UNKNOWN'} / Status: ${dashboard?.marketData.status ?? 'UNKNOWN'}`"
+      body-class="p-0"
+    >
       <DataTable
         :empty="!(dashboard?.marketData.snapshots.length)"
         empty-label="No market data snapshots"
@@ -111,53 +138,53 @@
         <tr
           v-for="snapshot in dashboard?.marketData.snapshots ?? []"
           :key="snapshot.symbol"
-          class="border-t border-slate-800"
+          class="border-t border-slate-800/80 hover:bg-slate-800/40"
         >
-          <td class="px-4 py-3 font-medium">{{ snapshot.symbol }}</td>
-          <td class="px-4 py-3">{{ money(snapshot.price) }}</td>
-          <td class="px-4 py-3">{{ money(snapshot.bid) }}</td>
-          <td class="px-4 py-3">{{ money(snapshot.ask) }}</td>
-          <td class="px-4 py-3">{{ dateTime(snapshot.timestamp) }}</td>
+          <td class="px-4 py-3 font-semibold text-white">{{ snapshot.symbol }}</td>
+          <td class="px-4 py-3 font-medium tabular-nums">{{ money(snapshot.price) }}</td>
+          <td class="px-4 py-3 tabular-nums text-slate-300">{{ money(snapshot.bid) }}</td>
+          <td class="px-4 py-3 tabular-nums text-slate-300">{{ money(snapshot.ask) }}</td>
+          <td class="px-4 py-3 text-slate-400">{{ dateTime(snapshot.timestamp) }}</td>
           <td class="px-4 py-3">
             <StatusPill :label="snapshot.isStale ? 'STALE' : 'FRESH'" />
           </td>
         </tr>
       </DataTable>
-    </section>
+    </UiCard>
 
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="border-b border-slate-800 px-4 py-3">
-        <h2 class="font-semibold">PAPER TRADING Pending Proposals</h2>
-      </div>
+    <UiCard
+      title="Pending Proposals"
+      subtitle="AI decision and Risk Engine decision are shown separately. Approval controls preserve the existing owner approval flow."
+      body-class="p-0"
+    >
       <DataTable
         :empty="!(dashboard?.pendingProposals.length)"
         empty-label="No pending trade proposals"
-        :columns="['Symbol', 'Side', 'Qty', 'Entry', 'Stop', 'Target', 'Max Loss', 'Risk', 'Actions']"
+        :columns="['Symbol', 'Side', 'Qty', 'Entry', 'Stop', 'Target', 'Risk Engine', 'Actions']"
       >
         <tr
           v-for="proposal in dashboard?.pendingProposals ?? []"
           :key="proposal.id"
-          class="border-t border-slate-800"
+          class="border-t border-slate-800/80 hover:bg-slate-800/40"
         >
-          <td class="px-4 py-3 font-medium">{{ proposal.symbol }}</td>
+          <td class="px-4 py-3 font-semibold text-white">{{ proposal.symbol }}</td>
           <td class="px-4 py-3">{{ proposal.side }}</td>
-          <td class="px-4 py-3">{{ proposal.quantity }}</td>
-          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.entry ?? proposal.referencePrice) }}</td>
-          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.stopLoss) }}</td>
-          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.takeProfit) }}</td>
-          <td class="px-4 py-3">{{ money(proposal.riskSnapshot?.phase22?.maxLoss) }}</td>
+          <td class="px-4 py-3 tabular-nums">{{ proposal.quantity }}</td>
+          <td class="px-4 py-3 tabular-nums">{{ money(proposal.riskSnapshot?.phase22?.entry ?? proposal.referencePrice) }}</td>
+          <td class="px-4 py-3 tabular-nums text-rose-200">{{ money(proposal.riskSnapshot?.phase22?.stopLoss) }}</td>
+          <td class="px-4 py-3 tabular-nums text-emerald-200">{{ money(proposal.riskSnapshot?.phase22?.takeProfit) }}</td>
           <td class="px-4 py-3"><StatusPill :label="proposal.riskSnapshot?.result ?? proposal.status" /></td>
           <td class="px-4 py-3">
             <div class="flex justify-end gap-2">
               <button
-                class="rounded border border-emerald-500/50 px-3 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40"
+                class="btn-success"
                 :disabled="busy || proposal.status !== 'PENDING_APPROVAL'"
                 @click="approve(proposal.id)"
               >
                 Approve
               </button>
               <button
-                class="rounded border border-rose-500/50 px-3 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/10 disabled:opacity-40"
+                class="btn-danger"
                 :disabled="busy || proposal.status !== 'PENDING_APPROVAL'"
                 @click="reject(proposal.id)"
               >
@@ -167,13 +194,14 @@
           </td>
         </tr>
       </DataTable>
-    </section>
+    </UiCard>
 
     <div class="grid gap-6 xl:grid-cols-2">
-      <section class="rounded border border-slate-800 bg-slate-900">
-        <div class="border-b border-slate-800 px-4 py-3">
-          <h2 class="font-semibold">PAPER TRADING Risk Results</h2>
-        </div>
+      <UiCard
+        title="Risk Results"
+        subtitle="Latest Risk Engine pass/fail decisions."
+        body-class="p-0"
+      >
         <DataTable
           :empty="!(dashboard?.riskResults.length)"
           empty-label="No risk results"
@@ -182,143 +210,68 @@
           <tr
             v-for="risk in dashboard?.riskResults ?? []"
             :key="risk.id"
-            class="border-t border-slate-800"
+            class="border-t border-slate-800/80 hover:bg-slate-800/40"
           >
-            <td class="px-4 py-3">{{ risk.stage }}</td>
+            <td class="px-4 py-3 font-medium">{{ risk.stage }}</td>
             <td class="px-4 py-3"><StatusPill :label="risk.result" /></td>
-            <td class="px-4 py-3">{{ Array.isArray(risk.failedRules) && risk.failedRules.length ? risk.failedRules.join(', ') : '-' }}</td>
-            <td class="px-4 py-3">{{ dateTime(risk.createdAt) }}</td>
+            <td class="px-4 py-3 text-slate-300">{{ Array.isArray(risk.failedRules) && risk.failedRules.length ? risk.failedRules.join(', ') : '-' }}</td>
+            <td class="px-4 py-3 text-slate-400">{{ dateTime(risk.createdAt) }}</td>
           </tr>
         </DataTable>
-      </section>
+      </UiCard>
 
-      <section class="rounded border border-slate-800 bg-slate-900">
-        <div class="border-b border-slate-800 px-4 py-3">
-          <h2 class="font-semibold">PAPER TRADING Reconciliation</h2>
-        </div>
-        <dl class="grid gap-4 p-4 text-sm md:grid-cols-2">
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Status</dt>
+      <UiCard
+        title="Reconciliation"
+        subtitle="Internal ledger compared with the Alpaca paper account."
+      >
+        <dl class="grid gap-4 text-sm md:grid-cols-2">
+          <div
+            v-for="item in reconciliationItems"
+            :key="item.label"
+            class="rounded-lg border border-slate-800 bg-slate-950/50 p-3"
+          >
+            <dt class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ item.label }}</dt>
             <dd
-              class="mt-1 font-semibold"
-              :class="reconciliationClass(dashboard?.reconciliation.status)"
+              class="mt-1 font-semibold text-slate-100"
+              :class="item.className"
             >
-              {{ dashboard?.reconciliation.status ?? 'UNKNOWN' }}
+              {{ item.value }}
             </dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Source of Truth</dt>
-            <dd class="mt-1 font-semibold">{{ dashboard?.reconciliation.sourceOfTruth ?? '-' }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Alpaca Cash</dt>
-            <dd class="mt-1 font-semibold">{{ money(dashboard?.reconciliation.brokerCash) }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Internal Cash</dt>
-            <dd class="mt-1 font-semibold">{{ money(dashboard?.reconciliation.internalCash) }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Cash Difference</dt>
-            <dd
-              class="mt-1 font-semibold"
-              :class="pnlClass(dashboard?.reconciliation.cashDifference)"
-            >
-              {{ money(dashboard?.reconciliation.cashDifference) }}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Checked</dt>
-            <dd class="mt-1 font-semibold">{{ dateTime(dashboard?.reconciliation.checkedAt) }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Open Positions</dt>
-            <dd class="mt-1 font-semibold">{{ dashboard?.reconciliation.openPositionCount ?? 0 }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase text-slate-500">Pending Paper Orders</dt>
-            <dd class="mt-1 font-semibold">{{ dashboard?.reconciliation.pendingOrderCount ?? 0 }}</dd>
           </div>
         </dl>
-      </section>
+      </UiCard>
     </div>
 
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="border-b border-slate-800 px-4 py-3">
-        <h2 class="font-semibold">PAPER TRADING Alpaca Open Broker Orders</h2>
-      </div>
-      <DataTable
-        :empty="!(dashboard?.brokerOpenOrders.length)"
-        empty-label="No open Alpaca paper broker orders"
-        :columns="['Broker Order', 'Status', 'Fills', 'Rejected', 'Error']"
-      >
-        <tr
-          v-for="order in dashboard?.brokerOpenOrders ?? []"
-          :key="order.broker_order_id"
-          class="border-t border-slate-800"
-        >
-          <td class="px-4 py-3 font-medium">{{ order.broker_order_id }}</td>
-          <td class="px-4 py-3"><StatusPill :label="order.status" /></td>
-          <td class="px-4 py-3">{{ Array.isArray(order.fills) ? order.fills.length : 0 }}</td>
-          <td class="px-4 py-3">{{ order.rejected_reason ?? '-' }}</td>
-          <td class="px-4 py-3">{{ order.error_message ?? '-' }}</td>
-        </tr>
-      </DataTable>
-    </section>
-
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="border-b border-slate-800 px-4 py-3">
-        <h2 class="font-semibold">PAPER TRADING Persisted Orders</h2>
-      </div>
-      <DataTable
-        :empty="!(dashboard?.orders.length)"
-        empty-label="No paper orders"
-        :columns="['Symbol', 'Side', 'Type', 'Qty', 'Filled', 'Avg Fill', 'Status']"
-      >
-        <tr
-          v-for="order in dashboard?.orders ?? []"
-          :key="order.id"
-          class="border-t border-slate-800"
-        >
-          <td class="px-4 py-3 font-medium">{{ order.symbol }}</td>
-          <td class="px-4 py-3">{{ order.side }}</td>
-          <td class="px-4 py-3">{{ order.orderType }}</td>
-          <td class="px-4 py-3">{{ order.quantity }}</td>
-          <td class="px-4 py-3">{{ order.filledQuantity }}</td>
-          <td class="px-4 py-3">{{ money(order.averageFillPrice) }}</td>
-          <td class="px-4 py-3"><StatusPill :label="order.status" /></td>
-        </tr>
-      </DataTable>
-    </section>
-
     <div class="grid gap-6 xl:grid-cols-2">
-      <section class="rounded border border-slate-800 bg-slate-900">
-        <div class="border-b border-slate-800 px-4 py-3">
-          <h2 class="font-semibold">PAPER TRADING Fills</h2>
-        </div>
+      <UiCard
+        title="Persisted Orders"
+        body-class="p-0"
+      >
         <DataTable
-          :empty="!(dashboard?.fills.length)"
-          empty-label="No paper fills"
-          :columns="['Quantity', 'Price', 'Fee', 'Type', 'Filled']"
+          :empty="!(dashboard?.orders.length)"
+          empty-label="No paper orders"
+          :columns="['Symbol', 'Side', 'Type', 'Qty', 'Filled', 'Avg Fill', 'Status']"
         >
           <tr
-            v-for="fill in dashboard?.fills ?? []"
-            :key="fill.id"
-            class="border-t border-slate-800"
+            v-for="order in dashboard?.orders ?? []"
+            :key="order.id"
+            class="border-t border-slate-800/80 hover:bg-slate-800/40"
           >
-            <td class="px-4 py-3">{{ fill.quantity }}</td>
-            <td class="px-4 py-3">{{ money(fill.price) }}</td>
-            <td class="px-4 py-3">{{ money(fill.fee) }}</td>
-            <td class="px-4 py-3">{{ fill.fillType }}</td>
-            <td class="px-4 py-3">{{ dateTime(fill.filledAt) }}</td>
+            <td class="px-4 py-3 font-semibold text-white">{{ order.symbol }}</td>
+            <td class="px-4 py-3">{{ order.side }}</td>
+            <td class="px-4 py-3">{{ order.orderType }}</td>
+            <td class="px-4 py-3 tabular-nums">{{ order.quantity }}</td>
+            <td class="px-4 py-3 tabular-nums">{{ order.filledQuantity }}</td>
+            <td class="px-4 py-3 tabular-nums">{{ money(order.averageFillPrice) }}</td>
+            <td class="px-4 py-3"><StatusPill :label="order.status" /></td>
           </tr>
         </DataTable>
-      </section>
+      </UiCard>
 
-      <section class="rounded border border-slate-800 bg-slate-900">
-        <div class="border-b border-slate-800 px-4 py-3">
-          <h2 class="font-semibold">PAPER TRADING Positions</h2>
-        </div>
+      <UiCard
+        title="Positions"
+        body-class="p-0"
+      >
         <DataTable
           :empty="!(dashboard?.positions.length)"
           empty-label="No paper positions"
@@ -327,27 +280,27 @@
           <tr
             v-for="position in dashboard?.positions ?? []"
             :key="position.id"
-            class="border-t border-slate-800"
+            class="border-t border-slate-800/80 hover:bg-slate-800/40"
           >
-            <td class="px-4 py-3 font-medium">{{ position.symbol }}</td>
-            <td class="px-4 py-3">{{ position.quantity }}</td>
-            <td class="px-4 py-3">{{ money(position.averageEntryPrice) }}</td>
-            <td class="px-4 py-3">{{ money(position.lastPrice) }}</td>
+            <td class="px-4 py-3 font-semibold text-white">{{ position.symbol }}</td>
+            <td class="px-4 py-3 tabular-nums">{{ position.quantity }}</td>
+            <td class="px-4 py-3 tabular-nums">{{ money(position.averageEntryPrice) }}</td>
+            <td class="px-4 py-3 tabular-nums">{{ money(position.lastPrice) }}</td>
             <td
-              class="px-4 py-3"
+              class="px-4 py-3 tabular-nums font-medium"
               :class="pnlClass(position.realizedPnl)"
             >
               {{ money(position.realizedPnl) }}
             </td>
             <td
-              class="px-4 py-3"
+              class="px-4 py-3 tabular-nums font-medium"
               :class="pnlClass(position.unrealizedPnl)"
             >
               {{ money(position.unrealizedPnl) }}
             </td>
           </tr>
         </DataTable>
-      </section>
+      </UiCard>
     </div>
   </div>
 </template>
@@ -463,24 +416,62 @@ type Dashboard = {
   fills: Fill[];
   positions: Position[];
 };
+type Snapshot = {
+  id: string;
+  cashBalance: string;
+  portfolioEquity: string;
+  realizedPnl: string;
+  unrealizedPnl: string;
+  dailyPnl: string;
+  snapshotReason: string;
+  createdAt: string;
+};
+type ChartPoint = { label: string; value: number };
 
 const { apiFetch } = useApi();
 const message = ref('');
 const busy = ref(false);
 const refreshing = ref(false);
+const actionError = ref('');
 const { data: dashboard, error, refresh } = await useAsyncData<Dashboard>('paper-dashboard', () => apiFetch('/dashboard/paper'));
+const { data: snapshots, error: snapshotsError, refresh: refreshSnapshots } = await useAsyncData<{ snapshots: Snapshot[] }>('dashboard-portfolio-snapshots', () => apiFetch('/portfolio/snapshots?limit=50'));
 useAutoRefresh(refresh, 5000);
+
+const orderedSnapshots = computed(() => [...(snapshots.value?.snapshots ?? [])].reverse());
+const latestSnapshot = computed(() => orderedSnapshots.value.at(-1));
+const equityHistory = computed<ChartPoint[]>(() => orderedSnapshots.value.map((snapshot) => ({ label: snapshot.createdAt, value: number(snapshot.portfolioEquity) })));
+const portfolioValueTrend = computed<ChartPoint[]>(() => equityHistory.value);
+const pnlBars = computed(() => [
+  { label: 'Realized', value: number(dashboard.value?.portfolio.realizedPnl) },
+  { label: 'Unrealized', value: number(dashboard.value?.portfolio.unrealizedPnl) },
+  { label: 'Daily', value: number(dashboard.value?.portfolio.dailyPnl) },
+]);
+const cashEquityPercent = computed(() => {
+  const cash = number(dashboard.value?.portfolio.cashBalance);
+  const equity = number(dashboard.value?.portfolio.portfolioEquity);
+  return equity > 0 ? (cash / equity) * 100 : 0;
+});
+const positionCapacityPercent = computed(() => Math.min(100, ((dashboard.value?.positions.length ?? 0) / 10) * 100));
+const proposalPressurePercent = computed(() => Math.min(100, ((dashboard.value?.pendingProposals.length ?? 0) / 10) * 100));
+const reconciliationItems = computed(() => [
+  { label: 'Status', value: dashboard.value?.reconciliation.status ?? 'UNKNOWN', className: reconciliationClass(dashboard.value?.reconciliation.status) },
+  { label: 'Source of Truth', value: dashboard.value?.reconciliation.sourceOfTruth ?? '-', className: '' },
+  { label: 'Alpaca Cash', value: money(dashboard.value?.reconciliation.brokerCash), className: '' },
+  { label: 'Internal Cash', value: money(dashboard.value?.reconciliation.internalCash), className: '' },
+  { label: 'Cash Difference', value: money(dashboard.value?.reconciliation.cashDifference), className: pnlClass(dashboard.value?.reconciliation.cashDifference) },
+  { label: 'Checked', value: dateTime(dashboard.value?.reconciliation.checkedAt), className: '' },
+  { label: 'Open Positions', value: String(dashboard.value?.reconciliation.openPositionCount ?? 0), className: '' },
+  { label: 'Pending Paper Orders', value: String(dashboard.value?.reconciliation.pendingOrderCount ?? 0), className: '' },
+]);
 
 async function refreshDashboard() {
   refreshing.value = true;
   try {
-    await refresh();
+    await Promise.all([refresh(), refreshSnapshots()]);
   } finally {
     refreshing.value = false;
   }
 }
-
-const actionError = ref('');
 
 function describeError(err: unknown): string {
   return err instanceof Error && err.message ? err.message : 'Request failed. Please try again.';
@@ -538,8 +529,17 @@ async function toggleKillSwitch() {
   }
 }
 
+function number(value?: string | null): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function money(value?: string | null): string {
-  return value ? `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-';
+  return value ? moneyNumber(number(value)) : '-';
+}
+
+function moneyNumber(value: number): string {
+  return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function dateTime(value?: string | null): string {
@@ -547,7 +547,7 @@ function dateTime(value?: string | null): string {
 }
 
 function pnlClass(value?: string | null): string {
-  return Number(value ?? 0) < 0 ? 'text-rose-300' : 'text-emerald-300';
+  return number(value) < 0 ? 'text-rose-300' : 'text-emerald-300';
 }
 
 function statusClass(value?: string): string {

@@ -1,51 +1,38 @@
 <template>
   <div class="space-y-6">
     <div>
-      <h1 class="text-2xl font-semibold">Audit Log</h1>
-      <p class="mt-1 text-sm text-slate-400">Owner actions and system events.</p>
+      <p class="text-xs font-bold uppercase tracking-widest text-amber-200">PAPER TRADING ONLY</p>
+      <h1 class="page-title">Audit Log</h1>
+      <p class="page-subtitle">Owner actions and paper-trading system events for reviewability.</p>
     </div>
     <div
       v-if="error"
-      class="rounded border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100"
+      class="notice-error"
     >
       Failed to load audit log. Please refresh the page.
     </div>
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="text-left text-xs uppercase text-slate-500">
-            <tr>
-              <th class="px-4 py-3">Time</th>
-              <th class="px-4 py-3">Event</th>
-              <th class="px-4 py-3">Action</th>
-              <th class="px-4 py-3">Actor</th>
-              <th class="px-4 py-3">Entity</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="log in data?.auditLogs ?? []"
-              :key="log.id"
-              class="border-t border-slate-800"
-            >
-              <td class="px-4 py-3">{{ date(log.createdAt) }}</td>
-              <td class="px-4 py-3 font-medium">{{ log.eventType }}</td>
-              <td class="px-4 py-3">{{ log.action }}</td>
-              <td class="px-4 py-3">{{ log.actorEmail ?? '-' }}</td>
-              <td class="px-4 py-3">{{ log.entityType ?? '-' }}</td>
-            </tr>
-            <tr v-if="!(data?.auditLogs?.length)">
-              <td
-                colspan="5"
-                class="px-4 py-8 text-center text-slate-500"
-              >
-                No audit entries
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <UiCard
+      title="Recent Audit Entries"
+      body-class="p-0"
+    >
+      <DataTable
+        :empty="!(data?.auditLogs?.length)"
+        empty-label="No audit entries"
+        :columns="['Time', 'Event', 'Action', 'Actor', 'Entity']"
+      >
+        <tr
+          v-for="log in data?.auditLogs ?? []"
+          :key="log.id"
+          class="border-t border-slate-800/80 hover:bg-slate-800/40"
+        >
+          <td class="px-4 py-3 text-slate-400">{{ date(log.createdAt) }}</td>
+          <td class="px-4 py-3 font-semibold text-white">{{ log.eventType }}</td>
+          <td class="px-4 py-3 text-slate-300">{{ log.action }}</td>
+          <td class="px-4 py-3">{{ log.actorEmail ?? '-' }}</td>
+          <td class="px-4 py-3"><StatusPill :label="log.entityType ?? 'SYSTEM'" /></td>
+        </tr>
+      </DataTable>
+    </UiCard>
   </div>
 </template>
 

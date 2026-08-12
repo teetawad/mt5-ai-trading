@@ -1,11 +1,12 @@
 <template>
   <div class="space-y-6">
     <div>
-      <h1 class="text-2xl font-semibold">Strategy Signals</h1>
-      <p class="mt-1 text-sm text-slate-400">Signals emitted by strategies before proposal creation.</p>
+      <p class="text-xs font-bold uppercase tracking-widest text-amber-200">PAPER TRADING ONLY</p>
+      <h1 class="page-title">Strategy Signals</h1>
+      <p class="page-subtitle">Signals emitted by strategies before proposal creation. AI analysis and Risk Engine decisions remain visually separate.</p>
     </div>
 
-    <section class="rounded border border-emerald-500/40 bg-slate-900 p-4">
+    <section class="rounded-lg border border-emerald-400/40 bg-slate-900/70 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.28)]">
       <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
         <div>
           <div class="text-xs font-semibold uppercase tracking-wide text-emerald-300">AI ASSISTED ANALYSIS / PAPER ONLY</div>
@@ -22,7 +23,7 @@
           <span class="text-xs uppercase text-slate-500">US stock symbol</span>
           <select
             v-model="aiForm.symbol"
-            class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+            class="field-input"
             required
           >
             <option
@@ -38,7 +39,7 @@
           <span class="text-xs uppercase text-slate-500">Decision mode</span>
           <select
             v-model="aiForm.side"
-            class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+            class="field-input"
           >
             <option value="AUTO">AUTO</option>
             <option value="BUY">BUY</option>
@@ -50,14 +51,14 @@
           <span class="text-xs uppercase text-slate-500">Max quantity</span>
           <input
             v-model="aiForm.quantity"
-            class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+            class="field-input"
             inputmode="decimal"
             pattern="^\d+(\.\d+)?$"
             required
           >
         </label>
         <button
-          class="mt-5 rounded border border-emerald-500/50 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-500/10 disabled:opacity-40"
+          class="mt-5 rounded-lg border border-emerald-400/50 bg-emerald-400/10 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/20 disabled:opacity-40"
           :disabled="aiBusy || !(options?.symbols?.length)"
           type="submit"
         >
@@ -67,16 +68,38 @@
 
       <div
         v-if="aiError"
-        class="mt-4 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100"
+        class="notice-error mt-4"
       >
         {{ aiError }}
+      </div>
+
+      <div class="mt-4 grid gap-4 lg:grid-cols-[1fr_0.8fr]">
+        <MiniLineChart
+          title="Selected Symbol Sparkline"
+          :points="priceSparkline"
+          :value-label="sparklineLabel"
+          tone="sky"
+        />
+        <div class="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+          <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Analysis Flow</p>
+          <div class="mt-4 grid gap-3 sm:grid-cols-2">
+            <div class="rounded-lg border border-emerald-400/30 bg-emerald-400/10 p-3">
+              <p class="text-xs font-bold uppercase tracking-widest text-emerald-300">AI Decision</p>
+              <p class="mt-2 text-sm text-slate-300">Model analysis can suggest BUY, SELL, or HOLD.</p>
+            </div>
+            <div class="rounded-lg border border-sky-400/30 bg-sky-400/10 p-3">
+              <p class="text-xs font-bold uppercase tracking-widest text-sky-300">Risk Engine Decision</p>
+              <p class="mt-2 text-sm text-slate-300">Rules decide whether a proposal can proceed to owner approval.</p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div
         v-if="aiResult && aiResult.aiDecision"
         class="mt-4 grid gap-4 lg:grid-cols-2"
       >
-        <div class="rounded border border-slate-800 bg-slate-950 p-4">
+        <div class="rounded-lg border border-emerald-400/30 bg-slate-950/70 p-4">
           <div class="flex items-start justify-between gap-3">
             <div>
               <div class="text-xs font-semibold uppercase tracking-wide text-emerald-300">AI Decision</div>
@@ -143,7 +166,7 @@
           </div>
         </div>
 
-        <div class="rounded border border-slate-800 bg-slate-950 p-4">
+        <div class="rounded-lg border border-sky-400/30 bg-slate-950/70 p-4">
           <div class="flex items-start justify-between gap-3">
             <div>
               <div class="text-xs font-semibold uppercase tracking-wide text-sky-300">Risk Engine Decision</div>
@@ -197,6 +220,16 @@
             </div>
           </dl>
 
+          <div class="mt-4">
+            <ProgressMeter
+              label="Daily Loss Used vs Limit"
+              :percent="dailyLossPercent(aiResult)"
+              :value-label="dailyLossStatus(aiResult)"
+              :status-label="riskDecision(aiResult)"
+              helper="Uses Phase 22 risk snapshot fields when present."
+            />
+          </div>
+
           <div
             v-if="aiResult.proposal"
             class="mt-4 rounded border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-100"
@@ -219,7 +252,7 @@
       </div>
     </section>
 
-    <section class="rounded border border-sky-500/40 bg-slate-900 p-4">
+    <section class="rounded-lg border border-sky-400/40 bg-slate-900/70 p-4 shadow-[0_18px_60px_rgba(2,6,23,0.28)]">
       <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
         <div>
           <div class="text-xs font-semibold uppercase tracking-wide text-sky-300">MANUAL TEST / PAPER ONLY</div>
@@ -236,7 +269,7 @@
           <span class="text-xs uppercase text-slate-500">US stock symbol</span>
           <select
             v-model="form.symbol"
-            class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+            class="field-input"
             required
           >
             <option
@@ -252,7 +285,7 @@
           <span class="text-xs uppercase text-slate-500">Side</span>
           <select
             v-model="form.side"
-            class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+            class="field-input"
           >
             <option value="BUY">BUY</option>
             <option value="SELL">SELL</option>
@@ -262,14 +295,14 @@
           <span class="text-xs uppercase text-slate-500">Quantity</span>
           <input
             v-model="form.quantity"
-            class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+            class="field-input"
             inputmode="decimal"
             pattern="^\d+(\.\d+)?$"
             required
           >
         </label>
         <button
-          class="mt-5 rounded border border-sky-500/50 px-4 py-2 text-sm font-semibold text-sky-100 hover:bg-sky-500/10 disabled:opacity-40"
+          class="btn-primary mt-5"
           :disabled="busy || !(options?.symbols?.length)"
           type="submit"
         >
@@ -279,7 +312,7 @@
 
       <div
         v-if="message"
-        class="mt-4 rounded border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-100"
+        class="mt-4 rounded-lg border border-emerald-400/40 bg-emerald-400/10 p-3 text-sm text-emerald-100"
       >
         {{ message }}
         <NuxtLink
@@ -292,50 +325,35 @@
       </div>
       <div
         v-if="submitError"
-        class="mt-4 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100"
+        class="notice-error mt-4"
       >
         {{ submitError }}
       </div>
     </section>
 
-    <section class="rounded border border-slate-800 bg-slate-900">
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="text-left text-xs uppercase text-slate-500">
-            <tr>
-              <th class="px-4 py-3">Symbol</th>
-              <th class="px-4 py-3">Side</th>
-              <th class="px-4 py-3">Reference</th>
-              <th class="px-4 py-3">Confidence</th>
-              <th class="px-4 py-3">Status</th>
-              <th class="px-4 py-3">Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="signal in data?.signals ?? []"
-              :key="signal.id"
-              class="border-t border-slate-800"
-            >
-              <td class="px-4 py-3 font-medium">{{ signal.symbol }}</td>
-              <td class="px-4 py-3">{{ signal.side }}</td>
-              <td class="px-4 py-3">{{ money(signal.referencePrice) }}</td>
-              <td class="px-4 py-3">{{ signal.confidence ?? '-' }}</td>
-              <td class="px-4 py-3"><StatusPill :label="signal.status" /></td>
-              <td class="px-4 py-3">{{ date(signal.createdAt) }}</td>
-            </tr>
-            <tr v-if="!(data?.signals?.length)">
-              <td
-                colspan="6"
-                class="px-4 py-8 text-center text-slate-500"
-              >
-                No signals
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <UiCard
+      title="Recent Signals"
+      body-class="p-0"
+    >
+      <DataTable
+        :empty="!(data?.signals?.length)"
+        empty-label="No signals"
+        :columns="['Symbol', 'Side', 'Reference', 'Confidence', 'Status', 'Created']"
+      >
+        <tr
+          v-for="signal in data?.signals ?? []"
+          :key="signal.id"
+          class="border-t border-slate-800/80 hover:bg-slate-800/40"
+        >
+          <td class="px-4 py-3 font-semibold text-white">{{ signal.symbol }}</td>
+          <td class="px-4 py-3">{{ signal.side }}</td>
+          <td class="px-4 py-3 tabular-nums">{{ money(signal.referencePrice) }}</td>
+          <td class="px-4 py-3 tabular-nums">{{ signal.confidence ?? '-' }}</td>
+          <td class="px-4 py-3"><StatusPill :label="signal.status" /></td>
+          <td class="px-4 py-3 text-slate-400">{{ date(signal.createdAt) }}</td>
+        </tr>
+      </DataTable>
+    </UiCard>
   </div>
 </template>
 
@@ -352,6 +370,7 @@ type Signal = {
 type ManualOptions = {
   symbols: string[];
 };
+type MarketBar = { close: string; timestamp: string };
 type ManualSignalResult = {
   signal: Signal;
   proposal: {
@@ -428,6 +447,7 @@ const submitError = ref('');
 const aiError = ref('');
 const createdProposalId = ref('');
 const aiResult = ref<AiDecisionResult | null>(null);
+const priceBars = ref<MarketBar[]>([]);
 const form = reactive({
   symbol: '',
   side: 'BUY' as 'BUY' | 'SELL',
@@ -449,6 +469,29 @@ watchEffect(() => {
     aiForm.symbol = options.value.symbols[0];
   }
 });
+
+watch(() => aiForm.symbol, async (symbol) => {
+  if (!symbol) {
+    priceBars.value = [];
+    return;
+  }
+  await loadSparkline(symbol);
+}, { immediate: true });
+
+const priceSparkline = computed(() => priceBars.value.map((bar) => ({ label: bar.timestamp, value: numberValue(bar.close) })));
+const sparklineLabel = computed(() => {
+  const latest = priceBars.value.at(-1);
+  return latest ? money(latest.close) : `${aiForm.symbol || 'Symbol'} history unavailable`;
+});
+
+async function loadSparkline(symbol: string) {
+  const start = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    priceBars.value = await apiFetch<MarketBar[]>(`/market-data/bars/${symbol}?timeframe=1Day&start=${encodeURIComponent(start)}&limit=30`);
+  } catch {
+    priceBars.value = [];
+  }
+}
 
 async function analyzeWithAi() {
   aiBusy.value = true;
@@ -499,7 +542,7 @@ async function createManualSignal() {
 }
 
 function money(value: string): string {
-  return `$${Number(value).toFixed(2)}`;
+  return `$${numberValue(value).toFixed(2)}`;
 }
 function maybeMoney(value: string | null | undefined): string {
   return value ? money(value) : '-';
@@ -563,6 +606,16 @@ function pendingOrderStatus(result: AiDecisionResult): string {
   if (!risk) return '-';
   const count = risk.conflictingPendingOrders?.length ?? 0;
   return count > 0 ? `BLOCKED (${count})` : 'CLEAR';
+}
+function dailyLossPercent(result: AiDecisionResult): number {
+  const risk = phase22(result);
+  const used = numberValue(risk?.dailyLossUsed);
+  const limit = numberValue(risk?.dailyLossLimit);
+  return limit > 0 ? (used / limit) * 100 : 0;
+}
+function numberValue(value: string | null | undefined): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 function date(value: string): string {
   return new Date(value).toLocaleString();
