@@ -124,8 +124,9 @@ type SnapshotKey = 'cashBalance' | 'portfolioEquity' | 'realizedPnl' | 'unrealiz
 
 const { apiFetch } = useApi();
 const { data: portfolio, error: portfolioError, refresh } = await useAsyncData<Portfolio>('portfolio-page-summary', () => apiFetch('/portfolio'));
-const { data: snapshots, error: snapshotsError } = await useAsyncData<{ snapshots: Snapshot[] }>('portfolio-page-snapshots', () => apiFetch('/portfolio/snapshots?limit=50'));
+const { data: snapshots, error: snapshotsError, refresh: refreshSnapshots } = await useAsyncData<{ snapshots: Snapshot[] }>('portfolio-page-snapshots', () => apiFetch('/portfolio/snapshots?limit=50'));
 useAutoRefresh(refresh, 5000);
+useAutoRefresh(refreshSnapshots, 5000);
 
 const orderedSnapshots = computed(() => [...(snapshots.value?.snapshots ?? [])].reverse());
 const cashEquityPercent = computed(() => {

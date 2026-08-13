@@ -45,7 +45,13 @@
           class="grid gap-1 px-4 py-3 md:grid-cols-3"
         >
           <dt class="text-sm text-slate-400">{{ setting.key }}</dt>
-          <dd class="text-sm font-semibold text-slate-100 md:col-span-1">{{ setting.value }}</dd>
+          <dd class="text-sm font-semibold text-slate-100 md:col-span-1">
+            {{ setting.value }}
+            <span
+              v-if="percentLabel(setting.key, setting.value)"
+              class="ml-1 font-normal text-slate-500"
+            >({{ percentLabel(setting.key, setting.value) }})</span>
+          </dd>
           <dd class="text-sm text-slate-500">{{ setting.description ?? '-' }}</dd>
         </div>
       </dl>
@@ -61,6 +67,29 @@ const message = ref('');
 const actionError = ref('');
 const { data: settings, refresh: refreshSettings } = await useAsyncData<Setting[]>('settings-page', () => apiFetch('/settings'));
 const { data: killSwitch, refresh: refreshKillSwitch } = await useAsyncData<KillSwitch>('settings-kill-switch-page', () => apiFetch('/settings/kill-switch'));
+
+// max_portfolio_concentration_pct / price_drift_threshold_pct are stored as
+// a 0-1 FRACTION (0.20 = 20%); phase22_* thresholds are stored as a
+// whole-number percent (0.5 = 0.5%) — two conventions coexist in
+// system_settings (see docs/RISK_ENGINE.md), so the raw value alone is
+// ambiguous without knowing which bucket a key falls in.
+const FRACTION_PERCENT_KEYS = new Set(['max_portfolio_concentration_pct', 'price_drift_threshold_pct']);
+const WHOLE_PERCENT_KEYS = new Set([
+  'phase22_stop_loss_pct',
+  'phase22_take_profit_pct',
+  'phase22_max_bid_ask_spread_pct',
+  'phase22_estimated_slippage_pct',
+  'phase22_max_estimated_slippage_pct',
+]);
+
+function percentLabel(key: string, value: unknown): string {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return '';
+  if (FRACTION_PERCENT_KEYS.has(key)) return `${(parsed * 100).toFixed(2)}%`;
+  if (WHOLE_PERCENT_KEYS.has(key)) return `${parsed.toFixed(2)}%`;
+  return '';
+}
 
 async function toggleKillSwitch() {
   const enabled = !(killSwitch.value?.enabled ?? true);

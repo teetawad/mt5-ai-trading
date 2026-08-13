@@ -68,7 +68,13 @@
             class="grid gap-1 px-4 py-3 md:grid-cols-2"
           >
             <dt class="text-sm text-slate-400">{{ setting.key }}</dt>
-            <dd class="text-sm font-semibold text-slate-100">{{ setting.value }}</dd>
+            <dd class="text-sm font-semibold text-slate-100">
+              {{ setting.value }}
+              <span
+                v-if="percentLabel(setting.key, setting.value)"
+                class="ml-1 font-normal text-slate-500"
+              >({{ percentLabel(setting.key, setting.value) }})</span>
+            </dd>
           </div>
           <div
             v-if="!(settings?.length)"
@@ -143,6 +149,32 @@ const failedRuleDistribution = computed(() => {
   }
   return [...counts.entries()].map(([label, value]) => ({ label, value }));
 });
+
+// max_portfolio_concentration_pct and price_drift_threshold_pct are stored
+// as a 0-1 FRACTION of portfolio/price (0.20 = 20%); phase22_* thresholds
+// (not currently listed on this page, but shared convention with
+// settings.vue) are stored as a whole-number percent (0.5 = 0.5%). Two
+// conventions coexist in system_settings — see docs/RISK_ENGINE.md — so the
+// raw stored value alone is ambiguous without knowing which bucket a key is
+// in. This renders the human percent next to the raw value instead of
+// silently guessing one convention for both.
+const FRACTION_PERCENT_KEYS = new Set(['max_portfolio_concentration_pct', 'price_drift_threshold_pct']);
+const WHOLE_PERCENT_KEYS = new Set([
+  'phase22_stop_loss_pct',
+  'phase22_take_profit_pct',
+  'phase22_max_bid_ask_spread_pct',
+  'phase22_estimated_slippage_pct',
+  'phase22_max_estimated_slippage_pct',
+]);
+
+function percentLabel(key: string, value: unknown): string {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return '';
+  if (FRACTION_PERCENT_KEYS.has(key)) return `${(parsed * 100).toFixed(2)}%`;
+  if (WHOLE_PERCENT_KEYS.has(key)) return `${parsed.toFixed(2)}%`;
+  return '';
+}
 
 function settingNumber(key: string): number {
   const value = settings.value?.find((setting) => setting.key === key)?.value;

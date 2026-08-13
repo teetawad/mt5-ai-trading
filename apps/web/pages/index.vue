@@ -89,9 +89,9 @@
         tone="sky"
       />
       <MiniLineChart
-        title="Portfolio Value Trend"
+        title="Portfolio Value (Historical Snapshots)"
         :points="portfolioValueTrend"
-        :value-label="money(latestSnapshot?.portfolioEquity ?? dashboard?.portfolio.portfolioEquity)"
+        :value-label="latestSnapshot ? `${money(latestSnapshot.portfolioEquity)} as of ${dateTime(latestSnapshot.createdAt)}` : 'No snapshot yet'"
         tone="emerald"
       />
       <BarChart
@@ -275,7 +275,7 @@
         <DataTable
           :empty="!(dashboard?.positions.length)"
           empty-label="No paper positions"
-          :columns="['Symbol', 'Qty', 'Entry', 'Last', 'Realized', 'Unrealized']"
+          :columns="['Symbol', 'Qty', 'Entry', 'Last', 'Market Value', 'Realized (All-Time)', 'Unrealized']"
         >
           <tr
             v-for="position in dashboard?.positions ?? []"
@@ -286,9 +286,11 @@
             <td class="px-4 py-3 tabular-nums">{{ position.quantity }}</td>
             <td class="px-4 py-3 tabular-nums">{{ money(position.averageEntryPrice) }}</td>
             <td class="px-4 py-3 tabular-nums">{{ money(position.lastPrice) }}</td>
+            <td class="px-4 py-3 tabular-nums font-medium">{{ money(position.marketValue) }}</td>
             <td
               class="px-4 py-3 tabular-nums font-medium"
               :class="pnlClass(position.realizedPnl)"
+              title="Cumulative realized P&L booked on this symbol across all closed lots, not just the current open position."
             >
               {{ money(position.realizedPnl) }}
             </td>
@@ -352,6 +354,7 @@ type Position = {
   lastPrice: string | null;
   realizedPnl: string;
   unrealizedPnl: string;
+  marketValue: string;
 };
 type MarketSnapshot = {
   symbol: string;
@@ -436,6 +439,7 @@ const actionError = ref('');
 const { data: dashboard, error, refresh } = await useAsyncData<Dashboard>('paper-dashboard', () => apiFetch('/dashboard/paper'));
 const { data: snapshots, error: snapshotsError, refresh: refreshSnapshots } = await useAsyncData<{ snapshots: Snapshot[] }>('dashboard-portfolio-snapshots', () => apiFetch('/portfolio/snapshots?limit=50'));
 useAutoRefresh(refresh, 5000);
+useAutoRefresh(refreshSnapshots, 5000);
 
 const orderedSnapshots = computed(() => [...(snapshots.value?.snapshots ?? [])].reverse());
 const latestSnapshot = computed(() => orderedSnapshots.value.at(-1));

@@ -55,6 +55,18 @@ const DECIMAL_SETTING_KEYS = new Set([
   'max_daily_loss_usd',
 ]);
 
+// These two are stored and consumed as a 0-1 FRACTION of portfolio/price
+// (e.g. "0.20" = 20%) — see riskConfig() in trade-proposal-service.ts, which
+// does `.mul(100)` before handing the value to the Python risk engine. A
+// caller that mistakenly PUTs "5" meaning "5%" would otherwise silently
+// produce a 500%-of-equity concentration cap that can never be breached —
+// this bound catches that at the API boundary instead of letting a risk
+// control go silently unenforceable.
+const FRACTION_SETTING_KEYS = new Set([
+  'price_drift_threshold_pct',
+  'max_portfolio_concentration_pct',
+]);
+
 function getRequestId(req: Request): string | null {
   return (req.headers['x-request-id'] as string | undefined) ?? null;
 }
@@ -99,6 +111,7 @@ function validateSettingValue(key: string, value: unknown): unknown | undefined 
 
   if (DECIMAL_SETTING_KEYS.has(key)) {
     if (typeof value !== 'string' || !/^\d+(\.\d+)?$/.test(value)) return undefined;
+    if (FRACTION_SETTING_KEYS.has(key) && Number(value) > 1) return undefined;
     return value;
   }
 

@@ -100,6 +100,20 @@ Values marked **CONFIGURE BEFORE USE** are development placeholders that the own
 - **Check:** `new_position_value / portfolio_equity <= max_concentration_pct`
 - **Threshold:** `max_portfolio_concentration_pct` (default: 20% — **CONFIGURE**)
 
+> **Unit convention note:** `system_settings` stores two different
+> percentage conventions and they must not be confused. `max_portfolio_concentration_pct`
+> and `price_drift_threshold_pct` are stored as a **0–1 fraction** (`0.20` =
+> 20%) — `riskConfig()` in `trade-proposal-service.ts` multiplies by 100
+> before handing the value to this engine. The `phase22_*` thresholds
+> (`phase22_stop_loss_pct`, `phase22_take_profit_pct`,
+> `phase22_max_bid_ask_spread_pct`, `phase22_estimated_slippage_pct`,
+> `phase22_max_estimated_slippage_pct`) are instead stored as a **whole-number
+> percent** (`0.5` = 0.5%) and passed through unconverted. The `PUT
+> /risk/settings/:key` API rejects values above `1` for the two
+> fraction-convention keys specifically to catch a value entered under the
+> wrong convention (e.g. `5` meant as "5%") before it silently becomes an
+> unenforceable 500% cap.
+
 ### Rule 11: MAX_OPEN_POSITIONS
 - **Description:** Number of symbols with non-zero positions must not exceed limit.
 - **Check:** `count(positions where quantity > 0) < max_open_positions`

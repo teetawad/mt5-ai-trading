@@ -15,7 +15,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from .provider import MarketDataProvider, SymbolNotFoundError
-from .snapshot import MarketSnapshot
+from .snapshot import MarketBar, MarketSnapshot
 
 
 class CSVMarketDataProvider(MarketDataProvider):
@@ -89,3 +89,39 @@ class CSVMarketDataProvider(MarketDataProvider):
 
     def tracked_symbols(self) -> list[str]:
         return list(self._rows.keys())
+
+    def get_historical_bars(
+        self,
+        symbol: str,
+        *,
+        timeframe: str,
+        start: str,
+        end: str | None = None,
+        limit: int = 100,
+    ) -> list[MarketBar]:
+        """Returns the real OHLCV rows already loaded from the symbol's CSV
+        file (see module docstring) — this is genuine historical data, not
+        synthesized, just not filtered by `timeframe`/`start`/`end` since the
+        CSV replay file only holds one fixed series per symbol.
+        """
+        if symbol not in self._rows:
+            raise SymbolNotFoundError(f"No CSV data for symbol: {symbol}")
+
+        all_rows = self._rows[symbol]
+        rows = all_rows[-limit:] if limit < len(all_rows) else all_rows
+        bars: list[MarketBar] = []
+        for row in rows:
+            timestamp = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+            close = Decimal(row.get("close", row.get("price", "0")))
+            bars.append(
+                MarketBar(
+                    symbol=symbol,
+                    open=Decimal(row["open"]) if row.get("open") else close,
+                    high=Decimal(row["high"]) if row.get("high") else close,
+                    low=Decimal(row["low"]) if row.get("low") else close,
+                    close=close,
+                    volume=int(row.get("volume", 0) or 0),
+                    timestamp=timestamp,
+                )
+            )
+        return bars

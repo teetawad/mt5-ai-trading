@@ -109,6 +109,26 @@ describe('risk API database routes', () => {
     expect(res.status).toBe(422);
   });
 
+  it.skipIf(SKIP)('rejects a fraction-convention setting entered as a whole percent', async () => {
+    // max_portfolio_concentration_pct is stored as a 0-1 fraction (0.20 =
+    // 20%). "5" typed meaning "5%" would otherwise silently become an
+    // unenforceable 500%-of-equity cap once riskConfig() multiplies by 100.
+    const res = await request(app)
+      .put('/risk/settings/max_portfolio_concentration_pct')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ value: '5' });
+    expect(res.status).toBe(422);
+  });
+
+  it.skipIf(SKIP)('accepts a fraction-convention setting within 0-1', async () => {
+    const res = await request(app)
+      .put('/risk/settings/max_portfolio_concentration_pct')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ value: '0.25' });
+    expect(res.status).toBe(200);
+    expect(res.body.value).toBe('0.25');
+  });
+
   it.skipIf(SKIP)('updates kill switch and audit logs it', async () => {
     const res = await request(app)
       .put('/risk/kill-switch')

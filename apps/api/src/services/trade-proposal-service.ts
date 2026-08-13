@@ -513,6 +513,23 @@ export async function createSignalAndProposal(
       portfolioSnapshot: { ...riskResult.portfolio_snapshot },
     });
 
+    await createAuditLog(client, {
+      eventType: 'RISK_CHECK_COMPLETED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'risk_check',
+      entityId: riskCheck.id,
+      action: `RISK_CHECK_${combinedRiskResult.result}_PRE_PROPOSAL`,
+      afterData: {
+        stage: 'PRE_PROPOSAL',
+        result: combinedRiskResult.result,
+        failedRules: combinedFailedRules,
+        reason: combinedRiskResult.reason,
+        signalId: signal.id,
+      },
+      requestId: actor.requestId ?? null,
+    });
+
     const proposal = await createProposal(client, {
       signalId: signal.id,
       strategyId: strategy.id,
@@ -804,6 +821,23 @@ export async function approveProposal(
       reason: combinedRiskResult.reason,
       marketSnapshot: { ...riskResult.market_snapshot },
       portfolioSnapshot: { ...riskResult.portfolio_snapshot },
+    });
+
+    await createAuditLog(client, {
+      eventType: 'RISK_CHECK_COMPLETED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'risk_check',
+      entityId: riskCheck.id,
+      action: `RISK_CHECK_${combinedRiskResult.result}_PRE_EXECUTION`,
+      afterData: {
+        stage: 'PRE_EXECUTION',
+        result: combinedRiskResult.result,
+        failedRules: combinedFailedRules,
+        reason: combinedRiskResult.reason,
+        proposalId: proposal.id,
+      },
+      requestId,
     });
 
     const approval = await createApproval(client, {

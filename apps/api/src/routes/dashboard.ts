@@ -6,8 +6,13 @@ import { listRecentFills } from '../db/repositories/fills';
 import { listOrders } from '../db/repositories/orders';
 import { listRiskChecks } from '../db/repositories/risk-checks';
 import { getSetting, getSettingValue } from '../db/repositories/system-settings';
-import { listProposals } from '../db/repositories/trade-proposals';
-import { getDayStartEquity, getLivePortfolioView, reconcileBracketOrders } from '../services/trade-execution-service';
+import { expireOpenProposals, listProposals } from '../db/repositories/trade-proposals';
+import {
+  ensureDayStartSnapshot,
+  getDayStartEquity,
+  getLivePortfolioView,
+  reconcileBracketOrders,
+} from '../services/trade-execution-service';
 import {
   getBrokerOpenOrders,
   getBrokerHealth,
@@ -57,6 +62,11 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
   const pool = getPool();
   const requestIdentifier = requestId(req);
   await reconcileBracketOrders(pool, undefined, requestIdentifier);
+  // Must run before listProposals below so a proposal whose expiresAt has
+  // passed is flipped to EXPIRED here too — otherwise this endpoint's
+  // "pending" count can disagree with GET /trade-proposals (which already
+  // expires-on-read) purely based on which endpoint the client hit last.
+  await expireOpenProposals(pool);
 
   const [
     view,
@@ -98,6 +108,7 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
     ? statusFromError(view.marketFetchError)
     : 'CONNECTED';
   const staleCount = view.marketSnapshots.filter((snapshot) => snapshot.is_stale).length;
+  await ensureDayStartSnapshot(pool, view);
   const dayStartEquity = await getDayStartEquity(
     pool,
     new Date(),

@@ -113,6 +113,56 @@ class TestSyntheticProvider:
         assert isinstance(data["bid"], str)
         assert isinstance(data["ask"], str)
 
+    # ── get_historical_bars (regression: was NotImplementedError → 501,
+    #    which is why the Signals page symbol chart said "history
+    #    unavailable" under the default synthetic provider) ──────────────
+
+    def test_historical_bars_returns_requested_count_ending_at_live_price(self):
+        # A long tick interval keeps the price stable across calls in this
+        # test — get_historical_bars() advances the price tick itself
+        # (like get_snapshot does) if the interval has elapsed, so the
+        # anchor price must be read *after* that call, not before it.
+        p = SyntheticMarketDataProvider(
+            symbols={"AAPL": Decimal("150.00")},
+            tick_interval_seconds=9999,
+            random_seed=42,
+        )
+
+        bars = p.get_historical_bars("AAPL", timeframe="1Day", start="2020-01-01", limit=10)
+        current = p.get_snapshot("AAPL").price
+
+        assert len(bars) == 10
+        assert bars[-1].close == current
+        assert all(isinstance(bar, MarketBar) for bar in bars)
+
+    def test_historical_bars_are_chronological(self):
+        p = self._make()
+        bars = p.get_historical_bars("AAPL", timeframe="1Day", start="2020-01-01", limit=5)
+        timestamps = [bar.timestamp for bar in bars]
+        assert timestamps == sorted(timestamps)
+
+    def test_historical_bars_stable_for_the_same_anchor_price(self):
+        # Repeated calls within the same tick window (price hasn't moved)
+        # must not reshuffle the chart into a different random shape.
+        p = SyntheticMarketDataProvider(
+            symbols={"AAPL": Decimal("150.00")},
+            tick_interval_seconds=9999,
+            random_seed=42,
+        )
+        first = p.get_historical_bars("AAPL", timeframe="1Day", start="2020-01-01", limit=10)
+        second = p.get_historical_bars("AAPL", timeframe="1Day", start="2020-01-01", limit=10)
+        assert [b.close for b in first] == [b.close for b in second]
+
+    def test_historical_bars_raises_for_unknown_symbol(self):
+        p = self._make()
+        with pytest.raises(SymbolNotFoundError):
+            p.get_historical_bars("ZZZZZ", timeframe="1Day", start="2020-01-01", limit=10)
+
+    def test_historical_bars_respects_limit_bounds(self):
+        p = self._make()
+        bars = p.get_historical_bars("AAPL", timeframe="1Day", start="2020-01-01", limit=1)
+        assert len(bars) == 1
+
 
 # ── CSVMarketDataProvider ─────────────────────────────────────────────────────
 
@@ -181,6 +231,37 @@ class TestCSVProvider:
             p = CSVMarketDataProvider(data_dir=data_dir, tick_interval_seconds=0)
             snap = p.get_snapshot("AAPL")
             assert snap.bid < snap.ask
+        finally:
+            tmp.cleanup()
+
+    def test_historical_bars_returns_real_rows_from_the_csv(self):
+        data_dir, tmp = self._make_csv_dir()
+        try:
+            p = CSVMarketDataProvider(data_dir=data_dir, tick_interval_seconds=0)
+            bars = p.get_historical_bars("AAPL", timeframe="5Min", start="2024-01-02", limit=100)
+            assert len(bars) == 5
+            assert bars[0].close == Decimal("185.50")
+            assert bars[-1].close == Decimal("189.50")
+        finally:
+            tmp.cleanup()
+
+    def test_historical_bars_respects_limit(self):
+        data_dir, tmp = self._make_csv_dir()
+        try:
+            p = CSVMarketDataProvider(data_dir=data_dir, tick_interval_seconds=0)
+            bars = p.get_historical_bars("AAPL", timeframe="5Min", start="2024-01-02", limit=2)
+            assert len(bars) == 2
+            # Most recent rows, not the earliest ones.
+            assert bars[-1].close == Decimal("189.50")
+        finally:
+            tmp.cleanup()
+
+    def test_historical_bars_raises_for_unknown_symbol(self):
+        data_dir, tmp = self._make_csv_dir()
+        try:
+            p = CSVMarketDataProvider(data_dir=data_dir, tick_interval_seconds=0)
+            with pytest.raises(SymbolNotFoundError):
+                p.get_historical_bars("ZZZZZ", timeframe="5Min", start="2024-01-02", limit=10)
         finally:
             tmp.cleanup()
 

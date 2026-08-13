@@ -59,7 +59,22 @@
       "Bash(DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run src/__tests__/portfolio.test.ts)",
       "Bash(xargs -I{} grep -l \"vitest\\\\|test:api\\\\|npm test\" {})",
       "Bash(DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run src/__tests__/portfolio.test.ts src/__tests__/positions.test.ts src/__tests__/dashboard.test.ts src/__tests__/position-accounting.test.ts --pool=forks --poolOptions.forks.singleFork)",
-      "Bash(curl -s -o /dev/null -w \"web HTTP %{http_code}\\\\n\" -L http://localhost:3000/)"
+      "Bash(curl -s -o /dev/null -w \"web HTTP %{http_code}\\\\n\" -L http://localhost:3000/)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_market_data.py -q)",
+      "Bash(.venv/Scripts/python.exe -m ruff check market_data/)",
+      "Bash(.venv/Scripts/python.exe -m ruff check market_data/ tests/test_market_data.py)",
+      "Bash(.venv/Scripts/python.exe -m mypy market_data/)",
+      "Bash(npx eslint *)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx tsx src/db/migrate-cli.ts)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run src/__tests__/db/triggers.test.ts src/__tests__/db/system-settings.test.ts src/__tests__/auth/auth-routes.test.ts)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run --exclude \"**/db/triggers.test.ts\" --exclude \"**/db/system-settings.test.ts\" --exclude \"**/auth/auth-routes.test.ts\")",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run --exclude \"**/db/triggers.test.ts\" --exclude \"**/db/system-settings.test.ts\" --exclude \"**/auth/auth-routes.test.ts\" --pool=forks --poolOptions.forks.singleFork)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run --pool=forks --poolOptions.forks.singleFork)",
+      "Bash(npx vitest *)",
+      "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run --no-file-parallelism)",
+      "Bash(npx nuxt *)",
+      "Bash(echo \"EXIT CODE: $?\")"
     ]
   }
 }

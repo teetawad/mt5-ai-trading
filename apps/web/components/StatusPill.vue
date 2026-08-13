@@ -17,6 +17,11 @@ const classes = computed(() => {
   if (label.includes('REJECT') || label.includes('ERROR') || label.includes('FAIL') || label.includes('BLOCK')) {
     return `${base} border-rose-500/40 bg-rose-500/10 text-rose-200`;
   }
+  // Must be checked before the generic FILLED match below: a partially filled
+  // order/proposal is still open and must not look identical to a fully FILLED one.
+  if (label === 'PARTIALLY_FILLED') {
+    return `${base} border-sky-500/40 bg-sky-500/10 text-sky-200`;
+  }
   if (label.includes('FILLED') || label.includes('PASS') || label === 'APPROVED' || label === 'LIVE' || label === 'FRESH' || label === 'CONNECTED' || label === 'CLEAR') {
     return `${base} border-emerald-500/40 bg-emerald-500/10 text-emerald-200`;
   }

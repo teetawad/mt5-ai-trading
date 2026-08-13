@@ -173,6 +173,15 @@ describe('GET /portfolio (live source of truth)', () => {
     expect(sum).toBeCloseTo(Number(portfolioRes.body.unrealizedPnl), 8);
   });
 
+  it.skipIf(SKIP)('GET /positions returns a server-computed marketValue that matches quantity * live price', async () => {
+    const res = await request(app).get('/positions').set('Authorization', `Bearer ${token()}`);
+
+    expect(res.status).toBe(200);
+    const googl = res.body.positions.find((p: { symbol: string }) => p.symbol === 'GOOGL');
+    // 10 * 99.715 = 997.15
+    expect(googl.marketValue).toBe('997.15000000');
+  });
+
   it.skipIf(SKIP)('portfolio equity is cash plus the live market value of open positions', async () => {
     const res = await request(app).get('/portfolio').set('Authorization', `Bearer ${token()}`);
 

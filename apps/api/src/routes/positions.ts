@@ -34,7 +34,7 @@ positionsRouter.get('/:symbol', async (req: Request, res: Response) => {
     return;
   }
   if (Number(position.quantity) === 0) {
-    res.json({ ...position, isStale: false, priceAsOf: null });
+    res.json({ ...position, isStale: false, priceAsOf: null, marketValue: '0.00000000' });
     return;
   }
   const market = await liveMarketData(requestId(req));

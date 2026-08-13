@@ -48,7 +48,7 @@
       <DataTable
         :empty="!(data?.positions?.length)"
         empty-label="No open positions"
-        :columns="['Symbol', 'Quantity', 'Average Entry', 'Last Price', 'Market Value', 'Realized P&L', 'Unrealized P&L', 'Freshness']"
+        :columns="['Symbol', 'Quantity', 'Average Entry', 'Last Price', 'Market Value', 'Realized P&L (All-Time)', 'Unrealized P&L', 'Freshness']"
       >
         <tr
           v-for="position in data?.positions ?? []"
@@ -59,10 +59,11 @@
           <td class="px-4 py-3 tabular-nums">{{ position.quantity }}</td>
           <td class="px-4 py-3 tabular-nums">{{ money(position.averageEntryPrice) }}</td>
           <td class="px-4 py-3 tabular-nums">{{ money(position.lastPrice) }}</td>
-          <td class="px-4 py-3 tabular-nums font-medium">{{ moneyNumber(positionValue(position)) }}</td>
+          <td class="px-4 py-3 tabular-nums font-medium">{{ money(position.marketValue) }}</td>
           <td
             class="px-4 py-3 tabular-nums font-medium"
             :class="pnl(position.realizedPnl)"
+            title="Cumulative realized P&L booked on this symbol across all closed lots, not just the current open position."
           >
             {{ money(position.realizedPnl) }}
           </td>
@@ -92,6 +93,7 @@ type Position = {
   unrealizedPnl: string;
   isStale: boolean;
   priceAsOf: string | null;
+  marketValue: string;
 };
 type MarketDataStatus = {
   mode: 'stream' | 'poll';
@@ -110,17 +112,13 @@ useAutoRefresh(refresh, 5000);
 
 const allocationData = computed(() => (data.value?.positions ?? []).map((position) => ({
   label: position.symbol,
-  value: positionValue(position),
+  value: number(position.marketValue),
 })));
 const positionValueData = computed(() => allocationData.value);
 const unrealizedData = computed(() => (data.value?.positions ?? []).map((position) => ({
   label: position.symbol,
   value: number(position.unrealizedPnl),
 })));
-
-function positionValue(position: Position): number {
-  return number(position.quantity) * number(position.lastPrice);
-}
 
 function number(value?: string | null): number {
   const parsed = Number(value ?? 0);

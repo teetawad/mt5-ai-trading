@@ -16,6 +16,7 @@ import {
   createSnapshot,
   findLatestSnapshot,
   findLatestSnapshotBefore,
+  hasSnapshotOnOrAfter,
 } from '../db/repositories/portfolio-snapshots';
 import {
   findPositionBySymbolForUpdate,
@@ -320,6 +321,34 @@ export async function getDayStartEquity(
   return baseline ? decimal(baseline.portfolioEquity) : decimal(fallbackInitialCash);
 }
 
+/**
+ * Guarantees a snapshot exists for "today" (UTC) so getDayStartEquity's
+ * "latest snapshot strictly before today" lookup never has to fall back to
+ * a stale snapshot from several days ago just because no trade happened
+ * since. Snapshots are otherwise only written on trade/bracket-exit events
+ * (see writePortfolioSnapshot), so a quiet multi-day-open position would
+ * otherwise leave "Daily P&L" silently measuring P&L since the last trade
+ * instead of P&L since today's open. Idempotent per UTC day: a no-op once
+ * any snapshot (trade-triggered or this DAY_OPEN marker) exists for today.
+ */
+export async function ensureDayStartSnapshot(
+  pool: Pool,
+  view: Pick<LivePortfolioView, 'cashBalance' | 'portfolioEquity' | 'realizedPnl' | 'unrealizedPnl' | 'positions'>,
+): Promise<void> {
+  const todayStart = startOfUtcDay(new Date());
+  if (await hasSnapshotOnOrAfter(pool, todayStart)) return;
+  await createSnapshot(pool, {
+    cashBalance: view.cashBalance,
+    portfolioEquity: view.portfolioEquity,
+    openPositions: view.positions,
+    pendingOrders: [],
+    realizedPnl: view.realizedPnl,
+    unrealizedPnl: view.unrealizedPnl,
+    dailyPnl: '0.00000000',
+    snapshotReason: 'DAY_OPEN',
+  });
+}
+
 export interface LiveMarketData {
   prices: Record<string, string>;
   timestamps: Record<string, string>;
@@ -355,6 +384,9 @@ export async function livePriceMap(requestId: string | undefined): Promise<Recor
 export interface LivePosition extends Position {
   isStale: boolean;
   priceAsOf: string | null;
+  /** quantity * current lastPrice, computed once here so every page (Dashboard,
+   * Positions, Portfolio) shows the same figure instead of each re-deriving it. */
+  marketValue: string;
 }
 
 export interface LivePortfolioView {
@@ -389,6 +421,7 @@ export function mergeLivePosition(position: Position, market: LiveMarketData): L
     isStale: !priceKnown || market.staleSymbols.has(position.symbol),
     priceAsOf: market.timestamps[position.symbol]
       ?? (position.lastPriceAt ? position.lastPriceAt.toISOString() : null),
+    marketValue: lastPrice ? money(decimal(lastPrice).times(decimal(position.quantity))) : '0.00000000',
   };
 }
 
@@ -665,6 +698,30 @@ export async function executeApprovedProposal(
       },
       requestId,
     });
+
+    const bracket = bracketFromProposal(proposal);
+    if (bracket) {
+      // Bracket (stop-loss/take-profit) entry creation was previously only
+      // visible by inspecting the nested phase22 JSON on TRADE_EXECUTED —
+      // give it its own queryable event, matching BRACKET_EXIT_RECONCILED
+      // below which already covers the exit side.
+      await createAuditLog(client, {
+        eventType: 'BRACKET_ORDER_CREATED',
+        actorId: actor.actorId,
+        actorEmail: actor.actorEmail,
+        entityType: 'trade_proposal',
+        entityId: finalProposal.id,
+        action: 'CREATE_BRACKET_ENTRY',
+        afterData: {
+          orderId: updatedOrder.id,
+          brokerOrderId: brokerResult.broker_order_id,
+          bracketOrderIds: brokerResult.bracket_order_ids ?? null,
+          stopLossPrice: bracket.stop_loss_price,
+          takeProfitPrice: bracket.take_profit_price,
+        },
+        requestId,
+      });
+    }
 
     return {
       proposal: finalProposal,

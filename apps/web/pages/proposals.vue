@@ -26,12 +26,12 @@
         class-name="text-sky-300"
       />
       <MetricBox
-        label="Risk Passed"
+        label="Risk Passed at Creation"
         :value="String(riskPassCount)"
         class-name="text-emerald-300"
       />
       <MetricBox
-        label="Risk Blocked"
+        label="Risk Blocked at Creation"
         :value="String(riskBlockedCount)"
         class-name="text-rose-300"
       />
@@ -42,13 +42,26 @@
       subtitle="Click any row to inspect AI, risk, stop, target, and approval details."
       body-class="p-0"
     >
+      <template #actions>
+        <div class="flex gap-1 rounded-lg border border-slate-800 bg-slate-950/60 p-1 text-xs font-semibold">
+          <button
+            v-for="tab in viewTabs"
+            :key="tab.value"
+            class="rounded-md px-3 py-1.5 transition"
+            :class="viewFilter === tab.value ? 'bg-sky-500/20 text-sky-200' : 'text-slate-400 hover:text-slate-200'"
+            @click="viewFilter = tab.value"
+          >
+            {{ tab.label }} ({{ tab.count }})
+          </button>
+        </div>
+      </template>
       <DataTable
-        :empty="!safeProposals.length && !malformedProposals.length"
-        empty-label="No proposals"
-        :columns="['Symbol', 'Side', 'Qty', 'Reference', 'AI Decision', 'Risk Engine', 'Expires', 'Actions']"
+        :empty="!filteredProposals.length && !malformedProposals.length"
+        :empty-label="viewFilter === 'ACTIVE' ? 'No active proposals awaiting approval or execution' : 'No proposals'"
+        :columns="['Symbol', 'Side', 'Qty', 'Reference', 'AI Decision', 'Risk Check (at creation)', 'Status', 'Expires', 'Actions']"
       >
         <tr
-          v-for="proposal in safeProposals"
+          v-for="proposal in filteredProposals"
           :key="proposal.id"
           class="cursor-pointer border-t border-slate-800/80 hover:bg-slate-800/40"
           :class="selected?.id === proposal.id ? 'bg-sky-400/5' : ''"
@@ -59,7 +72,8 @@
           <td class="px-4 py-3 tabular-nums">{{ proposal.quantity }}</td>
           <td class="px-4 py-3 tabular-nums">{{ currency(proposal.referencePrice) }}</td>
           <td class="px-4 py-3"><StatusPill :label="String(aiDecision(proposal)?.decision ?? 'NO_AI')" /></td>
-          <td class="px-4 py-3"><StatusPill :label="proposal.riskSnapshot?.result ?? proposal.status" /></td>
+          <td class="px-4 py-3"><StatusPill :label="proposal.riskSnapshot?.result ?? 'UNKNOWN'" /></td>
+          <td class="px-4 py-3"><StatusPill :label="proposal.status" /></td>
           <td class="px-4 py-3 text-slate-400">{{ shortDate(proposal.expiresAt) }}</td>
           <td class="px-4 py-3">
             <div class="flex justify-end gap-2">
@@ -86,7 +100,7 @@
           class="border-t border-slate-800 bg-rose-500/5"
         >
           <td
-            colspan="7"
+            colspan="8"
             class="px-4 py-3 text-rose-200"
           >
             Proposal {{ malformed.id }} ({{ malformed.status }}) has malformed data and cannot be displayed safely.
@@ -265,17 +279,47 @@ type Phase22Risk = {
 };
 type ProposalList = { proposals: Proposal[] };
 
+// Statuses where a proposal has finished its lifecycle — it will never
+// transition again (see apps/api/src/services/proposal-state-machine.ts).
+// Everything else is still "active": either awaiting a decision or still
+// mid-execution. Used to keep the default queue view free of historical
+// rows instead of interleaving them by creation time only.
+const TERMINAL_STATUSES = new Set([
+  'RISK_REJECTED',
+  'OWNER_REJECTED',
+  'EXPIRED',
+  'RISK_REJECTED_AFTER_APPROVAL',
+  'FILLED',
+  'CANCELLED',
+  'EXECUTION_REJECTED',
+  'EXECUTION_ERROR',
+]);
+
 const { apiFetch } = useApi();
 const route = useRoute();
 const message = ref('');
 const actionError = ref('');
 const busy = ref(false);
 const selected = ref<Proposal | null>(null);
+const viewFilter = ref<'ACTIVE' | 'HISTORICAL' | 'ALL'>('ACTIVE');
 const { data: proposals, error, refresh } = await useAsyncData<ProposalList>('proposals-page', () => apiFetch('/trade-proposals?limit=50'));
+useAutoRefresh(refresh, 5000);
 const safeProposals = computed(() => {
   const list = proposals.value?.proposals;
   if (!Array.isArray(list)) return [];
   return list.filter(isRenderableProposal);
+});
+const activeProposals = computed(() => safeProposals.value.filter((proposal) => !TERMINAL_STATUSES.has(proposal.status)));
+const historicalProposals = computed(() => safeProposals.value.filter((proposal) => TERMINAL_STATUSES.has(proposal.status)));
+const viewTabs = computed(() => [
+  { value: 'ACTIVE' as const, label: 'Active', count: activeProposals.value.length },
+  { value: 'HISTORICAL' as const, label: 'Historical', count: historicalProposals.value.length },
+  { value: 'ALL' as const, label: 'All', count: safeProposals.value.length },
+]);
+const filteredProposals = computed(() => {
+  if (viewFilter.value === 'ACTIVE') return activeProposals.value;
+  if (viewFilter.value === 'HISTORICAL') return historicalProposals.value;
+  return safeProposals.value;
 });
 const malformedProposals = computed(() => {
   const list = proposals.value?.proposals;

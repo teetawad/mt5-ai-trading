@@ -11,11 +11,11 @@ This is intentionally non-deterministic in production. Pass a fixed
 import math
 import random
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from .provider import MarketDataProvider, SymbolNotFoundError
-from .snapshot import MarketSnapshot
+from .snapshot import MarketBar, MarketSnapshot
 
 # Default seed prices (USD). Approximate 2024 levels; for paper trading only.
 DEFAULT_SYMBOLS: dict[str, Decimal] = {
@@ -100,3 +100,66 @@ class SyntheticMarketDataProvider(MarketDataProvider):
 
     def tracked_symbols(self) -> list[str]:
         return list(self._prices.keys())
+
+    def get_historical_bars(
+        self,
+        symbol: str,
+        *,
+        timeframe: str,
+        start: str,
+        end: str | None = None,
+        limit: int = 100,
+    ) -> list[MarketBar]:
+        """Synthesizes a daily OHLC series ending at the current live price,
+        so PAPER TRADING symbol charts have something to plot without a real
+        market-data subscription. This provider has no intraday history to
+        replay, so only daily bars are produced regardless of `timeframe`.
+        The walk is seeded by symbol only (not by call time), so the *shape*
+        of the series (relative day-to-day moves) is stable — repeated
+        requests don't reshuffle into an unrelated random shape. The whole
+        series is anchored to the current live price, so it shifts together
+        whenever that price ticks between calls.
+        """
+        if symbol not in self._prices:
+            raise SymbolNotFoundError(f"Symbol not tracked: {symbol}")
+
+        with self._lock:
+            now = datetime.now(UTC)
+            last = self._last_tick.get(symbol)
+            if last is None or (now - last).total_seconds() >= self._tick_interval:
+                self._advance_price(symbol)
+            current_price = self._prices[symbol]
+
+        count = max(1, min(limit, 500))
+        rng = random.Random(f"historical-bars:{symbol}")
+        ticks_per_day = 86_400 / max(self._tick_interval, 1.0)
+        daily_vol = min(self._tick_volatility * math.sqrt(ticks_per_day), 0.05)
+
+        # Walk backward from the live price so the newest bar always agrees
+        # with what every other page (dashboard, positions) is showing.
+        closes_newest_first = [current_price]
+        for _ in range(count - 1):
+            z = rng.gauss(0.0, 1.0)
+            factor = Decimal(str(math.exp(-daily_vol * z)))
+            prior = closes_newest_first[-1] * factor
+            prior = prior.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            closes_newest_first.append(max(prior, Decimal("0.01")))
+        closes = list(reversed(closes_newest_first))
+
+        end_time = datetime.now(UTC)
+        bars: list[MarketBar] = []
+        for i, close in enumerate(closes):
+            bar_time = end_time - timedelta(days=(len(closes) - 1 - i))
+            open_price = closes[i - 1] if i > 0 else close
+            bars.append(
+                MarketBar(
+                    symbol=symbol,
+                    open=open_price,
+                    high=max(open_price, close),
+                    low=min(open_price, close),
+                    close=close,
+                    volume=rng.randint(1_000_000, 20_000_000),
+                    timestamp=bar_time,
+                )
+            )
+        return bars

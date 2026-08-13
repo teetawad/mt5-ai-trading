@@ -11,14 +11,24 @@
     >
       Failed to load orders. Please refresh the page.
     </div>
-    <div class="grid gap-3 md:grid-cols-4">
+    <div class="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
       <MetricBox
         label="Total Orders"
         :value="String(data?.orders.length ?? 0)"
       />
       <MetricBox
+        label="Pending"
+        :value="String(statusCount('PENDING'))"
+        class-name="text-slate-300"
+      />
+      <MetricBox
         label="Submitted"
         :value="String(statusCount('SUBMITTED'))"
+        class-name="text-sky-300"
+      />
+      <MetricBox
+        label="Partially Filled"
+        :value="String(statusCount('PARTIALLY_FILLED'))"
         class-name="text-sky-300"
       />
       <MetricBox
@@ -27,7 +37,7 @@
         class-name="text-emerald-300"
       />
       <MetricBox
-        label="Rejected/Error"
+        label="Rejected/Error/Cancelled"
         :value="String(errorCount)"
         class-name="text-rose-300"
       />
@@ -71,7 +81,8 @@ type Order = {
   status: string;
 };
 const { apiFetch } = useApi();
-const { data, error } = await useAsyncData<{ orders: Order[] }>('orders-page', () => apiFetch('/orders?limit=50'));
+const { data, error, refresh } = await useAsyncData<{ orders: Order[] }>('orders-page', () => apiFetch('/orders?limit=50'));
+useAutoRefresh(refresh, 5000);
 const errorCount = computed(() => (data.value?.orders ?? []).filter((order) => ['REJECTED', 'ERROR', 'CANCELLED'].includes(order.status)).length);
 function statusCount(status: string): number {
   return (data.value?.orders ?? []).filter((order) => order.status === status).length;

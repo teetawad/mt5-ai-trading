@@ -36,6 +36,17 @@ export async function findLatestSnapshotBefore(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+export async function hasSnapshotOnOrAfter(
+  db: Pool | PoolClient,
+  cutoff: Date,
+): Promise<boolean> {
+  const { rows } = await db.query(
+    'SELECT 1 FROM portfolio_snapshots WHERE created_at >= $1 LIMIT 1',
+    [cutoff],
+  );
+  return rows.length > 0;
+}
+
 export async function findSnapshotById(
   db: Pool | PoolClient,
   id: string,

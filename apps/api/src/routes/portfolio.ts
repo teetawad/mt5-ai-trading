@@ -4,7 +4,7 @@ import { requireAuth } from '../auth/middleware';
 import { getPool } from '../db/client';
 import { listSnapshots } from '../db/repositories/portfolio-snapshots';
 import { getSettingValue } from '../db/repositories/system-settings';
-import { getDayStartEquity, getLivePortfolioView } from '../services/trade-execution-service';
+import { ensureDayStartSnapshot, getDayStartEquity, getLivePortfolioView } from '../services/trade-execution-service';
 
 export const portfolioRouter = Router();
 
@@ -45,6 +45,7 @@ async function currentDailyPnl(pool: ReturnType<typeof getPool>, portfolioEquity
 portfolioRouter.get('/', async (req: Request, res: Response) => {
   const pool = getPool();
   const view = await getLivePortfolioView(pool, requestId(req));
+  await ensureDayStartSnapshot(pool, view);
   const dailyPnl = await currentDailyPnl(pool, view.portfolioEquity);
 
   res.json({
@@ -72,6 +73,7 @@ portfolioRouter.get('/snapshots', async (req: Request, res: Response) => {
 portfolioRouter.get('/pnl', async (req: Request, res: Response) => {
   const pool = getPool();
   const view = await getLivePortfolioView(pool, requestId(req));
+  await ensureDayStartSnapshot(pool, view);
   const dailyPnl = await currentDailyPnl(pool, view.portfolioEquity);
   res.json({
     realizedPnl: view.realizedPnl,

@@ -478,18 +478,23 @@ watch(() => aiForm.symbol, async (symbol) => {
   await loadSparkline(symbol);
 }, { immediate: true });
 
+const sparklineError = ref('');
 const priceSparkline = computed(() => priceBars.value.map((bar) => ({ label: bar.timestamp, value: numberValue(bar.close) })));
 const sparklineLabel = computed(() => {
   const latest = priceBars.value.at(-1);
-  return latest ? money(latest.close) : `${aiForm.symbol || 'Symbol'} history unavailable`;
+  if (latest) return money(latest.close);
+  if (sparklineError.value) return sparklineError.value;
+  return `${aiForm.symbol || 'Symbol'} history unavailable`;
 });
 
 async function loadSparkline(symbol: string) {
   const start = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
+  sparklineError.value = '';
   try {
     priceBars.value = await apiFetch<MarketBar[]>(`/market-data/bars/${symbol}?timeframe=1Day&start=${encodeURIComponent(start)}&limit=30`);
-  } catch {
+  } catch (err) {
     priceBars.value = [];
+    sparklineError.value = err instanceof Error && err.message ? err.message : 'Failed to load price history.';
   }
 }
 

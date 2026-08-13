@@ -10,6 +10,7 @@ import { getTestPool, setupTestDb } from './db/setup';
 import { executeApprovedProposal } from '../services/trade-execution-service';
 import { recordApprovedBracketExit } from '../services/trade-execution-service';
 import { getDayStartEquity } from '../services/trade-execution-service';
+import { ensureDayStartSnapshot } from '../services/trade-execution-service';
 import { reconcileBracketOrders } from '../services/trade-execution-service';
 import { approveProposal } from '../services/trade-proposal-service';
 import {
@@ -294,6 +295,44 @@ describe('Phase 8 signal to proposal workflow', () => {
       res.body.signal.id,
     ]);
     expect(signalRow.rows[0].status).toBe('RISK_PASS');
+  });
+
+  it.skipIf(SKIP)('GET /dashboard/paper expires an overdue proposal instead of still counting it as pending', async () => {
+    // Regression test: GET /dashboard/paper previously listed
+    // status='PENDING_APPROVAL' proposals without first running the same
+    // expireOpenProposals() sweep that GET /trade-proposals already ran on
+    // every read — a proposal whose expiresAt had passed could show as
+    // "pending" on the dashboard indefinitely until some other request
+    // happened to touch it, disagreeing with the Proposals page.
+    const created = await request(app)
+      .post('/signals')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        strategyId,
+        symbol: 'AAPL',
+        side: 'BUY',
+        quantity: '10.00000000',
+        reason: 'dashboard expiry regression test',
+      });
+    expect(created.body.proposal.status).toBe('PENDING_APPROVAL');
+
+    await pool.query(
+      "UPDATE trade_proposals SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+      [created.body.proposal.id],
+    );
+
+    const dashboardRes = await request(app)
+      .get('/dashboard/paper')
+      .set('Authorization', `Bearer ${token()}`);
+    expect(dashboardRes.status).toBe(200);
+    expect(
+      dashboardRes.body.pendingProposals.some((p: { id: string }) => p.id === created.body.proposal.id),
+    ).toBe(false);
+
+    const proposalRow = await pool.query('SELECT status FROM trade_proposals WHERE id = $1', [
+      created.body.proposal.id,
+    ]);
+    expect(proposalRow.rows[0].status).toBe('EXPIRED');
   });
 
   it.skipIf(SKIP)('POST /signals records a rejected proposal on risk reject', async () => {
@@ -1677,6 +1716,63 @@ describe('Phase 8 signal to proposal workflow', () => {
 
     const dayStart = await getDayStartEquity(pool, new Date(), '50000');
     expect(dayStart.toFixed(8)).toBe('49500.00000000');
+
+    await resetTradingLedger(pool);
+  });
+
+  it.skipIf(SKIP)('ensureDayStartSnapshot writes a DAY_OPEN marker when no snapshot exists yet today', async () => {
+    // Regression test: without this, a quiet multi-day-open position (no
+    // trades, only price drift) would leave getDayStartEquity's "latest
+    // snapshot before today" lookup falling back to a snapshot several days
+    // stale — Daily P&L would silently measure P&L since the last trade
+    // instead of P&L since today's open.
+    await resetTradingLedger(pool);
+
+    const view = {
+      cashBalance: '50000.00000000',
+      portfolioEquity: '50000.00000000',
+      realizedPnl: '0.00000000',
+      unrealizedPnl: '0.00000000',
+      positions: [],
+    };
+    await ensureDayStartSnapshot(pool, view);
+
+    const { rows } = await pool.query(
+      "SELECT * FROM portfolio_snapshots WHERE snapshot_reason = 'DAY_OPEN'",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].portfolio_equity).toBe('50000.00000000');
+
+    // Idempotent: a second call the same day must not insert another row.
+    await ensureDayStartSnapshot(pool, { ...view, portfolioEquity: '60000.00000000' });
+    const { rows: rowsAfter } = await pool.query(
+      "SELECT * FROM portfolio_snapshots WHERE snapshot_reason = 'DAY_OPEN'",
+    );
+    expect(rowsAfter).toHaveLength(1);
+    expect(rowsAfter[0].portfolio_equity).toBe('50000.00000000');
+
+    await resetTradingLedger(pool);
+  });
+
+  it.skipIf(SKIP)('ensureDayStartSnapshot is a no-op when a trade-triggered snapshot already exists today', async () => {
+    await resetTradingLedger(pool);
+    await pool.query(
+      `INSERT INTO portfolio_snapshots
+         (cash_balance, portfolio_equity, open_positions, pending_orders,
+          realized_pnl, unrealized_pnl, daily_pnl, snapshot_reason)
+       VALUES ('42000.00000000', '42000.00000000', '[]'::jsonb, '[]'::jsonb, '0.00000000', '0.00000000', '0.00000000', 'TRADE_EXECUTION_FILLED')`,
+    );
+
+    await ensureDayStartSnapshot(pool, {
+      cashBalance: '99999.00000000',
+      portfolioEquity: '99999.00000000',
+      realizedPnl: '0.00000000',
+      unrealizedPnl: '0.00000000',
+      positions: [],
+    });
+
+    const { rows } = await pool.query("SELECT * FROM portfolio_snapshots WHERE snapshot_reason = 'DAY_OPEN'");
+    expect(rows).toHaveLength(0);
 
     await resetTradingLedger(pool);
   });
