@@ -84,6 +84,7 @@ CREATE TABLE signals (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     strategy_id         UUID NOT NULL REFERENCES strategies(id),
     symbol              TEXT NOT NULL,
+    asset_class         TEXT NOT NULL DEFAULT 'STOCK' CHECK (asset_class IN ('STOCK', 'CRYPTO')), -- Phase 26
     side                TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
     reference_price     NUMERIC(18,8) NOT NULL,
     reason              TEXT NOT NULL,
@@ -159,6 +160,7 @@ CREATE TABLE trade_proposals (
 
     -- Trading parameters: IMMUTABLE after status reaches PENDING_APPROVAL
     symbol                  TEXT NOT NULL,
+    asset_class             TEXT NOT NULL DEFAULT 'STOCK' CHECK (asset_class IN ('STOCK', 'CRYPTO')), -- Phase 26
     side                    TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
     quantity                NUMERIC(18,8) NOT NULL CHECK (quantity > 0),
     order_type              TEXT NOT NULL CHECK (order_type IN ('MARKET', 'LIMIT')),
@@ -265,6 +267,7 @@ CREATE TABLE orders (
     execution_id        UUID NOT NULL REFERENCES executions(id),
     broker_order_id     TEXT UNIQUE,
     symbol              TEXT NOT NULL,
+    asset_class         TEXT NOT NULL DEFAULT 'STOCK' CHECK (asset_class IN ('STOCK', 'CRYPTO')), -- Phase 26
     side                TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
     quantity            NUMERIC(18,8) NOT NULL,
     order_type          TEXT NOT NULL,
@@ -306,6 +309,7 @@ CREATE INDEX fills_order_id_idx ON fills(order_id);
 CREATE TABLE positions (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     symbol                  TEXT NOT NULL UNIQUE,   -- one row per symbol
+    asset_class             TEXT NOT NULL DEFAULT 'STOCK' CHECK (asset_class IN ('STOCK', 'CRYPTO')), -- Phase 26
     quantity                NUMERIC(18,8) NOT NULL DEFAULT 0,
     average_entry_price     NUMERIC(18,8),
     realized_pnl            NUMERIC(18,8) NOT NULL DEFAULT 0,

@@ -18,7 +18,7 @@ import {
   findProposalByIdForUpdate,
   updateProposalStatus,
 } from '../db/repositories/trade-proposals';
-import { RiskCheck, Signal, TradeApproval, TradeProposal } from '../db/types';
+import { AssetClass, RiskCheck, Signal, TradeApproval, TradeProposal } from '../db/types';
 import {
   getMarketSnapshot,
   getPaperPortfolio,
@@ -36,7 +36,15 @@ import {
   phase25RiskControls,
   runIntradayAnalysis,
 } from './intraday-decision-service';
-import { IntradayAnalysisDTO } from './trading-engine-client';
+import {
+  Phase26Settings,
+  ensureCryptoStrategy,
+  loadPhase26Settings,
+  phase26RiskControls,
+  runCryptoAnalysis,
+} from './crypto-decision-service';
+import { assetClassForSymbol, isCryptoSymbol, SUPPORTED_CRYPTO_PATTERN } from './asset-class';
+import { CryptoAnalysisDTO, IntradayAnalysisDTO } from './trading-engine-client';
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -82,6 +90,7 @@ export interface CreateSignalInput {
   confidence?: string | null;
   aiDecision?: AiDecision | null;
   phase25?: { analysis: IntradayAnalysisDTO; settings: Phase25Settings } | null;
+  phase26?: { analysis: CryptoAnalysisDTO; settings: Phase26Settings } | null;
 }
 
 export interface ActorContext {
@@ -149,7 +158,10 @@ function parseTtlSeconds(value: unknown): number {
   return Number.isInteger(value) && Number(value) > 0 ? Number(value) : 300;
 }
 
-export async function riskConfig(db: Pool | PoolClient): Promise<RiskConfigDTO> {
+export async function riskConfig(
+  db: Pool | PoolClient,
+  assetClass: AssetClass = 'STOCK',
+): Promise<RiskConfigDTO> {
   const drift = new Decimal(String(await getSettingValue(db, 'price_drift_threshold_pct') ?? '0.02'));
   const concentration = new Decimal(
     String(await getSettingValue(db, 'max_portfolio_concentration_pct') ?? '0.20'),
@@ -183,10 +195,15 @@ export async function riskConfig(db: Pool | PoolClient): Promise<RiskConfigDTO> 
     phase22_prevent_duplicate_exposure:
       await getSettingValue<boolean>(db, 'phase22_prevent_duplicate_exposure') ?? true,
     proposal_ttl_seconds: parseTtlSeconds(await getSettingValue(db, 'proposal_ttl_seconds')),
-    trading_session_start:
-      await getSettingValue<string | null>(db, 'trading_session_start') ?? undefined,
-    trading_session_end:
-      await getSettingValue<string | null>(db, 'trading_session_end') ?? undefined,
+    // Crypto markets trade 24/7 — bypass the TRADING_SESSION risk rule
+    // regardless of the configured stock session, rather than requiring the
+    // owner to leave stock session bounds unset just to unblock crypto.
+    trading_session_start: assetClass === 'CRYPTO'
+      ? undefined
+      : await getSettingValue<string | null>(db, 'trading_session_start') ?? undefined,
+    trading_session_end: assetClass === 'CRYPTO'
+      ? undefined
+      : await getSettingValue<string | null>(db, 'trading_session_end') ?? undefined,
     cooldown_between_trades_seconds:
       Number(await getSettingValue(db, 'cooldown_between_trades_seconds') ?? 0),
   };
@@ -421,8 +438,9 @@ export async function createSignalAndProposal(
 ): Promise<CreateSignalWorkflowResult> {
   const symbol = input.symbol.toUpperCase();
   const orderType = input.orderType ?? 'MARKET';
+  const assetClass = assetClassForSymbol(symbol);
 
-  if (!/^[A-Z0-9.]{1,10}$/.test(symbol)) throw new ValidationError('Invalid symbol format');
+  if (!/^[A-Z0-9./]{1,10}$/.test(symbol)) throw new ValidationError('Invalid symbol format');
   validateSide(input.side);
   validatePositiveDecimal(input.quantity, 'quantity');
   if (input.referencePrice !== undefined) validatePositiveDecimal(input.referencePrice, 'referencePrice');
@@ -443,7 +461,7 @@ export async function createSignalAndProposal(
     const strategy = await findStrategyById(client, input.strategyId);
     if (!strategy || !strategy.isActive) throw new NotFoundError('Strategy not found');
 
-    const cfg = await riskConfig(client);
+    const cfg = await riskConfig(client, assetClass);
     const ttlSeconds = cfg.proposal_ttl_seconds ?? 300;
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
     const latestSnapshot = await findLatestSnapshot(client);
@@ -460,22 +478,36 @@ export async function createSignalAndProposal(
         settings: input.phase25.settings,
         requestedQuantity: input.quantity,
       })
-      : await phase22RiskControls(client, {
-        symbol,
-        side: input.side,
-        requestedQuantity: input.quantity,
-        entryPrice: market.price,
-        market,
-        paperPortfolio,
-        latestSnapshot,
-        cfg,
-      });
+      : input.phase26
+        ? await phase26RiskControls(client, {
+          symbol,
+          strategyId: strategy.id,
+          side: input.side,
+          analysis: input.phase26.analysis,
+          market,
+          paperPortfolio,
+          latestSnapshot,
+          riskCfg: cfg,
+          settings: input.phase26.settings,
+          requestedQuantity: input.quantity,
+        })
+        : await phase22RiskControls(client, {
+          symbol,
+          side: input.side,
+          requestedQuantity: input.quantity,
+          entryPrice: market.price,
+          market,
+          paperPortfolio,
+          latestSnapshot,
+          cfg,
+        });
     const proposalQuantity = advanced.quantity;
     const estimatedNotional = advanced.estimatedNotional;
 
     const signal = await createSignal(client, {
       strategyId: strategy.id,
       symbol,
+      assetClass,
       side: input.side,
       referencePrice,
       reason: input.reason.trim(),
@@ -519,7 +551,11 @@ export async function createSignalAndProposal(
       failed_rules: combinedFailedRules,
       reason: [riskResult.reason, advanced.reason].filter(Boolean).join('; ') || null,
       aiDecision: input.aiDecision ?? null,
-      ...(input.phase25 ? { phase25: advanced.snapshot } : { phase22: advanced.snapshot }),
+      ...(input.phase25
+        ? { phase25: advanced.snapshot }
+        : input.phase26
+          ? { phase26: advanced.snapshot }
+          : { phase22: advanced.snapshot }),
     };
 
     await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, actor.requestId);
@@ -530,7 +566,11 @@ export async function createSignalAndProposal(
       result: combinedRiskResult.result,
       rulesChecked: [
         ...riskResult.rules_checked,
-        input.phase25 ? 'PHASE25_ADVANCED_RISK_CONTROLS' : 'PHASE22_ADVANCED_RISK_CONTROLS',
+        input.phase25
+          ? 'PHASE25_ADVANCED_RISK_CONTROLS'
+          : input.phase26
+            ? 'PHASE26_ADVANCED_RISK_CONTROLS'
+            : 'PHASE22_ADVANCED_RISK_CONTROLS',
       ],
       failedRules: combinedFailedRules,
       reason: combinedRiskResult.reason,
@@ -559,6 +599,7 @@ export async function createSignalAndProposal(
       signalId: signal.id,
       strategyId: strategy.id,
       symbol,
+      assetClass,
       side: input.side,
       quantity: proposalQuantity,
       orderType,
@@ -790,6 +831,83 @@ export async function createIntradayDecisionAndProposal(
   return { analysis, ...result };
 }
 
+export interface CreateCryptoDecisionInput {
+  symbol: string;
+}
+
+export interface CryptoDecisionWorkflowResult {
+  analysis: CryptoAnalysisDTO;
+  signal: Signal | null;
+  riskCheck: RiskCheck | null;
+  riskResult: RiskResultDTO | null;
+  proposal: TradeProposal | null;
+}
+
+/** Phase 26: BUY opens/adds a bracket-protected long (same shape as
+ * createIntradayDecisionAndProposal). SELL closes an existing long — sized
+ * to the full position held, never a new short — and carries no bracket.
+ * HOLD never reaches createSignalAndProposal. */
+export async function createCryptoDecisionAndProposal(
+  pool: Pool,
+  input: CreateCryptoDecisionInput,
+  actor: ActorContext,
+): Promise<CryptoDecisionWorkflowResult> {
+  const symbol = String(input.symbol ?? '').trim().toUpperCase();
+  if (!isCryptoSymbol(symbol) || !SUPPORTED_CRYPTO_PATTERN.test(symbol)) {
+    throw new ValidationError('symbol must be a supported crypto symbol');
+  }
+  const tradingMode = await getSettingValue<string>(pool, 'trading_mode');
+  if ((tradingMode ?? 'PAPER') !== 'PAPER') {
+    throw new ValidationError('Crypto signals are available in PAPER mode only');
+  }
+
+  const paperPortfolio = await getPaperPortfolio(actor.requestId ?? undefined);
+  const existingQty = new Decimal(paperPortfolio.positions[symbol] ?? '0');
+  const hasOpenPosition = existingQty.gt(0);
+
+  const { analysis, settings } = await runCryptoAnalysis(
+    symbol,
+    pool,
+    hasOpenPosition,
+    actor.requestId ?? undefined,
+  );
+  if (!settings.cryptoTradingEnabled) {
+    throw new ValidationError('Crypto trading mode is disabled — enable it in Settings first');
+  }
+
+  if (analysis.decision === 'HOLD') {
+    await createAuditLog(pool, {
+      eventType: 'CRYPTO_DECISION_HOLD',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'signal',
+      entityId: null,
+      action: 'CRYPTO_HOLD_NO_TRADE',
+      afterData: { analysis },
+      requestId: actor.requestId ?? null,
+    });
+    return { analysis, signal: null, riskCheck: null, riskResult: null, proposal: null };
+  }
+
+  const strategy = await ensureCryptoStrategy(pool);
+  const quantity = analysis.decision === 'BUY' ? settings.defaultQuantity : existingQty.toFixed(8);
+
+  const result = await createSignalAndProposal(pool, {
+    strategyId: strategy.id,
+    symbol,
+    side: analysis.decision,
+    quantity,
+    orderType: 'MARKET',
+    referencePrice: analysis.entry_price,
+    reason: `CRYPTO MULTI-TIMEFRAME / PAPER ONLY: ${analysis.decision}`
+      + ` (${analysis.trend_direction} trend, R:R ${analysis.risk_reward ?? '-'})`,
+    confidence: null,
+    phase26: { analysis, settings },
+  }, actor);
+
+  return { analysis, ...result };
+}
+
 export async function cancelProposal(
   pool: Pool,
   proposalId: string,
@@ -856,8 +974,10 @@ export async function approveProposal(
     if (!market) throw new NotFoundError(`Symbol not found: ${proposal.symbol}`);
     const paperPortfolio = await getPaperPortfolio(actor.requestId ?? undefined);
     const latestSnapshot = await findLatestSnapshot(client);
-    const cfg = await riskConfig(client);
-    const isPhase25 = Boolean((proposal.riskSnapshot as Record<string, unknown> | undefined)?.phase25);
+    const cfg = await riskConfig(client, proposal.assetClass);
+    const riskSnapshot = proposal.riskSnapshot as Record<string, unknown> | undefined;
+    const isPhase25 = Boolean(riskSnapshot?.phase25);
+    const isPhase26 = Boolean(riskSnapshot?.phase26);
     const advanced = isPhase25
       ? await phase25RiskControls(client, {
         symbol: proposal.symbol,
@@ -871,17 +991,36 @@ export async function approveProposal(
         requestedQuantity: proposal.quantity,
         excludeProposalId: proposal.id,
       })
-      : await phase22RiskControls(client, {
-        symbol: proposal.symbol,
-        side: proposal.side,
-        requestedQuantity: proposal.quantity,
-        entryPrice: market.price,
-        market,
-        paperPortfolio,
-        latestSnapshot,
-        cfg,
-        excludeProposalId: proposal.id,
-      });
+      : isPhase26
+        ? await phase26RiskControls(client, {
+          symbol: proposal.symbol,
+          strategyId: proposal.strategyId,
+          side: proposal.side,
+          analysis: (await runCryptoAnalysis(
+            proposal.symbol,
+            client,
+            decimal(paperPortfolio.positions[proposal.symbol]).gt(0),
+            actor.requestId ?? undefined,
+          )).analysis,
+          market,
+          paperPortfolio,
+          latestSnapshot,
+          riskCfg: cfg,
+          settings: await loadPhase26Settings(client),
+          requestedQuantity: proposal.quantity,
+          excludeProposalId: proposal.id,
+        })
+        : await phase22RiskControls(client, {
+          symbol: proposal.symbol,
+          side: proposal.side,
+          requestedQuantity: proposal.quantity,
+          entryPrice: market.price,
+          market,
+          paperPortfolio,
+          latestSnapshot,
+          cfg,
+          excludeProposalId: proposal.id,
+        });
 
     const riskResult = await evaluateRisk(
       {
@@ -914,7 +1053,11 @@ export async function approveProposal(
       result: (riskResult.result === 'PASS' && advanced.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
       failed_rules: combinedFailedRules,
       reason: [riskResult.reason, advanced.reason].filter(Boolean).join('; ') || null,
-      ...(isPhase25 ? { phase25: advanced.snapshot } : { phase22: advanced.snapshot }),
+      ...(isPhase25
+        ? { phase25: advanced.snapshot }
+        : isPhase26
+          ? { phase26: advanced.snapshot }
+          : { phase22: advanced.snapshot }),
     };
 
     await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, requestId);
@@ -926,7 +1069,11 @@ export async function approveProposal(
       result: combinedRiskResult.result,
       rulesChecked: [
         ...riskResult.rules_checked,
-        isPhase25 ? 'PHASE25_ADVANCED_RISK_CONTROLS' : 'PHASE22_ADVANCED_RISK_CONTROLS',
+        isPhase25
+          ? 'PHASE25_ADVANCED_RISK_CONTROLS'
+          : isPhase26
+            ? 'PHASE26_ADVANCED_RISK_CONTROLS'
+            : 'PHASE22_ADVANCED_RISK_CONTROLS',
       ],
       failedRules: combinedFailedRules,
       reason: combinedRiskResult.reason,

@@ -310,6 +310,64 @@ Notes:
 
 ---
 
+## Crypto (Phase 26)
+
+```
+GET  /crypto/symbols                 — configured crypto symbols (phase26_supported_symbols) + master-toggle state
+GET  /crypto/analysis/:symbol        — multi-timeframe analysis + sizing preview (no proposal created)
+POST /signals/crypto-decision        — run the crypto strategy; BUY/SELL creates a PENDING_APPROVAL proposal (owner only)
+GET  /settings/crypto-trading-mode   — current crypto-trading master-toggle state
+PUT  /settings/crypto-trading-mode   — enable/disable crypto trading (owner only, audit logged)
+```
+
+### POST /signals/crypto-decision
+
+Request:
+```json
+{ "symbol": "BTC/USD" }
+```
+
+Response 201 (BUY):
+```json
+{
+  "analysis": { "decision": "BUY", "trend_direction": "UP", "risk_reward": "2.00000000", "market_status": "OPEN_24_7", "..." : "..." },
+  "signal": { "id": "...", "status": "RISK_PASS" },
+  "riskCheck": { "id": "...", "result": "PASS" },
+  "riskResult": { "result": "PASS", "failed_rules": [] },
+  "proposal": { "id": "...", "assetClass": "CRYPTO", "status": "PENDING_APPROVAL" }
+}
+```
+
+Response 201 (SELL — closes an existing long, no bracket):
+```json
+{
+  "analysis": { "decision": "SELL", "trend_direction": "DOWN", "risk_reward": null, "..." : "..." },
+  "proposal": { "id": "...", "assetClass": "CRYPTO", "side": "SELL", "status": "PENDING_APPROVAL" }
+}
+```
+
+Response 200 (HOLD — no proposal created):
+```json
+{
+  "analysis": { "decision": "HOLD", "reasons": ["..."] },
+  "signal": null, "riskCheck": null, "riskResult": null, "proposal": null
+}
+```
+
+Notes:
+- Rejects with 422 if `phase26_crypto_trading_enabled` is false, or if
+  `symbol` is not a supported crypto pair (`BTC/USD`, `ETH/USD`).
+- A `BUY` decision's proposal carries `riskSnapshot.phase26` (ATR-derived
+  bracket, fractional sizing, trade-count usage) — see
+  `docs/PHASE_26_CRYPTO_TRADING.md`. A `SELL` proposal's `riskSnapshot.phase26`
+  has `orderClass: "SINGLE"` (no bracket) and is sized to the position held.
+- No `TRADING_SESSION` gate applies — crypto markets are evaluated 24/7 (see
+  `docs/RISK_ENGINE.md`, "Phase 26 Crypto Risk Controls").
+- This endpoint never submits a broker order — approval does, exactly like
+  every other proposal source.
+
+---
+
 ## Risk
 
 ```
@@ -652,6 +710,7 @@ These endpoints are called by `apps/api` only.
 ```
 POST /signals/generate              — run a strategy and return a signal
 POST /intraday/analyze              — stateless multi-timeframe intraday analysis (Phase 25)
+POST /crypto/analyze                — stateless multi-timeframe crypto analysis, 24/7 (Phase 26)
 POST /risk/evaluate                 — evaluate risk for a signal/proposal
 POST /broker/orders                 — submit paper order
 GET  /broker/orders/:id             — get paper order status

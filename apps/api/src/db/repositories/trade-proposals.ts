@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { TradeProposal, ProposalStatus } from '../types';
+import { AssetClass, TradeProposal, ProposalStatus } from '../types';
 
 function mapRow(row: Record<string, unknown>): TradeProposal {
   return {
@@ -7,6 +7,7 @@ function mapRow(row: Record<string, unknown>): TradeProposal {
     signalId: row.signal_id as string,
     strategyId: row.strategy_id as string,
     symbol: row.symbol as string,
+    assetClass: row.asset_class as AssetClass,
     side: row.side as 'BUY' | 'SELL',
     quantity: row.quantity as string,
     orderType: row.order_type as 'MARKET' | 'LIMIT',
@@ -151,6 +152,7 @@ export async function createProposal(
     signalId: string;
     strategyId: string;
     symbol: string;
+    assetClass?: AssetClass;
     side: 'BUY' | 'SELL';
     quantity: string;
     orderType: 'MARKET' | 'LIMIT';
@@ -166,15 +168,16 @@ export async function createProposal(
 ): Promise<TradeProposal> {
   const { rows } = await db.query(
     `INSERT INTO trade_proposals
-       (signal_id, strategy_id, symbol, side, quantity, order_type,
+       (signal_id, strategy_id, symbol, asset_class, side, quantity, order_type,
         reference_price, limit_price, estimated_notional,
         risk_check_id, risk_snapshot, portfolio_snapshot, expires_at, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
      RETURNING *`,
     [
       data.signalId,
       data.strategyId,
       data.symbol,
+      data.assetClass ?? 'STOCK',
       data.side,
       data.quantity,
       data.orderType,

@@ -126,14 +126,14 @@
     </div>
 
     <UiCard
-      title="Current US Stock Prices"
+      title="Current Market Prices (US Stocks + Crypto)"
       :subtitle="`Freshness: ${dashboard?.marketData.freshness ?? 'UNKNOWN'} / Status: ${dashboard?.marketData.status ?? 'UNKNOWN'}`"
       body-class="p-0"
     >
       <DataTable
         :empty="!(dashboard?.marketData.snapshots.length)"
         empty-label="No market data snapshots"
-        :columns="['Symbol', 'Price', 'Bid', 'Ask', 'Timestamp', 'Freshness']"
+        :columns="['Symbol', 'Market', 'Price', 'Bid', 'Ask', 'Timestamp', 'Freshness']"
       >
         <tr
           v-for="snapshot in dashboard?.marketData.snapshots ?? []"
@@ -141,6 +141,7 @@
           class="border-t border-slate-800/80 hover:bg-slate-800/40"
         >
           <td class="px-4 py-3 font-semibold text-white">{{ snapshot.symbol }}</td>
+          <td class="px-4 py-3"><StatusPill :label="assetClassOf(snapshot.symbol)" /></td>
           <td class="px-4 py-3 font-medium tabular-nums">{{ money(snapshot.price) }}</td>
           <td class="px-4 py-3 tabular-nums text-slate-300">{{ money(snapshot.bid) }}</td>
           <td class="px-4 py-3 tabular-nums text-slate-300">{{ money(snapshot.ask) }}</td>
@@ -167,7 +168,12 @@
           :key="proposal.id"
           class="border-t border-slate-800/80 hover:bg-slate-800/40"
         >
-          <td class="px-4 py-3 font-semibold text-white">{{ proposal.symbol }}</td>
+          <td class="px-4 py-3 font-semibold text-white">
+            <div class="flex items-center gap-2">
+              <span>{{ proposal.symbol }}</span>
+              <StatusPill :label="proposal.assetClass" />
+            </div>
+          </td>
           <td class="px-4 py-3">{{ proposal.side }}</td>
           <td class="px-4 py-3 tabular-nums">{{ proposal.quantity }}</td>
           <td class="px-4 py-3 tabular-nums">{{ money(proposal.riskSnapshot?.phase22?.entry ?? proposal.referencePrice) }}</td>
@@ -257,7 +263,12 @@
             :key="order.id"
             class="border-t border-slate-800/80 hover:bg-slate-800/40"
           >
-            <td class="px-4 py-3 font-semibold text-white">{{ order.symbol }}</td>
+            <td class="px-4 py-3 font-semibold text-white">
+              <div class="flex items-center gap-2">
+                <span>{{ order.symbol }}</span>
+                <StatusPill :label="order.assetClass" />
+              </div>
+            </td>
             <td class="px-4 py-3">{{ order.side }}</td>
             <td class="px-4 py-3">{{ order.orderType }}</td>
             <td class="px-4 py-3 tabular-nums">{{ order.quantity }}</td>
@@ -282,7 +293,12 @@
             :key="position.id"
             class="border-t border-slate-800/80 hover:bg-slate-800/40"
           >
-            <td class="px-4 py-3 font-semibold text-white">{{ position.symbol }}</td>
+            <td class="px-4 py-3 font-semibold text-white">
+              <div class="flex items-center gap-2">
+                <span>{{ position.symbol }}</span>
+                <StatusPill :label="position.assetClass" />
+              </div>
+            </td>
             <td class="px-4 py-3 tabular-nums">{{ position.quantity }}</td>
             <td class="px-4 py-3 tabular-nums">{{ money(position.averageEntryPrice) }}</td>
             <td class="px-4 py-3 tabular-nums">{{ money(position.lastPrice) }}</td>
@@ -312,6 +328,7 @@ type ExternalStatus = 'CONNECTED' | 'UNAVAILABLE' | 'RATE_LIMITED';
 type Proposal = {
   id: string;
   symbol: string;
+  assetClass: 'STOCK' | 'CRYPTO';
   side: string;
   quantity: string;
   referencePrice: string;
@@ -331,6 +348,7 @@ type RiskResult = { id: string; stage: string; result: string; failedRules: stri
 type Order = {
   id: string;
   symbol: string;
+  assetClass: 'STOCK' | 'CRYPTO';
   side: string;
   orderType: string;
   quantity: string;
@@ -349,6 +367,7 @@ type Fill = { id: string; quantity: string; price: string; fee: string; fillType
 type Position = {
   id: string;
   symbol: string;
+  assetClass: 'STOCK' | 'CRYPTO';
   quantity: string;
   averageEntryPrice: string | null;
   lastPrice: string | null;
@@ -548,6 +567,15 @@ function moneyNumber(value: number): string {
 
 function dateTime(value?: string | null): string {
   return value ? new Date(value).toLocaleString() : '-';
+}
+
+// Market data snapshots are a live pass-through from the trading engine
+// (not a DB-backed entity), so they carry no assetClass field — the "/"
+// in a crypto pair symbol (e.g. "BTC/USD") is a reliable display-only
+// signal, distinct from the backend-verified assetClass used everywhere
+// business logic depends on it (proposals/orders/positions).
+function assetClassOf(symbol: string): 'STOCK' | 'CRYPTO' {
+  return symbol.includes('/') ? 'CRYPTO' : 'STOCK';
 }
 
 function pnlClass(value?: string | null): string {

@@ -216,6 +216,10 @@ export interface OrderRequestDTO {
     stop_loss_price: string;
     take_profit_price: string;
   };
+  // Phase 26: crypto orders set fractionable=true (8dp partial fills instead
+  // of whole-unit rounding) and fee_bps (percentage-of-notional fee).
+  fractionable?: boolean;
+  fee_bps?: number;
 }
 
 export interface FillEventDTO {
@@ -454,6 +458,77 @@ export async function analyzeIntraday(
     throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
   }
   return res.json() as Promise<IntradayAnalysisDTO>;
+}
+
+// ── Crypto (Phase 26) ────────────────────────────────────────────────────────
+
+export interface CryptoConfigDTO {
+  trend_ema_fast?: number;
+  trend_ema_slow?: number;
+  setup_momentum_window?: number;
+  setup_volume_window?: number;
+  entry_momentum_window?: number;
+  entry_volume_window?: number;
+  atr_window?: number;
+  stop_atr_multiple?: string;
+  take_profit_atr_multiple?: string;
+  min_risk_reward?: string;
+  max_spread_pct?: string;
+  min_volume_ratio?: string;
+  quantity?: string;
+}
+
+export type CryptoDecisionValue = 'BUY' | 'SELL' | 'HOLD';
+
+export interface CryptoAnalysisDTO {
+  symbol: string;
+  as_of: string;
+  decision: CryptoDecisionValue;
+  confidence: number;
+  reasons: string[];
+  trend_direction: TrendDirectionValue;
+  trend_strength_pct: string;
+  setup_momentum_pct: string;
+  setup_volume_ratio: string;
+  setup_confirmed: boolean;
+  entry_momentum_pct: string;
+  entry_volume_ratio: string;
+  entry_confirmed: boolean;
+  volume_signal: string;
+  atr: string;
+  atr_pct: string;
+  spread_pct: string;
+  liquidity_ok: boolean;
+  entry_price: string;
+  stop_loss: string | null;
+  take_profit: string | null;
+  risk_reward: string | null;
+  market_status: string;
+}
+
+export async function analyzeCrypto(
+  symbol: string,
+  config: CryptoConfigDTO,
+  hasOpenPosition: boolean,
+  requestId?: string,
+  now?: string,
+): Promise<CryptoAnalysisDTO> {
+  const res = await engineFetch('/crypto/analyze', requestId, {
+    method: 'POST',
+    body: JSON.stringify({
+      symbol,
+      config,
+      has_open_position: hasOpenPosition,
+      ...(now ? { now } : {}),
+    }),
+  });
+  if (res.status === 404) {
+    throw new TradingEngineError(`Symbol not found: ${symbol}`, 404);
+  }
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<CryptoAnalysisDTO>;
 }
 
 // ── Risk Engine ───────────────────────────────────────────────────────────────

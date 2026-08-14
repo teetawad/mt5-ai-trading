@@ -86,3 +86,33 @@ settingsRouter.put('/intraday-mode', requireOwner, async (req: Request, res: Res
 
   res.json({ enabled: updated.value === true, updatedAt: updated.updatedAt.toISOString() });
 });
+
+settingsRouter.get('/crypto-trading-mode', async (_req: Request, res: Response) => {
+  const setting = await getSetting(getPool(), 'phase26_crypto_trading_enabled');
+  res.json({ enabled: setting?.value === true });
+});
+
+settingsRouter.put('/crypto-trading-mode', requireOwner, async (req: Request, res: Response) => {
+  const { enabled } = req.body as { enabled?: unknown };
+  if (typeof enabled !== 'boolean') {
+    res.status(422).json({ error: 'VALIDATION_ERROR', message: 'enabled must be boolean' });
+    return;
+  }
+
+  const pool = getPool();
+  const before = await getSetting(pool, 'phase26_crypto_trading_enabled');
+  const updated = await setSetting(pool, 'phase26_crypto_trading_enabled', enabled, req.user!.sub);
+
+  await createAuditLog(pool, {
+    eventType: 'CRYPTO_TRADING_MODE_UPDATED',
+    actorId: req.user!.sub,
+    actorEmail: req.user!.email,
+    entityType: 'system_setting',
+    action: enabled ? 'ENABLE_CRYPTO_TRADING_MODE' : 'DISABLE_CRYPTO_TRADING_MODE',
+    beforeData: before ? { key: before.key, value: before.value } : null,
+    afterData: { key: updated.key, value: updated.value },
+    requestId: requestId(req),
+  });
+
+  res.json({ enabled: updated.value === true, updatedAt: updated.updatedAt.toISOString() });
+});

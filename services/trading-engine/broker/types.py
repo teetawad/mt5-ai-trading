@@ -43,6 +43,16 @@ class OrderRequest(BaseModel):
     order_type: OrderType
     limit_price: Decimal | None = None
     bracket: dict[str, Decimal] | None = None
+    # Phase 26: when True, partial fills round to 8 decimal places instead
+    # of the nearest whole unit — required for crypto (fractional BTC/ETH
+    # quantities). Defaults to False so existing US stock behavior (whole
+    # shares only) is unchanged.
+    fractionable: bool = False
+    # Phase 26: optional percentage-of-notional fee (basis points), used
+    # instead of the flat per-share fee/min-fee model when set. A flat $1
+    # minimum fee is disproportionate on a fraction of a BTC — the caller
+    # (Node) supplies this for crypto orders only.
+    fee_bps: int | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 

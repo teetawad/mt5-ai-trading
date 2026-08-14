@@ -148,9 +148,9 @@ function bracketFromProposal(proposal: TradeProposal): {
   stop_loss_price: string;
   take_profit_price: string;
 } | undefined {
-  const advanced = (proposal.riskSnapshot.phase25 ?? proposal.riskSnapshot.phase22) as
-    | Record<string, unknown>
-    | undefined;
+  const advanced = (
+    proposal.riskSnapshot.phase25 ?? proposal.riskSnapshot.phase26 ?? proposal.riskSnapshot.phase22
+  ) as Record<string, unknown> | undefined;
   if (
     proposal.side !== 'BUY'
     || !advanced
@@ -164,6 +164,16 @@ function bracketFromProposal(proposal: TradeProposal): {
     stop_loss_price: advanced.stopLoss,
     take_profit_price: advanced.takeProfit,
   };
+}
+
+/** Phase 26: crypto orders are always fractionable (8dp fills instead of
+ * whole-unit rounding) and carry the percentage fee (fee_bps) computed at
+ * risk-control time, instead of the stock per-share fee model. */
+function cryptoOrderFields(proposal: TradeProposal): { fractionable: true; fee_bps?: number } | undefined {
+  if (proposal.assetClass !== 'CRYPTO') return undefined;
+  const phase26 = proposal.riskSnapshot.phase26 as Record<string, unknown> | undefined;
+  const feeBps = typeof phase26?.feeBps === 'number' ? phase26.feeBps : undefined;
+  return { fractionable: true, ...(feeBps !== undefined ? { fee_bps: feeBps } : {}) };
 }
 
 async function withTransaction<T>(
@@ -510,6 +520,7 @@ async function updatePositionFromFills(
 
   return upsertPosition(client, {
     symbol: proposal.symbol,
+    assetClass: proposal.assetClass,
     quantity: accounting.quantity,
     averageEntryPrice: accounting.averageEntryPrice,
     realizedPnl: accounting.realizedPnl,
@@ -614,6 +625,7 @@ export async function executeApprovedProposal(
           order_type: proposal.orderType,
           ...(proposal.limitPrice ? { limit_price: proposal.limitPrice } : {}),
           ...(bracketFromProposal(proposal) ? { bracket: bracketFromProposal(proposal) } : {}),
+          ...(cryptoOrderFields(proposal) ?? {}),
         },
         requestId,
       );
@@ -647,6 +659,7 @@ export async function executeApprovedProposal(
     const order = await createOrder(client, {
       executionId: execution.id,
       symbol: proposal.symbol,
+      assetClass: proposal.assetClass,
       side: proposal.side,
       quantity: proposal.quantity,
       orderType: proposal.orderType,
@@ -766,6 +779,7 @@ export async function recordApprovedBracketExit(
     const exitOrder = await createOrder(client, {
       executionId: execution.id,
       symbol: proposal.symbol,
+      assetClass: proposal.assetClass,
       side: 'SELL',
       quantity: fill.quantity,
       orderType: 'MARKET',

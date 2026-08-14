@@ -6,6 +6,7 @@ import { SignalStatus } from '../db/types';
 import {
   createManualTestSignalAndProposal,
   createAiDecisionAndProposal,
+  createCryptoDecisionAndProposal,
   createIntradayDecisionAndProposal,
   createSignalAndProposal,
   manualTestSignalOptions,
@@ -109,6 +110,27 @@ signalsRouter.post('/ai-decision', requireOwner, async (req: Request, res: Respo
 signalsRouter.post('/intraday-decision', requireOwner, async (req: Request, res: Response) => {
   try {
     const result = await createIntradayDecisionAndProposal(getPool(), req.body, {
+      actorId: req.user!.sub,
+      actorEmail: req.user!.email,
+      requestId: requestId(req),
+    });
+    res.status(result.proposal ? 201 : 200).json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      res.status(422).json({ error: 'VALIDATION_ERROR', message: err.message });
+      return;
+    }
+    if (err instanceof NotFoundError) {
+      res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+signalsRouter.post('/crypto-decision', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const result = await createCryptoDecisionAndProposal(getPool(), req.body, {
       actorId: req.user!.sub,
       actorEmail: req.user!.email,
       requestId: requestId(req),

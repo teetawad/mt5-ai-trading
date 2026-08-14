@@ -29,6 +29,11 @@ DEFAULT_SYMBOLS: dict[str, Decimal] = {
     "NVDA": Decimal("900.00"),
     "SPY": Decimal("520.00"),
     "QQQ": Decimal("445.00"),
+    # Phase 26 crypto PAPER trading — tracked 24/7 like every other synthetic
+    # symbol (this provider has no session concept), quoted in USD pairs to
+    # match the Alpaca crypto symbol convention ("BTC/USD").
+    "BTC/USD": Decimal("65000.00"),
+    "ETH/USD": Decimal("3200.00"),
 }
 
 

@@ -48,6 +48,7 @@ const navItems = [
   { to: '/proposals', label: 'Proposals' },
   { to: '/signals', label: 'Signals' },
   { to: '/intraday', label: 'Intraday' },
+  { to: '/crypto', label: 'Crypto' },
   { to: '/orders', label: 'Orders' },
   { to: '/positions', label: 'Positions' },
   { to: '/portfolio', label: 'Portfolio' },

@@ -91,6 +91,8 @@ def _req(
     limit_price: Decimal | None = None,
     idem_key: str = "k-1",
     bracket: dict[str, Decimal] | None = None,
+    fractionable: bool = False,
+    fee_bps: int | None = None,
 ) -> OrderRequest:
     return OrderRequest(
         idempotency_key=idem_key,
@@ -100,6 +102,8 @@ def _req(
         order_type=order_type,
         limit_price=limit_price,
         bracket=bracket,
+        fractionable=fractionable,
+        fee_bps=fee_bps,
     )
 
 
@@ -223,6 +227,106 @@ class TestMarketOrders:
         assert isinstance(fill_data["quantity"], str)
         assert isinstance(fill_data["price"], str)
         assert isinstance(fill_data["fee"], str)
+
+
+# ── Phase 26: fractional quantities and percentage fees ─────────────────────
+
+class TestFractionalQuantityAndFeeBps:
+    def test_fractionable_partial_fill_keeps_fractional_quantity(self):
+        broker, _ = _make_broker(prices={"BTC/USD": Decimal("60000.00")})
+        broker.inject_partial_fill("NEXT_ORDER", Decimal("0.12345678"))
+        result = broker.submit_order(
+            _req(symbol="BTC/USD", quantity=Decimal("1"), fractionable=True)
+        )
+        assert result.fills[0].is_partial is True
+        assert result.fills[0].quantity == Decimal("0.12345678")
+
+    def test_non_fractionable_partial_fill_rounds_to_whole_unit(self):
+        broker, _ = _make_broker()
+        broker.inject_partial_fill("NEXT_ORDER", Decimal("0.55"))
+        result = broker.submit_order(_req(quantity=Decimal("10")))
+        assert result.fills[0].quantity == Decimal("5")
+
+    def test_fractionable_partial_fill_below_one_unit_still_fills(self):
+        """A whole-unit rounding rule would zero out a sub-1-unit crypto
+        partial fill; the fractionable path must not do that."""
+        broker, _ = _make_broker(prices={"BTC/USD": Decimal("60000.00")})
+        broker.inject_partial_fill("NEXT_ORDER", Decimal("0.4"))
+        result = broker.submit_order(
+            _req(symbol="BTC/USD", quantity=Decimal("0.01"), fractionable=True)
+        )
+        assert result.fills[0].is_partial is True
+        assert result.fills[0].quantity == Decimal("0.00400000")
+
+    def test_fee_bps_computes_percentage_of_notional(self):
+        broker, _ = _make_broker(
+            prices={"BTC/USD": Decimal("60000.00")},
+            config=PaperBrokerConfig(
+                slippage_bps=0,
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            ),
+        )
+        result = broker.submit_order(
+            _req(symbol="BTC/USD", quantity=Decimal("0.1"), fee_bps=10, fractionable=True)
+        )
+        # fee = 0.1 * 60000 * 10/10000 = 6.00
+        assert result.fills[0].fee == Decimal("6.00000000")
+
+    def test_fee_bps_overrides_flat_per_share_fee(self):
+        broker, _ = _make_broker(
+            prices={"BTC/USD": Decimal("60000.00")},
+            config=PaperBrokerConfig(
+                fee_per_share=Decimal("0.005"),
+                min_fee=Decimal("1.00"),
+                slippage_bps=0,
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            ),
+        )
+        result = broker.submit_order(
+            _req(symbol="BTC/USD", quantity=Decimal("0.001"), fee_bps=10, fractionable=True)
+        )
+        # fee_bps result (0.001 * 60000 * 10/10000 = 0.06) is used, not the
+        # $1.00 flat min_fee the per-share model would otherwise apply.
+        assert result.fills[0].fee == Decimal("0.06000000")
+
+    def test_bracket_exit_reuses_entry_fee_bps(self):
+        broker, md = _make_broker(
+            prices={"BTC/USD": Decimal("60000.00")},
+            initial_cash=Decimal("100000.00"),
+            config=PaperBrokerConfig(
+                slippage_bps=0,
+                random_seed=42,
+                enable_partial_fills=False,
+                enable_rejections=False,
+            ),
+        )
+        entry = broker.submit_order(
+            _req(
+                symbol="BTC/USD",
+                quantity=Decimal("0.1"),
+                fractionable=True,
+                fee_bps=10,
+                bracket={
+                    "stop_loss_price": Decimal("59000.00"),
+                    "take_profit_price": Decimal("61000.00"),
+                },
+                idem_key="entry",
+            )
+        )
+        assert entry.bracket_order_ids is not None
+        md.set_price("BTC/USD", Decimal("61500.00"))
+        filled = broker.check_pending_orders("BTC/USD", Decimal("61500.00"))
+        assert len(filled) == 1
+        exit_fill = filled[0].fills[0]
+        # fee = 0.1 * fill_price * 10/10000 — percentage, not the $1 flat min_fee
+        expected_fee = (
+            Decimal("0.1") * exit_fill.price * Decimal("10") / Decimal("10000")
+        ).quantize(Decimal("0.00000001"))
+        assert exit_fill.fee == expected_fee
 
 
 # ── Insufficient funds / position ─────────────────────────────────────────────

@@ -121,6 +121,28 @@ class PaperBrokerConfig:
 All probability-based behavior is disabled when `random_seed` is set (for deterministic tests).
 In test mode, partial fills and rejections are triggered by explicit test fixtures, not randomness.
 
+### Phase 26: fractional quantities and percentage fees (crypto)
+
+Two fields on `OrderRequest` (`broker/types.py`), both defaulting to values
+that leave existing US stock behavior completely unchanged:
+
+- **`fractionable: bool = False`.** When `True` (set by the Node API for
+  every crypto order), partial-fill rounding in `_resolve_quantity` uses 8
+  decimal places instead of the nearest whole unit — whole-unit rounding
+  would zero out a partial fill on a sub-1 BTC/ETH order. Stock orders never
+  set this, so `floor(quantity/2)`-style whole-share rounding is unchanged.
+- **`fee_bps: int | None = None`.** When set, the fee for a fill is
+  `quantity × price × fee_bps / 10000` instead of
+  `max(quantity × fee_per_share, min_fee)` — a flat `$1.00` minimum fee is
+  disproportionate on a fraction of a BTC. Carried through bracket exit legs
+  too (`_BracketLegs.fee_bps`, set from the entry order's `fee_bps` at
+  registration time), so a crypto bracket's SL/TP exit uses the same
+  percentage fee model as its entry.
+
+Both fields are populated by the Node crypto risk-controls layer — see
+"Phase 26 Crypto Risk Controls" in `docs/RISK_ENGINE.md` and
+`docs/PHASE_26_CRYPTO_TRADING.md`.
+
 ### Simulation Logic
 
 **Market Order:**
@@ -179,6 +201,12 @@ a BUY entry paired with a stop-loss and a take-profit exit price, computed
 server-side by `phase22RiskControls` (Node) from `phase22_stop_loss_pct` /
 `phase22_take_profit_pct`. Only BUY entries carry a bracket — the broker layer
 never registers one for a SELL.
+
+The broker-layer mechanism below is entirely generic — `phase25RiskControls`
+(ATR-derived bracket, stocks) and `phase26RiskControls` (ATR-derived bracket,
+crypto) both reuse it unmodified via the same `request.bracket` field. A
+crypto SELL (closing an existing long) is not a bracket order — see
+`docs/RISK_ENGINE.md` — and cancels no pending bracket of its own.
 
 **local_paper (`PaperBrokerAdapter`, default `BROKER_PROVIDER`):**
 - On a filled BUY entry with `request.bracket` set, the adapter fills the entry

@@ -2,6 +2,12 @@
 // Monetary / quantity values arrive from pg as strings (NUMERIC → string).
 // Never convert these to number — use Decimal.js for arithmetic.
 
+// Phase 26: denormalized onto signals/trade_proposals/orders/positions,
+// matching this schema's existing convention of denormalizing `symbol` onto
+// every trade-lifecycle table. Defaults to 'STOCK' at the DB layer so every
+// pre-Phase-26 row and code path is unaffected.
+export type AssetClass = 'STOCK' | 'CRYPTO';
+
 export type SignalStatus = 'CREATED' | 'RISK_PASS' | 'RISK_FAIL' | 'EXPIRED';
 export type RiskResult = 'PASS' | 'REJECT';
 export type RiskCheckStage = 'PRE_PROPOSAL' | 'PRE_EXECUTION';
@@ -66,6 +72,7 @@ export interface Signal {
   id: string;
   strategyId: string;
   symbol: string;
+  assetClass: AssetClass;
   side: 'BUY' | 'SELL';
   referencePrice: string;  // NUMERIC(18,8)
   reason: string;
@@ -96,6 +103,7 @@ export interface TradeProposal {
   signalId: string;
   strategyId: string;
   symbol: string;
+  assetClass: AssetClass;
   side: 'BUY' | 'SELL';
   quantity: string;          // NUMERIC(18,8)
   orderType: 'MARKET' | 'LIMIT';
@@ -147,6 +155,7 @@ export interface Order {
   executionId: string;
   brokerOrderId: string | null;
   symbol: string;
+  assetClass: AssetClass;
   side: 'BUY' | 'SELL';
   quantity: string;          // NUMERIC(18,8)
   orderType: string;
@@ -181,6 +190,7 @@ export interface Fill {
 export interface Position {
   id: string;
   symbol: string;
+  assetClass: AssetClass;
   quantity: string;           // NUMERIC(18,8)
   averageEntryPrice: string | null; // NUMERIC(18,8)
   realizedPnl: string;        // NUMERIC(18,8)

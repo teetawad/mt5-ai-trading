@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { Order, OrderStatus } from '../types';
+import { AssetClass, Order, OrderStatus } from '../types';
 
 function mapRow(row: Record<string, unknown>): Order {
   return {
@@ -7,6 +7,7 @@ function mapRow(row: Record<string, unknown>): Order {
     executionId: row.execution_id as string,
     brokerOrderId: row.broker_order_id as string | null,
     symbol: row.symbol as string,
+    assetClass: row.asset_class as AssetClass,
     side: row.side as 'BUY' | 'SELL',
     quantity: row.quantity as string,
     orderType: row.order_type as string,
@@ -181,6 +182,7 @@ export async function createOrder(
   data: {
     executionId: string;
     symbol: string;
+    assetClass?: AssetClass;
     side: 'BUY' | 'SELL';
     quantity: string;
     orderType: string;
@@ -191,12 +193,13 @@ export async function createOrder(
 ): Promise<Order> {
   const { rows } = await db.query(
     `INSERT INTO orders
-       (execution_id, symbol, side, quantity, order_type, limit_price, broker_order_id, bracket_order_ids)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (execution_id, symbol, asset_class, side, quantity, order_type, limit_price, broker_order_id, bracket_order_ids)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
     [
       data.executionId,
       data.symbol,
+      data.assetClass ?? 'STOCK',
       data.side,
       data.quantity,
       data.orderType,

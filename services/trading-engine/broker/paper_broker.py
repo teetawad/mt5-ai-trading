@@ -36,6 +36,7 @@ class _BracketLegs:
     take_profit_price: Decimal
     take_profit_id: str
     stop_loss_id: str
+    fee_bps: int | None = None
 
 
 class PaperBrokerAdapter(BrokerAdapter):
@@ -326,12 +327,9 @@ class PaperBrokerAdapter(BrokerAdapter):
             else current_price * (1 - slippage)
         ).quantize(Decimal("0.00000001"))
 
-        fill_qty, is_partial = self._resolve_quantity(request.quantity)
+        fill_qty, is_partial = self._resolve_quantity(request)
 
-        fee = max(
-            fill_qty * self._config.fee_per_share,
-            self._config.min_fee,
-        ).quantize(Decimal("0.00000001"))
+        fee = self._compute_fee(fill_qty, fill_price, request.fee_bps)
 
         rejection = self._check_funds(request, fill_qty, fill_price, fee)
         if rejection:
@@ -384,10 +382,7 @@ class PaperBrokerAdapter(BrokerAdapter):
     def _fill_at_price(
         self, broker_order_id: str, request: OrderRequest, fill_price: Decimal
     ) -> OrderResult:
-        fee = max(
-            request.quantity * self._config.fee_per_share,
-            self._config.min_fee,
-        ).quantize(Decimal("0.00000001"))
+        fee = self._compute_fee(request.quantity, fill_price, request.fee_bps)
 
         rejection = self._check_funds(request, request.quantity, fill_price, fee)
         if rejection:
@@ -440,6 +435,7 @@ class PaperBrokerAdapter(BrokerAdapter):
             take_profit_price=take_profit_price,
             take_profit_id=take_profit_id,
             stop_loss_id=stop_loss_id,
+            fee_bps=request.fee_bps,
         )
         self._pending_brackets[parent_id] = legs
         self._bracket_leg_parent[take_profit_id] = parent_id
@@ -500,10 +496,7 @@ class PaperBrokerAdapter(BrokerAdapter):
     ) -> OrderResult:
         slippage = Decimal(self._config.slippage_bps) / Decimal("10000")
         fill_price = (trigger_price * (1 - slippage)).quantize(Decimal("0.00000001"))
-        fee = max(
-            legs.quantity * self._config.fee_per_share,
-            self._config.min_fee,
-        ).quantize(Decimal("0.00000001"))
+        fee = self._compute_fee(legs.quantity, fill_price, legs.fee_bps)
 
         exit_request = OrderRequest(
             idempotency_key=f"bracket-exit:{parent_id}:{triggered_reason}",
@@ -511,6 +504,7 @@ class PaperBrokerAdapter(BrokerAdapter):
             side=OrderSide.SELL,
             quantity=legs.quantity,
             order_type=OrderType.MARKET,
+            fee_bps=legs.fee_bps,
         )
         self._apply_fill(exit_request, legs.quantity, fill_price, fee)
 
@@ -568,10 +562,15 @@ class PaperBrokerAdapter(BrokerAdapter):
             return limit_price >= market_price
         return limit_price <= market_price
 
-    def _resolve_quantity(self, quantity: Decimal) -> tuple[Decimal, bool]:
+    def _resolve_quantity(self, request: OrderRequest) -> tuple[Decimal, bool]:
+        quantity = request.quantity
+        # Phase 26: fractionable orders (crypto) round partial fills to 8dp
+        # instead of the nearest whole unit — whole-unit rounding would zero
+        # out a partial fill on a sub-1 BTC/ETH order.
+        quantize_unit = Decimal("0.00000001") if request.fractionable else Decimal("1")
         if self._simulation_mode and self._injected_partials:
             fraction = self._injected_partials.popleft()
-            fill_qty = (quantity * fraction).quantize(Decimal("1"), rounding=ROUND_DOWN)
+            fill_qty = (quantity * fraction).quantize(quantize_unit, rounding=ROUND_DOWN)
             if fill_qty <= 0:
                 return quantity, False
             return fill_qty, True
@@ -580,11 +579,23 @@ class PaperBrokerAdapter(BrokerAdapter):
             and self._config.random_seed is None
             and self._rng.random() < self._config.partial_fill_probability
         ):
-            fill_qty = (quantity / 2).quantize(Decimal("1"), rounding=ROUND_DOWN)
+            fill_qty = (quantity / 2).quantize(quantize_unit, rounding=ROUND_DOWN)
             if fill_qty <= 0:
                 return quantity, False
             return fill_qty, True
         return quantity, False
+
+    def _compute_fee(
+        self, quantity: Decimal, price: Decimal, fee_bps: int | None
+    ) -> Decimal:
+        if fee_bps is not None:
+            return (quantity * price * Decimal(fee_bps) / Decimal("10000")).quantize(
+                Decimal("0.00000001")
+            )
+        return max(
+            quantity * self._config.fee_per_share,
+            self._config.min_fee,
+        ).quantize(Decimal("0.00000001"))
 
     def _check_funds(
         self,

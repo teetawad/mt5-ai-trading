@@ -1,10 +1,11 @@
 import { Pool, PoolClient } from 'pg';
-import { Position } from '../types';
+import { AssetClass, Position } from '../types';
 
 function mapRow(row: Record<string, unknown>): Position {
   return {
     id: row.id as string,
     symbol: row.symbol as string,
+    assetClass: row.asset_class as AssetClass,
     quantity: row.quantity as string,
     averageEntryPrice: row.average_entry_price as string | null,
     realizedPnl: row.realized_pnl as string,
@@ -54,6 +55,7 @@ export async function upsertPosition(
   db: Pool | PoolClient,
   data: {
     symbol: string;
+    assetClass?: AssetClass;
     quantity: string;
     averageEntryPrice?: string | null;
     realizedPnl: string;
@@ -62,11 +64,13 @@ export async function upsertPosition(
     lastPriceAt?: Date | null;
   },
 ): Promise<Position> {
+  // asset_class is intentionally omitted from the ON CONFLICT SET clause —
+  // it's fixed at first creation for a symbol and never changes on update.
   const { rows } = await db.query(
     `INSERT INTO positions
-       (symbol, quantity, average_entry_price, realized_pnl, unrealized_pnl,
+       (symbol, asset_class, quantity, average_entry_price, realized_pnl, unrealized_pnl,
         last_price, last_price_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (symbol) DO UPDATE
        SET quantity           = EXCLUDED.quantity,
            average_entry_price = EXCLUDED.average_entry_price,
@@ -78,6 +82,7 @@ export async function upsertPosition(
      RETURNING *`,
     [
       data.symbol,
+      data.assetClass ?? 'STOCK',
       data.quantity,
       data.averageEntryPrice ?? null,
       data.realizedPnl,

@@ -1,11 +1,12 @@
 import { Pool, PoolClient } from 'pg';
-import { Signal, SignalStatus } from '../types';
+import { AssetClass, Signal, SignalStatus } from '../types';
 
 function mapRow(row: Record<string, unknown>): Signal {
   return {
     id: row.id as string,
     strategyId: row.strategy_id as string,
     symbol: row.symbol as string,
+    assetClass: row.asset_class as AssetClass,
     side: row.side as 'BUY' | 'SELL',
     referencePrice: row.reference_price as string,
     reason: row.reason as string,
@@ -73,6 +74,7 @@ export async function createSignal(
   data: {
     strategyId: string;
     symbol: string;
+    assetClass?: AssetClass;
     side: 'BUY' | 'SELL';
     referencePrice: string;
     reason: string;
@@ -84,13 +86,14 @@ export async function createSignal(
 ): Promise<Signal> {
   const { rows } = await db.query(
     `INSERT INTO signals
-       (strategy_id, symbol, side, reference_price, reason, strategy_version,
+       (strategy_id, symbol, asset_class, side, reference_price, reason, strategy_version,
         confidence, market_snapshot, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       data.strategyId,
       data.symbol,
+      data.assetClass ?? 'STOCK',
       data.side,
       data.referencePrice,
       data.reason,

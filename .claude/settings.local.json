@@ -103,7 +103,10 @@
       "Bash(tee /tmp/stop_trade_run2.log)",
       "Bash(tee /tmp/stop_trade_run3.log)",
       "Bash(tee /tmp/start_trade_unrelated_test.log)",
-      "PowerShell(Get-Process *)"
+      "PowerShell(Get-Process *)",
+      "Bash(where psql *)",
+      "Read(//c/Program Files/**)",
+      "Bash(xargs grep -ilE \"ccxt|binance|coinbase\\(?!.*comment\\)|kraken_api|LIVE_TRADING|real.?money|LIVE_BROKER_ENABLED\\\\s*=\\\\s*true\")"
     ]
   }
 }

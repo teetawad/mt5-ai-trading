@@ -10,6 +10,7 @@ import { marketDataRouter } from './routes/market-data';
 import { riskRouter } from './routes/risk';
 import { signalsRouter } from './routes/signals';
 import { intradayRouter } from './routes/intraday';
+import { cryptoRouter } from './routes/crypto';
 import { tradeProposalsRouter } from './routes/trade-proposals';
 import { executionsRouter } from './routes/executions';
 import { ordersRouter } from './routes/orders';
@@ -40,6 +41,7 @@ export function createApp() {
   app.use('/dashboard', dashboardRouter);
   app.use('/signals', signalsRouter);
   app.use('/intraday', intradayRouter);
+  app.use('/crypto', cryptoRouter);
   app.use('/trade-proposals', tradeProposalsRouter);
   app.use('/executions', executionsRouter);
   app.use('/orders', ordersRouter);

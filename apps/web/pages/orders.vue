@@ -56,7 +56,12 @@
           :key="order.id"
           class="border-t border-slate-800/80 hover:bg-slate-800/40"
         >
-          <td class="px-4 py-3 font-semibold text-white">{{ order.symbol }}</td>
+          <td class="px-4 py-3 font-semibold text-white">
+            <div class="flex items-center gap-2">
+              <span>{{ order.symbol }}</span>
+              <StatusPill :label="order.assetClass" />
+            </div>
+          </td>
           <td class="px-4 py-3">{{ order.side }}</td>
           <td class="px-4 py-3">{{ order.orderType }}</td>
           <td class="px-4 py-3 tabular-nums">{{ order.quantity }}</td>
@@ -73,6 +78,7 @@
 type Order = {
   id: string;
   symbol: string;
+  assetClass: 'STOCK' | 'CRYPTO';
   side: string;
   orderType: string;
   quantity: string;

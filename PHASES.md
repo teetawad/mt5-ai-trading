@@ -513,6 +513,61 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 26 -- Crypto PAPER Trading
+
+- [x] Crypto PAPER trading added for BTC/USD and ETH/USD alongside existing
+      US Stocks; US Stock logic unchanged
+- [x] 24/7 market handling — synthetic market data provider tracks BTC/USD
+      and ETH/USD by default (no session concept); `TRADING_SESSION` risk
+      rule bypassed at the Node call site for crypto proposals only
+- [x] Realtime market data (synthetic provider, live-tick, same mechanism as
+      US stocks)
+- [x] Fractional quantities — `OrderRequest.fractionable` (Python), 8dp
+      position sizing (Node `phase26RiskControls`), percentage-based
+      `fee_bps` fee model
+- [x] AI analysis using 5m / 15m / 1h (`strategy/crypto/analysis.py`,
+      1h trend / 15m setup / 5m entry, no-look-ahead, mirrors Phase 25)
+- [x] BUY / SELL / HOLD decision output (SELL closes an existing long on a
+      confirmed bearish reversal; this PAPER broker cannot short)
+- [x] Risk-based position sizing (Node `phase26RiskControls`, fractional)
+- [x] Stop Loss / Take Profit PAPER bracket orders (reuses Phase 22/23/25
+      broker bracket mechanism, ATR-derived prices, BUY only)
+- [x] Max loss per trade (`phase26_max_loss_per_trade_usd`) and an
+      additional crypto-specific max daily loss
+      (`phase26_max_daily_loss_usd`), layered on top of the existing
+      platform-wide daily-loss kill switch
+- [x] Per-symbol cooldown (`phase26_cooldown_seconds_per_symbol`)
+- [x] Spread/slippage checks (`phase26_max_spread_pct`,
+      `phase26_estimated_slippage_pct` / `_max_estimated_slippage_pct`)
+- [x] Duplicate/pending-order protection (reuses existing symbol-scoped
+      checks)
+- [x] Owner approval required before every new crypto position (BUY and
+      SELL both flow through the same `createSignalAndProposal` →
+      `PENDING_APPROVAL` → approve/reject pipeline as every other proposal
+      source)
+- [x] Automatic approved SL/TP exits (reuses `reconcileBracketOrders`
+      unmodified — no code change needed, already symbol-agnostic)
+- [x] Risk Engine supports market-specific rules — asset-class-aware
+      `riskConfig()` session bypass, market-specific settings, fractional
+      vs whole-unit sizing (see `docs/RISK_ENGINE.md`, "Phase 26 Crypto Risk
+      Controls")
+- [x] STOCK vs CRYPTO clearly distinguished — `asset_class` column on
+      `signals`/`trade_proposals`/`orders`/`positions` (server-derived from
+      symbol, never client input), badges throughout the UI (Positions,
+      Orders, Proposals, Dashboard, dedicated `/crypto` page)
+- [x] `PAPER TRADING ONLY` — no live trading endpoint, credential, or SDK
+      introduced; every crypto order still routes through
+      `PaperBrokerAdapter` only
+- [x] Documented in `docs/PHASE_26_CRYPTO_TRADING.md`, with cross-references
+      added to `docs/RISK_ENGINE.md`, `docs/PAPER_BROKER.md`,
+      `docs/DATABASE.md`, `docs/API.md`
+- [x] Python tests (crypto strategy analysis, broker fractional/fee
+      support, market data defaults) and Node tests (crypto risk controls,
+      decision service, route-level BUY/SELL/HOLD flow) — all passing
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

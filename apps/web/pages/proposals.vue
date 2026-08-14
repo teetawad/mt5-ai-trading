@@ -67,7 +67,12 @@
           :class="selected?.id === proposal.id ? 'bg-sky-400/5' : ''"
           @click="selected = proposal"
         >
-          <td class="px-4 py-3 font-semibold text-white">{{ proposal.symbol }}</td>
+          <td class="px-4 py-3 font-semibold text-white">
+            <div class="flex items-center gap-2">
+              <span>{{ proposal.symbol }}</span>
+              <StatusPill :label="proposal.assetClass" />
+            </div>
+          </td>
           <td class="px-4 py-3">{{ proposal.side }}</td>
           <td class="px-4 py-3 tabular-nums">{{ proposal.quantity }}</td>
           <td class="px-4 py-3 tabular-nums">{{ currency(proposal.referencePrice) }}</td>
@@ -241,6 +246,7 @@
 type Proposal = {
   id: string;
   symbol: string;
+  assetClass: 'STOCK' | 'CRYPTO';
   side: string;
   quantity: string;
   orderType: string;

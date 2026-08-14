@@ -188,6 +188,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
   return {
     id: 'pos-1',
     symbol: 'AAPL',
+    assetClass: 'STOCK',
     quantity: '10.00000000',
     averageEntryPrice: '100.00000000',
     realizedPnl: '0.00000000',

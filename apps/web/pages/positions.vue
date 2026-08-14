@@ -55,7 +55,12 @@
           :key="position.id"
           class="border-t border-slate-800/80 hover:bg-slate-800/40"
         >
-          <td class="px-4 py-3 font-semibold text-white">{{ position.symbol }}</td>
+          <td class="px-4 py-3 font-semibold text-white">
+            <div class="flex items-center gap-2">
+              <span>{{ position.symbol }}</span>
+              <StatusPill :label="position.assetClass" />
+            </div>
+          </td>
           <td class="px-4 py-3 tabular-nums">{{ position.quantity }}</td>
           <td class="px-4 py-3 tabular-nums">{{ money(position.averageEntryPrice) }}</td>
           <td class="px-4 py-3 tabular-nums">{{ money(position.lastPrice) }}</td>
@@ -86,6 +91,7 @@
 type Position = {
   id: string;
   symbol: string;
+  assetClass: 'STOCK' | 'CRYPTO';
   quantity: string;
   averageEntryPrice: string | null;
   lastPrice: string | null;

@@ -164,6 +164,38 @@ class TestSyntheticProvider:
         assert len(bars) == 1
 
 
+# ── Phase 26: crypto default symbols ─────────────────────────────────────────
+
+class TestSyntheticProviderCryptoDefaults:
+    def _make(self, **kw) -> SyntheticMarketDataProvider:
+        # No explicit `symbols` — exercises the real DEFAULT_SYMBOLS dict,
+        # confirming BTC/USD and ETH/USD ship as tracked defaults.
+        return SyntheticMarketDataProvider(tick_interval_seconds=0, random_seed=42, **kw)
+
+    def test_btc_and_eth_are_tracked_by_default(self):
+        p = self._make()
+        assert "BTC/USD" in p.tracked_symbols()
+        assert "ETH/USD" in p.tracked_symbols()
+
+    def test_crypto_snapshot_never_stale_immediately_after_tick(self):
+        """No session/market-hours concept exists in this provider, so a
+        crypto symbol behaves exactly like every other symbol here — always
+        tradable, 24/7, once it has a fresh tick."""
+        p = self._make()
+        snap = p.get_snapshot("BTC/USD")
+        assert snap.is_stale is False
+        assert snap.bid < snap.price < snap.ask
+
+    def test_crypto_historical_bars_support_intraday_timeframes(self):
+        p = self._make()
+        for timeframe in ("5Min", "15Min", "1Hour"):
+            bars = p.get_historical_bars(
+                "BTC/USD", timeframe=timeframe, start="2020-01-01", limit=10
+            )
+            assert len(bars) == 10
+            assert all(bar.symbol == "BTC/USD" for bar in bars)
+
+
 # ── CSVMarketDataProvider ─────────────────────────────────────────────────────
 
 class TestCSVProvider:

@@ -271,6 +271,68 @@ automatic (no-new-approval) exit mechanisms live in
 
 ---
 
+## Phase 26 Crypto Risk Controls (Node-side)
+
+A fourth advanced-risk-controls layer, `phase26RiskControls` in
+`crypto-decision-service.ts`, runs for proposals created via
+`POST /signals/crypto-decision` (BTC/USD, ETH/USD). Same two-layer
+(Python + Node) evaluation model as Phase 22/25, but with three
+market-specific differences documented here because they are the concrete
+answer to "how does the risk engine support market-specific rules":
+
+- **No `TRADING_SESSION` gating.** `riskConfig(db, assetClass)` takes an
+  `AssetClass` parameter; when `'CRYPTO'`, it forces
+  `trading_session_start`/`trading_session_end` to `undefined` in the
+  `RiskEvaluationRequest` sent to the shared Python `risk.engine.evaluate`,
+  regardless of the stock session configured in `system_settings` — crypto
+  markets trade 24/7. This bypass happens entirely at the Node call site; the
+  shared Python risk engine itself is unmodified, so stock session gating is
+  unaffected.
+- **Fractional position sizing.** Every other sizing path in this codebase
+  rounds `quantity` to whole units (`toDecimalPlaces(0, ROUND_DOWN)`) — correct
+  for stock shares, wrong for a fraction of a BTC. `phase26RiskControls` rounds
+  to 8 decimal places instead. The same distinction exists at the broker layer:
+  `OrderRequest.fractionable` (Python, `broker/types.py`) defaults to `false`
+  (unchanged stock behavior) and is only set `true` for crypto orders — see
+  `docs/PAPER_BROKER.md`.
+- **Bidirectional decision, single-sided risk.** `analyze_crypto_multi_timeframe`
+  (Python, `strategy/crypto/analysis.py`) can emit BUY, SELL, or HOLD — SELL
+  means "close an existing long on a confirmed bearish reversal," never a new
+  short (this PAPER broker cannot short — see `_check_funds` in
+  `broker/paper_broker.py`). `phase26RiskControls` only computes a risk-budgeted
+  bracket for BUY; a SELL is sized to whatever quantity is already held
+  (`PHASE26_NO_POSITION_TO_SELL` if none) and carries no bracket
+  (`orderClass: 'SINGLE'`).
+
+Failed-rule vocabulary (`phase26_*`-prefixed settings unless noted):
+
+- **PHASE26_CRYPTO_TRADING_DISABLED** — master toggle (`phase26_crypto_trading_enabled`).
+- **PHASE26_NO_ENTRY_SIGNAL** — the Python analysis decision no longer matches
+  the side requested (re-evaluated fresh on every proposal creation and again
+  on approval).
+- **PHASE26_ESTIMATED_SLIPPAGE**, **PHASE26_BID_ASK_SPREAD**,
+  **PHASE26_INVALID_STOP_DISTANCE**, **PHASE26_MIN_RISK_REWARD** (BUY only),
+  **PHASE26_MAX_LOSS_PER_TRADE** (BUY only), **PHASE26_COOLDOWN**,
+  **PHASE26_DUPLICATE_EXPOSURE** (BUY only), **PHASE26_DUPLICATE_PENDING_ORDER**,
+  **PHASE26_MAX_TRADES_PER_SYMBOL_PER_DAY**, **PHASE26_MAX_TRADES_PER_DAY_TOTAL**
+  — same shape as the equivalent Phase 22/25 rules.
+- **PHASE26_NO_POSITION_TO_SELL** — SELL requested with no (or zero) held quantity.
+- **PHASE26_PLATFORM_MAX_DAILY_LOSS** — the existing platform-wide
+  `max_daily_loss_usd` / kill-switch-auto-disable circuit breaker, evaluated
+  the same way for crypto as for every other trade.
+- **PHASE26_CRYPTO_MAX_DAILY_LOSS** — an *additional*, crypto-specific budget
+  (`phase26_max_daily_loss_usd`), layered on top of (never replacing) the
+  platform-wide check above. Documented decision: this reuses the
+  whole-portfolio `dailyPnl` figure (there is no crypto-only P&L ledger), so it
+  is a tighter or looser *threshold* the owner can set for crypto, not an
+  independently-measured crypto P&L. Acceptable for PAPER; would need a
+  per-asset-class P&L breakdown before any live-trading consideration.
+
+Full detail, the multi-timeframe signal layer, and the 24/7 market model live
+in `docs/PHASE_26_CRYPTO_TRADING.md`.
+
+---
+
 ## Risk Configuration API
 
 ```
@@ -294,3 +356,12 @@ GET  /risk/checks/:id         — specific risk check detail
   "Daily P&L and the auto-disable circuit breaker" above.
 - **Concentration calculation:** Does it include pending orders in notional?
   Currently yes (conservative) — needs owner confirmation.
+- **Crypto daily-loss measurement (Phase 26):** `PHASE26_CRYPTO_MAX_DAILY_LOSS`
+  compares against whole-portfolio `dailyPnl`, not a crypto-only figure —
+  see "Phase 26 Crypto Risk Controls" above. Owner should decide whether a
+  true per-asset-class P&L ledger is worth building before this graduates
+  past PAPER.
+- **Crypto fee model (Phase 26):** simulated as a flat `phase26_fee_bps`
+  (basis points of notional) rather than modeling maker/taker spread or
+  per-exchange fee tiers. Reasonable for PAPER-only realism; would need
+  revisiting for any live-trading consideration.
