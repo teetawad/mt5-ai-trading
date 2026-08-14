@@ -114,6 +114,26 @@ export async function findActiveExposureProposals(
   }));
 }
 
+export async function countProposalsForStrategyToday(
+  db: Pool | PoolClient,
+  strategyId: string,
+  symbol?: string,
+): Promise<number> {
+  const now = new Date();
+  const todayStartUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const clauses = ['strategy_id = $1', "status != 'RISK_REJECTED'", 'created_at >= $2'];
+  const values: unknown[] = [strategyId, todayStartUtc];
+  if (symbol) {
+    values.push(symbol);
+    clauses.push(`symbol = $${values.length}`);
+  }
+  const { rows } = await db.query<{ count: number }>(
+    `SELECT COUNT(*)::int AS count FROM trade_proposals WHERE ${clauses.join(' AND ')}`,
+    values,
+  );
+  return rows[0]?.count ?? 0;
+}
+
 export async function findPendingApprovalProposals(
   db: Pool | PoolClient,
 ): Promise<TradeProposal[]> {

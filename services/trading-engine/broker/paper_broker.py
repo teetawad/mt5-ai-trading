@@ -206,6 +206,20 @@ class PaperBrokerAdapter(BrokerAdapter):
                 OrderStatus.ERROR,
             ):
                 return current
+
+            parent_id = self._bracket_leg_parent.get(broker_order_id)
+            if parent_id is not None and parent_id in self._pending_brackets:
+                # Cancelling either leg (or the parent entry id, which also
+                # maps to itself in _bracket_leg_parent) must cancel the
+                # whole bracket. Leaving it registered in _pending_brackets
+                # would let a later price cross still call
+                # _fill_bracket_leg — which applies the fill unconditionally,
+                # without _check_funds — corrupting the paper position/cash
+                # for a symbol that was already closed out some other way
+                # (e.g. a Phase 25 time-based / end-of-day exit).
+                self._cancel_bracket(parent_id)
+                return self._orders[broker_order_id]
+
             cancelled = OrderResult(
                 broker_order_id=broker_order_id,
                 status=OrderStatus.CANCELLED,
@@ -214,6 +228,30 @@ class PaperBrokerAdapter(BrokerAdapter):
             self._orders[broker_order_id] = cancelled
             self._pending_limit_orders.pop(broker_order_id, None)
             return cancelled
+
+    def _cancel_bracket(self, parent_id: str) -> None:
+        """Cancels both pending legs of a bracket. Caller must hold self._lock."""
+        legs = self._pending_brackets.pop(parent_id)
+        bracket_ids = {
+            "parent": parent_id,
+            "take_profit": legs.take_profit_id,
+            "stop_loss": legs.stop_loss_id,
+        }
+        for leg_id in (legs.take_profit_id, legs.stop_loss_id):
+            existing = self._orders.get(leg_id)
+            if existing is not None and existing.status in (
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+                OrderStatus.ERROR,
+            ):
+                continue
+            self._orders[leg_id] = OrderResult(
+                broker_order_id=leg_id,
+                status=OrderStatus.CANCELLED,
+                fills=[],
+                bracket_order_ids=bracket_ids,
+            )
 
     def get_paper_portfolio(self) -> PaperPortfolio:
         with self._lock:

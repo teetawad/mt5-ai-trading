@@ -166,6 +166,19 @@ proposal:
 - `recordApprovedBracketExit` is idempotent per broker `fill_id`: replaying
   the same exit fill is a no-op on the second call.
 
+### Additional exit reasons (Phase 25)
+
+`orders.exit_reason` also accepts `MAX_HOLDING_TIME` and `END_OF_DAY`,
+alongside the existing `TAKE_PROFIT` / `STOP_LOSS` / `MANUAL` / `OTHER`
+(see the `orders_exit_reason_check` constraint, extended in
+`database/migrations/0020_phase25_intraday_settings.sql`). These are set by
+`reconcileIntradayTimeExits`, not `reconcileBracketOrders`: it cancels the
+pending bracket first (see "Bracket cancellation" in `docs/PAPER_BROKER.md`),
+then submits a MARKET SELL and records the new `orders` row the same way a
+bracket exit does. Like bracket exits, this never changes the proposal's own
+state machine — the proposal stays terminal at `FILLED`; only the `orders`
+sub-state changes. See `docs/PHASE_25_INTRADAY_TRADING.md`.
+
 ---
 
 ## Signal State (separate from Proposal)

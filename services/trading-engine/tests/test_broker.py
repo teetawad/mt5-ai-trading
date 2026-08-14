@@ -606,6 +606,62 @@ class TestBracketOrders:
         assert tp.status == OrderStatus.PENDING
         assert sl.status == OrderStatus.PENDING
 
+    def test_cancel_order_on_take_profit_leg_cancels_whole_bracket(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        tp_id = result.bracket_order_ids["take_profit"]
+        sl_id = result.bracket_order_ids["stop_loss"]
+
+        cancelled = broker.cancel_order(tp_id)
+
+        assert cancelled.status == OrderStatus.CANCELLED
+        assert broker.get_order(sl_id).status == OrderStatus.CANCELLED
+
+    def test_cancel_order_on_stop_loss_leg_cancels_whole_bracket(self):
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        tp_id = result.bracket_order_ids["take_profit"]
+        sl_id = result.bracket_order_ids["stop_loss"]
+
+        cancelled = broker.cancel_order(sl_id)
+
+        assert cancelled.status == OrderStatus.CANCELLED
+        assert broker.get_order(tp_id).status == OrderStatus.CANCELLED
+
+    def test_cancelled_bracket_does_not_phantom_fill_on_later_price_cross(self):
+        """Regression test (Phase 25): a bracket cancelled out-of-band (e.g. a
+        manual/time-based position close) must never let a later price cross
+        still fill a leg — that would apply a second, unchecked exit fill on
+        top of a position that was already closed some other way."""
+        broker, _ = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        tp_id = result.bracket_order_ids["take_profit"]
+
+        broker.cancel_order(tp_id)
+        # Manually flatten the position out-of-band, as a time-based/EOD exit would.
+        broker.submit_order(_req(side=OrderSide.SELL, idem_key="manual-exit"))
+        cash_after_manual_exit = broker.get_paper_portfolio().cash
+
+        # A price cross that would have triggered the take-profit leg must be a no-op.
+        filled = broker.check_pending_orders("AAPL", Decimal("165.00"))
+
+        assert filled == []
+        assert broker.get_paper_portfolio().positions.get("AAPL", Decimal("0")) == Decimal("0")
+        assert broker.get_paper_portfolio().cash == cash_after_manual_exit
+
+    def test_cancel_order_on_already_filled_leg_is_a_no_op(self):
+        broker, md = _make_broker()
+        result = broker.submit_order(_req(bracket=self._bracket()))
+        tp_id = result.bracket_order_ids["take_profit"]
+        sl_id = result.bracket_order_ids["stop_loss"]
+        md.set_price("AAPL", Decimal("165.00"))
+        broker.get_order(tp_id)  # lazily fills take-profit, cancels stop-loss
+
+        cancelled_again = broker.cancel_order(tp_id)
+
+        assert cancelled_again.status == OrderStatus.FILLED
+        assert broker.get_order(sl_id).status == OrderStatus.CANCELLED
+
     def test_bracket_only_registered_for_buy_entries(self):
         broker, _ = _make_broker(initial_cash=Decimal("200000.00"))
         broker.submit_order(_req(quantity=Decimal("10"), idem_key="buy-first"))

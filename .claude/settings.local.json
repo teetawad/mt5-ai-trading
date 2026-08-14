@@ -74,7 +74,23 @@
       "Bash(npx vitest *)",
       "Bash(TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\" npx vitest run --no-file-parallelism)",
       "Bash(npx nuxt *)",
-      "Bash(echo \"EXIT CODE: $?\")"
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(.venv/Scripts/python.exe *)",
+      "Bash(docker version *)",
+      "Bash(docker exec *)",
+      "Bash(break)",
+      "Bash(docker volume *)",
+      "Bash(grep -v \".test.ts:.*//\")",
+      "Bash(npx nuxi *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(env -u TEST_DATABASE_URL DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5432/trade_dev\" npx tsx src/db/migrate-cli.ts)",
+      "Bash(env -u TEST_DATABASE_URL DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5432/trade_dev\" npx tsx src/bootstrap/owner-cli.ts --email dev-owner@example.com --password \"DevOwnerPass123!\")",
+      "Bash(PGPASSWORD=trade_dev_password_local docker exec -e PGPASSWORD=trade_dev_password_local trade_postgres psql -U trade_user -d trade_dev -c \"DELETE FROM users WHERE email = '--email';\")",
+      "Bash(npx tsx *)",
+      "Bash(curl -s http://127.0.0.1:8000/health)",
+      "Bash(pkill -f \"uvicorn main:app\")",
+      "Bash(pkill -f \"tsx src/index.ts\")",
+      "Bash(pkill -f \"nuxt dev\")"
     ]
   }
 }

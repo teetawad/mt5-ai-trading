@@ -56,3 +56,33 @@ settingsRouter.put('/kill-switch', requireOwner, async (req: Request, res: Respo
 
   res.json({ enabled: updated.value !== false, updatedAt: updated.updatedAt.toISOString() });
 });
+
+settingsRouter.get('/intraday-mode', async (_req: Request, res: Response) => {
+  const setting = await getSetting(getPool(), 'phase25_intraday_mode_enabled');
+  res.json({ enabled: setting?.value === true });
+});
+
+settingsRouter.put('/intraday-mode', requireOwner, async (req: Request, res: Response) => {
+  const { enabled } = req.body as { enabled?: unknown };
+  if (typeof enabled !== 'boolean') {
+    res.status(422).json({ error: 'VALIDATION_ERROR', message: 'enabled must be boolean' });
+    return;
+  }
+
+  const pool = getPool();
+  const before = await getSetting(pool, 'phase25_intraday_mode_enabled');
+  const updated = await setSetting(pool, 'phase25_intraday_mode_enabled', enabled, req.user!.sub);
+
+  await createAuditLog(pool, {
+    eventType: 'INTRADAY_MODE_UPDATED',
+    actorId: req.user!.sub,
+    actorEmail: req.user!.email,
+    entityType: 'system_setting',
+    action: enabled ? 'ENABLE_INTRADAY_MODE' : 'DISABLE_INTRADAY_MODE',
+    beforeData: before ? { key: before.key, value: before.value } : null,
+    afterData: { key: updated.key, value: updated.value },
+    requestId: requestId(req),
+  });
+
+  res.json({ enabled: updated.value === true, updatedAt: updated.updatedAt.toISOString() });
+});

@@ -263,6 +263,53 @@ Response 200:
 
 ---
 
+## Intraday (Phase 25)
+
+```
+GET  /intraday/analysis/:symbol      — multi-timeframe analysis + sizing preview (no proposal created)
+POST /intraday/reconcile-time-exits  — manual trigger for the max-holding-time / end-of-day exit sweep (owner only)
+POST /signals/intraday-decision      — run the intraday strategy; BUY creates a PENDING_APPROVAL proposal (owner only)
+GET  /settings/intraday-mode         — current intraday-mode master-toggle state
+PUT  /settings/intraday-mode         — enable/disable intraday mode (owner only, audit logged)
+```
+
+### POST /signals/intraday-decision
+
+Request:
+```json
+{ "symbol": "AAPL" }
+```
+
+Response 201 (BUY):
+```json
+{
+  "analysis": { "decision": "BUY", "trend_direction": "UP", "risk_reward": "2.00000000", "..." : "..." },
+  "signal": { "id": "...", "status": "RISK_PASS" },
+  "riskCheck": { "id": "...", "result": "PASS" },
+  "riskResult": { "result": "PASS", "failed_rules": [] },
+  "proposal": { "id": "...", "status": "PENDING_APPROVAL" }
+}
+```
+
+Response 200 (HOLD — no proposal created):
+```json
+{
+  "analysis": { "decision": "HOLD", "reasons": ["..."] },
+  "signal": null, "riskCheck": null, "riskResult": null, "proposal": null
+}
+```
+
+Notes:
+- Rejects with 422 if `phase25_intraday_mode_enabled` is false, or if `symbol`
+  is not a supported US stock pattern.
+- A `BUY` decision's proposal carries `riskSnapshot.phase25` (ATR-derived
+  bracket, sizing, session status, trade-count usage) — see
+  `docs/PHASE_25_INTRADAY_TRADING.md`.
+- This endpoint never submits a broker order — approval does, exactly like
+  every other proposal source.
+
+---
+
 ## Risk
 
 ```
@@ -604,6 +651,7 @@ These endpoints are called by `apps/api` only.
 
 ```
 POST /signals/generate              — run a strategy and return a signal
+POST /intraday/analyze              — stateless multi-timeframe intraday analysis (Phase 25)
 POST /risk/evaluate                 — evaluate risk for a signal/proposal
 POST /broker/orders                 — submit paper order
 GET  /broker/orders/:id             — get paper order status

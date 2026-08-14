@@ -17,9 +17,11 @@ from market_data.alpaca import AlpacaMarketDataProvider  # noqa: E402
 from market_data.registry import get_provider, init_provider  # noqa: E402
 from routers.broker import router as broker_router  # noqa: E402
 from routers.health import router as health_router  # noqa: E402
+from routers.intraday import router as intraday_router  # noqa: E402
 from routers.market_data import router as market_data_router  # noqa: E402
 from routers.risk import router as risk_router  # noqa: E402
 from routers.signals import router as signals_router  # noqa: E402
+from strategy.intraday.strategy import IntradayMultiTimeframeStrategy  # noqa: E402
 from strategy.moving_average_crossover import MovingAverageCrossoverStrategy  # noqa: E402
 from strategy.registry import register_strategy  # noqa: E402
 
@@ -46,6 +48,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             quantity=Decimal("10"),
         )
     )
+    register_strategy(IntradayMultiTimeframeStrategy(symbol="AAPL"))
 
     # Activate the real-time market-data stream (Alpaca only) — this is the
     # single market-data connection this service opens; get_snapshot prefers
@@ -82,6 +85,7 @@ app.include_router(market_data_router)
 app.include_router(broker_router)
 app.include_router(signals_router)
 app.include_router(risk_router)
+app.include_router(intraday_router)
 
 
 @app.get("/")

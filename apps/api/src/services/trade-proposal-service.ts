@@ -29,6 +29,14 @@ import {
 } from './trading-engine-client';
 import { assertValidProposalTransition, InvalidStateTransitionError } from './proposal-state-machine';
 import { AiDecision, analyzeUsStock } from './ai-decision-service';
+import {
+  INTRADAY_STRATEGY_NAME,
+  Phase25Settings,
+  loadPhase25Settings,
+  phase25RiskControls,
+  runIntradayAnalysis,
+} from './intraday-decision-service';
+import { IntradayAnalysisDTO } from './trading-engine-client';
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -73,6 +81,7 @@ export interface CreateSignalInput {
   reason: string;
   confidence?: string | null;
   aiDecision?: AiDecision | null;
+  phase25?: { analysis: IntradayAnalysisDTO; settings: Phase25Settings } | null;
 }
 
 export interface ActorContext {
@@ -140,7 +149,7 @@ function parseTtlSeconds(value: unknown): number {
   return Number.isInteger(value) && Number(value) > 0 ? Number(value) : 300;
 }
 
-async function riskConfig(db: PoolClient): Promise<RiskConfigDTO> {
+export async function riskConfig(db: Pool | PoolClient): Promise<RiskConfigDTO> {
   const drift = new Decimal(String(await getSettingValue(db, 'price_drift_threshold_pct') ?? '0.02'));
   const concentration = new Decimal(
     String(await getSettingValue(db, 'max_portfolio_concentration_pct') ?? '0.20'),
@@ -374,6 +383,7 @@ function proposalSnapshot(proposal: TradeProposal): Record<string, unknown> {
     limitPrice: proposal.limitPrice,
     estimatedNotional: proposal.estimatedNotional,
     phase22: proposal.riskSnapshot.phase22 ?? null,
+    phase25: proposal.riskSnapshot.phase25 ?? null,
     status: proposal.status,
     expiresAt: proposal.expiresAt.toISOString(),
   };
@@ -438,18 +448,30 @@ export async function createSignalAndProposal(
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
     const latestSnapshot = await findLatestSnapshot(client);
     const referencePrice = input.referencePrice ?? market.price;
-    const phase22 = await phase22RiskControls(client, {
-      symbol,
-      side: input.side,
-      requestedQuantity: input.quantity,
-      entryPrice: market.price,
-      market,
-      paperPortfolio,
-      latestSnapshot,
-      cfg,
-    });
-    const proposalQuantity = phase22.quantity;
-    const estimatedNotional = phase22.estimatedNotional;
+    const advanced = input.phase25
+      ? await phase25RiskControls(client, {
+        symbol,
+        strategyId: strategy.id,
+        analysis: input.phase25.analysis,
+        market,
+        paperPortfolio,
+        latestSnapshot,
+        riskCfg: cfg,
+        settings: input.phase25.settings,
+        requestedQuantity: input.quantity,
+      })
+      : await phase22RiskControls(client, {
+        symbol,
+        side: input.side,
+        requestedQuantity: input.quantity,
+        entryPrice: market.price,
+        market,
+        paperPortfolio,
+        latestSnapshot,
+        cfg,
+      });
+    const proposalQuantity = advanced.quantity;
+    const estimatedNotional = advanced.estimatedNotional;
 
     const signal = await createSignal(client, {
       strategyId: strategy.id,
@@ -489,15 +511,15 @@ export async function createSignalAndProposal(
     );
     const combinedFailedRules = [
       ...riskResult.failed_rules,
-      ...phase22.failedRules,
+      ...advanced.failedRules,
     ];
     const combinedRiskResult = {
       ...riskResult,
-      result: (riskResult.result === 'PASS' && phase22.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
+      result: (riskResult.result === 'PASS' && advanced.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
       failed_rules: combinedFailedRules,
-      reason: [riskResult.reason, phase22.reason].filter(Boolean).join('; ') || null,
+      reason: [riskResult.reason, advanced.reason].filter(Boolean).join('; ') || null,
       aiDecision: input.aiDecision ?? null,
-      phase22: phase22.snapshot,
+      ...(input.phase25 ? { phase25: advanced.snapshot } : { phase22: advanced.snapshot }),
     };
 
     await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, actor.requestId);
@@ -506,7 +528,10 @@ export async function createSignalAndProposal(
       signalId: signal.id,
       stage: 'PRE_PROPOSAL',
       result: combinedRiskResult.result,
-      rulesChecked: [...riskResult.rules_checked, 'PHASE22_ADVANCED_RISK_CONTROLS'],
+      rulesChecked: [
+        ...riskResult.rules_checked,
+        input.phase25 ? 'PHASE25_ADVANCED_RISK_CONTROLS' : 'PHASE22_ADVANCED_RISK_CONTROLS',
+      ],
       failedRules: combinedFailedRules,
       reason: combinedRiskResult.reason,
       marketSnapshot: { ...riskResult.market_snapshot },
@@ -696,6 +721,75 @@ export async function createAiDecisionAndProposal(
   return { aiDecision, ...result };
 }
 
+export interface CreateIntradayDecisionInput {
+  symbol: string;
+}
+
+export interface IntradayDecisionWorkflowResult {
+  analysis: IntradayAnalysisDTO;
+  signal: Signal | null;
+  riskCheck: RiskCheck | null;
+  riskResult: RiskResultDTO | null;
+  proposal: TradeProposal | null;
+}
+
+export async function createIntradayDecisionAndProposal(
+  pool: Pool,
+  input: CreateIntradayDecisionInput,
+  actor: ActorContext,
+): Promise<IntradayDecisionWorkflowResult> {
+  const symbol = String(input.symbol ?? '').trim().toUpperCase();
+  if (!SUPPORTED_US_STOCK_PATTERN.test(symbol)) {
+    throw new ValidationError('symbol must be a supported US stock symbol');
+  }
+  const tradingMode = await getSettingValue<string>(pool, 'trading_mode');
+  if ((tradingMode ?? 'PAPER') !== 'PAPER') {
+    throw new ValidationError('Intraday signals are available in PAPER mode only');
+  }
+
+  const { analysis, settings } = await runIntradayAnalysis(symbol, pool, actor.requestId ?? undefined);
+  if (!settings.intradayModeEnabled) {
+    throw new ValidationError('Intraday trading mode is disabled — enable it in Settings first');
+  }
+
+  if (analysis.decision !== 'BUY') {
+    await createAuditLog(pool, {
+      eventType: 'INTRADAY_DECISION_HOLD',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'signal',
+      entityId: null,
+      action: 'INTRADAY_HOLD_NO_TRADE',
+      afterData: { analysis },
+      requestId: actor.requestId ?? null,
+    });
+    return { analysis, signal: null, riskCheck: null, riskResult: null, proposal: null };
+  }
+
+  const strategy = await upsertStrategy(pool, {
+    name: INTRADAY_STRATEGY_NAME,
+    description: 'Phase 25 intraday multi-timeframe PAPER ONLY strategy. Never submits broker orders.',
+    version: '25.0.0',
+    parameters: { source: 'intraday_multi_timeframe', tradingMode: 'PAPER' },
+    isActive: true,
+  });
+
+  const result = await createSignalAndProposal(pool, {
+    strategyId: strategy.id,
+    symbol,
+    side: 'BUY',
+    quantity: settings.defaultQuantity,
+    orderType: 'MARKET',
+    referencePrice: analysis.entry_price,
+    reason: `INTRADAY MULTI-TIMEFRAME / PAPER ONLY: BUY`
+      + ` (${analysis.trend_direction} trend, R:R ${analysis.risk_reward ?? '-'})`,
+    confidence: null,
+    phase25: { analysis, settings },
+  }, actor);
+
+  return { analysis, ...result };
+}
+
 export async function cancelProposal(
   pool: Pool,
   proposalId: string,
@@ -763,17 +857,31 @@ export async function approveProposal(
     const paperPortfolio = await getPaperPortfolio(actor.requestId ?? undefined);
     const latestSnapshot = await findLatestSnapshot(client);
     const cfg = await riskConfig(client);
-    const phase22 = await phase22RiskControls(client, {
-      symbol: proposal.symbol,
-      side: proposal.side,
-      requestedQuantity: proposal.quantity,
-      entryPrice: market.price,
-      market,
-      paperPortfolio,
-      latestSnapshot,
-      cfg,
-      excludeProposalId: proposal.id,
-    });
+    const isPhase25 = Boolean((proposal.riskSnapshot as Record<string, unknown> | undefined)?.phase25);
+    const advanced = isPhase25
+      ? await phase25RiskControls(client, {
+        symbol: proposal.symbol,
+        strategyId: proposal.strategyId,
+        analysis: (await runIntradayAnalysis(proposal.symbol, client, actor.requestId ?? undefined)).analysis,
+        market,
+        paperPortfolio,
+        latestSnapshot,
+        riskCfg: cfg,
+        settings: await loadPhase25Settings(client),
+        requestedQuantity: proposal.quantity,
+        excludeProposalId: proposal.id,
+      })
+      : await phase22RiskControls(client, {
+        symbol: proposal.symbol,
+        side: proposal.side,
+        requestedQuantity: proposal.quantity,
+        entryPrice: market.price,
+        market,
+        paperPortfolio,
+        latestSnapshot,
+        cfg,
+        excludeProposalId: proposal.id,
+      });
 
     const riskResult = await evaluateRisk(
       {
@@ -799,14 +907,14 @@ export async function approveProposal(
     );
     const combinedFailedRules = [
       ...riskResult.failed_rules,
-      ...phase22.failedRules,
+      ...advanced.failedRules,
     ];
     const combinedRiskResult = {
       ...riskResult,
-      result: (riskResult.result === 'PASS' && phase22.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
+      result: (riskResult.result === 'PASS' && advanced.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
       failed_rules: combinedFailedRules,
-      reason: [riskResult.reason, phase22.reason].filter(Boolean).join('; ') || null,
-      phase22: phase22.snapshot,
+      reason: [riskResult.reason, advanced.reason].filter(Boolean).join('; ') || null,
+      ...(isPhase25 ? { phase25: advanced.snapshot } : { phase22: advanced.snapshot }),
     };
 
     await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, requestId);
@@ -816,7 +924,10 @@ export async function approveProposal(
       proposalId: proposal.id,
       stage: 'PRE_EXECUTION',
       result: combinedRiskResult.result,
-      rulesChecked: [...riskResult.rules_checked, 'PHASE22_ADVANCED_RISK_CONTROLS'],
+      rulesChecked: [
+        ...riskResult.rules_checked,
+        isPhase25 ? 'PHASE25_ADVANCED_RISK_CONTROLS' : 'PHASE22_ADVANCED_RISK_CONTROLS',
+      ],
       failedRules: combinedFailedRules,
       reason: combinedRiskResult.reason,
       marketSnapshot: { ...riskResult.market_snapshot },

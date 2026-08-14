@@ -374,6 +374,87 @@ export async function listStrategies(requestId?: string): Promise<string[]> {
   return res.json() as Promise<string[]>;
 }
 
+// ── Intraday (Phase 25) ──────────────────────────────────────────────────────
+
+export interface IntradaySessionConfigDTO {
+  market_open?: string;
+  market_close?: string;
+  no_new_trades_minutes_before_close?: number;
+  force_close_before_close_minutes?: number;
+  force_close_enabled?: boolean;
+}
+
+export interface IntradayConfigDTO {
+  trend_ema_fast?: number;
+  trend_ema_slow?: number;
+  setup_momentum_window?: number;
+  setup_volume_window?: number;
+  entry_momentum_window?: number;
+  entry_volume_window?: number;
+  atr_window?: number;
+  stop_atr_multiple?: string;
+  take_profit_atr_multiple?: string;
+  min_risk_reward?: string;
+  max_spread_pct?: string;
+  min_volume_ratio?: string;
+  max_holding_minutes?: number;
+  quantity?: string;
+  session?: IntradaySessionConfigDTO;
+}
+
+export type IntradayDecisionValue = 'BUY' | 'HOLD';
+export type TrendDirectionValue = 'UP' | 'DOWN' | 'FLAT';
+export type SessionStatusValue =
+  | 'CLOSED'
+  | 'OPEN_FOR_ENTRIES'
+  | 'NO_NEW_TRADES_NEAR_CLOSE'
+  | 'FORCE_CLOSE_WINDOW';
+
+export interface IntradayAnalysisDTO {
+  symbol: string;
+  as_of: string;
+  decision: IntradayDecisionValue;
+  reasons: string[];
+  trend_direction: TrendDirectionValue;
+  trend_strength_pct: string;
+  setup_momentum_pct: string;
+  setup_volume_ratio: string;
+  setup_confirmed: boolean;
+  entry_momentum_pct: string;
+  entry_volume_ratio: string;
+  entry_confirmed: boolean;
+  volume_signal: string;
+  atr: string;
+  atr_pct: string;
+  spread_pct: string;
+  liquidity_ok: boolean;
+  entry_price: string;
+  stop_loss: string | null;
+  take_profit: string | null;
+  risk_reward: string | null;
+  expected_holding_minutes: number;
+  session_status: SessionStatusValue;
+}
+
+export async function analyzeIntraday(
+  symbol: string,
+  config: IntradayConfigDTO,
+  requestId?: string,
+  now?: string,
+): Promise<IntradayAnalysisDTO> {
+  const res = await engineFetch('/intraday/analyze', requestId, {
+    method: 'POST',
+    body: JSON.stringify({ symbol, config, ...(now ? { now } : {}) }),
+  });
+  if (res.status === 404) {
+    throw new TradingEngineError(`Symbol not found: ${symbol}`, 404);
+  }
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<IntradayAnalysisDTO>;
+}
+
 // ── Risk Engine ───────────────────────────────────────────────────────────────
 
 export type EvaluationStage = 'PRE_PROPOSAL' | 'PRE_EXECUTION';

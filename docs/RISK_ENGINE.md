@@ -244,6 +244,31 @@ covered by the same field-immutability trigger as any other proposal.
 
 ---
 
+## Phase 25 Intraday Risk Controls (Node-side)
+
+A third advanced-risk-controls layer, `phase25RiskControls` in
+`intraday-decision-service.ts`, runs in place of `phase22RiskControls` for
+proposals created via `POST /signals/intraday-decision` — same two-layer
+(Python + Node) evaluation model, same immutable-at-`PENDING_APPROVAL`
+bracket snapshot, but the bracket comes from ATR-derived analysis rather
+than a fixed percentage, and this layer adds per-day trade-count caps:
+
+- **PHASE25_INTRADAY_MODE_DISABLED** — master toggle (`phase25_intraday_mode_enabled`).
+- **PHASE25_SESSION_STATUS** — must be `OPEN_FOR_ENTRIES` (see below).
+- **PHASE25_MIN_RISK_REWARD** — `(takeProfit − entry) / (entry − stopLoss)` must clear `phase25_min_risk_reward`.
+- **PHASE25_MAX_LOSS_PER_TRADE**, **PHASE25_MAX_DAILY_LOSS**, **PHASE25_COOLDOWN**,
+  **PHASE25_DUPLICATE_EXPOSURE**, **PHASE25_DUPLICATE_PENDING_ORDER** — same
+  shape as the equivalent Phase 22 rules, using `phase25_*`-prefixed settings.
+- **PHASE25_MAX_TRADES_PER_SYMBOL_PER_DAY**, **PHASE25_MAX_TRADES_PER_DAY_TOTAL**
+  — new: caps intraday-strategy proposals created today (UTC), scoped to the
+  intraday strategy only.
+
+Full detail, the multi-timeframe signal layer, session gating, and the
+automatic (no-new-approval) exit mechanisms live in
+`docs/PHASE_25_INTRADAY_TRADING.md`.
+
+---
+
 ## Risk Configuration API
 
 ```

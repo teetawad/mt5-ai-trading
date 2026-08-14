@@ -433,6 +433,86 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 22 -- Advanced Server-Side Risk Controls
+
+- [x] Node-side `phase22RiskControls` layer (spread, slippage, cooldown,
+      duplicate exposure/pending-order blocking, max loss per trade)
+- [x] Risk-based position sizing (bounded by risk budget, cash, position
+      limit, portfolio concentration)
+- [x] PAPER bracket (stop-loss/take-profit) proposal snapshot, immutable at
+      `PENDING_APPROVAL`
+- [x] System settings seeded (`database/migrations/0018_seed_phase22_risk_settings.sql`)
+- [x] Documented in `docs/RISK_ENGINE.md` ("Phase 22 Advanced Risk Controls")
+- [ ] Owner review
+
+---
+
+## Phase 23 -- AI-Assisted Decision Layer + PAPER Bracket Orders
+
+- [x] Deterministic `analyzeUsStock` decision layer (`ai-decision-service.ts`),
+      no execution-layer access
+- [x] `POST /signals/ai-decision` — BUY/SELL/HOLD through the same
+      signal -> risk -> proposal pipeline as any other signal source
+- [x] PAPER bracket order support in `PaperBrokerAdapter` and
+      `AlpacaPaperBrokerAdapter` (`bracket_order_ids`, OCO simulation/native)
+- [x] `reconcileBracketOrders` — self-healing bracket-exit reconciliation on
+      startup and every dashboard load
+- [x] `orders.exit_reason` / `orders.bracket_order_ids` columns
+      (`database/migrations/0019_phase23_ai_bracket_state.sql`)
+- [x] Documented in `docs/RISK_ENGINE.md`, `docs/PAPER_BROKER.md`
+- [ ] Owner review
+
+---
+
+## Phase 24 -- Modern Fintech UI and Charts
+
+- [x] Redesigned dashboard, proposals, signals, positions, portfolio, risk,
+      audit, and settings pages
+- [x] Chart components (`BarChart`, `DonutChart`, `MiniLineChart`), status/
+      progress components (`StatusPill`, `ProgressMeter`, `MetricBox`)
+- [x] Realtime position pricing and P&L updates across pages (live portfolio
+      view, single source of truth for positions/dashboard)
+- [ ] Owner review
+
+---
+
+## Phase 25 -- Intraday Trading Mode
+
+- [x] Multi-timeframe intraday strategy (Python): 1h trend / 15m setup / 5m
+      entry, ATR-based stop/target, configurable minimum risk/reward
+- [x] Volume confirmation, spread/liquidity filters
+- [x] No-look-ahead guarantees (bar trimming in live analysis; resampling-
+      based no-look-ahead in the backtest engine) — explicitly tested
+- [x] Regular US market session gating: no new trades near close,
+      configurable end-of-day force-close
+- [x] Risk-based position sizing (Node `phase25RiskControls`)
+- [x] Stop Loss / Take Profit PAPER bracket orders (reuses Phase 22/23
+      broker bracket mechanism, ATR-derived prices)
+- [x] Maximum holding time automatic exit
+- [x] End-of-day automatic position force-close
+- [x] Per-symbol cooldown (independent of the global cooldown setting)
+- [x] Maximum trades per symbol per day / maximum total trades per day
+- [x] Max loss per trade / max daily loss (shared with the platform-wide limit)
+- [x] Pending-order / duplicate-position blocking
+- [x] Bracket-cancellation correctness fix in `PaperBrokerAdapter`
+      (prerequisite for safe early/automatic exits)
+- [x] Intraday backtesting + 5m/15m/1h configuration comparison
+- [x] Intraday Mode UI (`apps/web/pages/intraday.vue`): timeframe/trend/
+      momentum/ATR/volume/entry/SL/TP/expected holding period/risk-reward/
+      position size preview/session status, plus a master enable/disable
+      toggle
+- [x] `PAPER TRADING ONLY` — no live trading endpoint, credential, or SDK
+      introduced
+- [x] Documented in `docs/PHASE_25_INTRADAY_TRADING.md`, with cross-references
+      added to `docs/RISK_ENGINE.md`, `docs/PAPER_BROKER.md`,
+      `docs/ORDER_STATE_MACHINE.md`, `docs/API.md`
+- [x] Python tests (analysis, indicators, resampling, strategy, backtest,
+      broker fix, endpoint) and Node tests (risk controls, decision service,
+      time-exit reconciliation) — all passing
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

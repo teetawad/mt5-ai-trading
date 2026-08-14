@@ -155,7 +155,14 @@ export interface Order {
   filledQuantity: string;    // NUMERIC(18,8)
   averageFillPrice: string | null; // NUMERIC(18,8)
   bracketOrderIds: Record<string, string | null>;
-  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL' | 'OTHER' | null;
+  exitReason:
+    | 'TAKE_PROFIT'
+    | 'STOP_LOSS'
+    | 'MANUAL'
+    | 'OTHER'
+    | 'MAX_HOLDING_TIME'
+    | 'END_OF_DAY'
+    | null;
   createdAt: Date;
   updatedAt: Date;
 }

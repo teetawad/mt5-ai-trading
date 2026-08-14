@@ -12,6 +12,7 @@ import {
   getDayStartEquity,
   getLivePortfolioView,
   reconcileBracketOrders,
+  reconcileIntradayTimeExits,
 } from '../services/trade-execution-service';
 import {
   getBrokerOpenOrders,
@@ -62,6 +63,7 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
   const pool = getPool();
   const requestIdentifier = requestId(req);
   await reconcileBracketOrders(pool, undefined, requestIdentifier);
+  await reconcileIntradayTimeExits(pool, undefined, requestIdentifier);
   // Must run before listProposals below so a proposal whose expiresAt has
   // passed is flipped to EXPIRED here too — otherwise this endpoint's
   // "pending" count can disagree with GET /trade-proposals (which already

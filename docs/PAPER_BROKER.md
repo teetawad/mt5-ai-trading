@@ -216,6 +216,43 @@ and again on every `GET /dashboard/paper` request, so bracket state self-heals
 without any dedicated scheduler. It is idempotent (keyed by the broker's own
 `fill_id`) and never lets one bracket's error block the rest.
 
+### Bracket cancellation (Phase 25)
+
+`cancel_order` on a bracket leg — or on the parent entry order id, which
+also maps to itself in the adapter's internal `_bracket_leg_parent` index —
+now cancels the **whole bracket**: both legs are marked `CANCELLED` and the
+bracket is removed from the adapter's pending-bracket registry.
+
+Before Phase 25 this only flipped the status of the one order object passed
+in; the pending-bracket registry entry (and the *other* leg) were untouched.
+Because `_evaluate_bracket` checks that registry — not the individual order
+objects — a later price cross could still call `_fill_bracket_leg` and apply
+a phantom fill on top of a position that had already been closed some other
+way, corrupting `paper_positions`/`paper_cash` (that internal fill path has
+no `_check_funds` guard, unlike every order-submission path). This mattered
+once Phase 25 needed to close a bracketed position early (maximum holding
+time / end-of-day force-close, see `docs/PHASE_25_INTRADAY_TRADING.md`) —
+the fix makes `cancel_order` the correct, safe way to do that for any
+future caller, not just Phase 25's reconciler.
+
+`AlpacaPaperBrokerAdapter.cancel_order` needed no equivalent change — Alpaca
+already resolves each leg independently via `DELETE /orders/:id`, and
+cancelling one side of a live Alpaca bracket already stops the other from
+firing on Alpaca's own infrastructure.
+
+### Automatic exits beyond SL/TP (Phase 25)
+
+Maximum holding time and end-of-day force-close (Phase 25) execute the same
+way bracket SL/TP already did: **without requesting a new owner approval.**
+This is a deliberate architecture decision, not an oversight — the original
+entry approval already covers the position's complete exit plan (bracket
+prices, max holding time, force-close policy), all frozen into the
+proposal's `riskSnapshot` at creation time. Treating a risk-mandated
+automatic exit as requiring fresh approval would be inconsistent with how
+bracket SL/TP already behaves, and would leave a window where a position
+that has breached its own configured safety limit sits open waiting on a
+human. See "Unresolved decisions" in `docs/PHASE_25_INTRADAY_TRADING.md`.
+
 ---
 
 ## API Endpoints (trading-engine internal)

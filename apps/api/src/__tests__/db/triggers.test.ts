@@ -123,7 +123,7 @@ describe('trade_proposals field immutability trigger', () => {
           'UPDATE trade_proposals SET quantity = $1 WHERE id = $2',
           ['20.00000000', proposal.id],
         ),
-      ).rejects.toThrow('Cannot modify trading parameters');
+      ).rejects.toThrow('Cannot modify approved trading plan');
     });
   });
 

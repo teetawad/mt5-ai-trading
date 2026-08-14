@@ -10,6 +10,7 @@ import { createFill, findFillByBrokerFillId, findFillsByOrder } from '../db/repo
 import {
   createOrder,
   findOrderByExecution,
+  findOrdersByExecution,
   updateOrderStatus,
 } from '../db/repositories/orders';
 import {
@@ -23,7 +24,7 @@ import {
   findOpenPositions,
   upsertPosition,
 } from '../db/repositories/positions';
-import { findOpenBracketOrders } from '../db/repositories/orders';
+import { findOpenBracketOrders, findOpenIntradayPositions, OpenIntradayPosition } from '../db/repositories/orders';
 import { getSettingValue } from '../db/repositories/system-settings';
 import {
   findProposalByIdForUpdate,
@@ -31,7 +32,9 @@ import {
 } from '../db/repositories/trade-proposals';
 import { Execution, Fill, Order, Position, TradeProposal } from '../db/types';
 import { assertValidProposalTransition, InvalidStateTransitionError } from './proposal-state-machine';
+import { computeIntradaySessionStatus, loadPhase25Settings } from './intraday-decision-service';
 import {
+  cancelOrder as cancelBrokerOrder,
   FillEventDTO,
   getAllMarketSnapshots,
   getMarketDataStatus,
@@ -145,19 +148,21 @@ function bracketFromProposal(proposal: TradeProposal): {
   stop_loss_price: string;
   take_profit_price: string;
 } | undefined {
-  const phase22 = proposal.riskSnapshot.phase22 as Record<string, unknown> | undefined;
+  const advanced = (proposal.riskSnapshot.phase25 ?? proposal.riskSnapshot.phase22) as
+    | Record<string, unknown>
+    | undefined;
   if (
     proposal.side !== 'BUY'
-    || !phase22
-    || phase22.orderClass !== 'BRACKET'
-    || typeof phase22.stopLoss !== 'string'
-    || typeof phase22.takeProfit !== 'string'
+    || !advanced
+    || advanced.orderClass !== 'BRACKET'
+    || typeof advanced.stopLoss !== 'string'
+    || typeof advanced.takeProfit !== 'string'
   ) {
     return undefined;
   }
   return {
-    stop_loss_price: phase22.stopLoss,
-    take_profit_price: phase22.takeProfit,
+    stop_loss_price: advanced.stopLoss,
+    take_profit_price: advanced.takeProfit,
   };
 }
 
@@ -864,6 +869,155 @@ export async function reconcileBracketOrders(
         actor,
       );
       result.reconciled += 1;
+    } catch {
+      result.errors += 1;
+    }
+  }
+
+  return result;
+}
+
+export interface IntradayTimeExitResult {
+  checked: number;
+  closed: number;
+  errors: number;
+}
+
+/**
+ * Closes one Phase 25 intraday position that has exceeded its configured
+ * maximum holding time or is inside the session's force-close window.
+ * Cancels the pending bracket first (see PaperBrokerAdapter.cancel_order —
+ * required so a later price cross can never also fill a leg on top of this
+ * exit) and submits a MARKET SELL for the full position. This is an
+ * automatic risk-mandated exit of an already owner-approved position, not a
+ * new trade decision — it never requires a fresh owner approval, mirroring
+ * how bracket SL/TP exits already execute automatically. See
+ * docs/PAPER_BROKER.md.
+ */
+async function closeIntradayPosition(
+  pool: Pool,
+  position: OpenIntradayPosition,
+  exitReason: 'MAX_HOLDING_TIME' | 'END_OF_DAY',
+  actor: ActorContext,
+  requestId: string | undefined,
+): Promise<void> {
+  await withTransaction(pool, async (client) => {
+    const execution = await findExecutionByIdempotencyKey(client, executionKey(position.proposalId));
+    if (!execution) return;
+
+    const existingOrders = await findOrdersByExecution(client, execution.id);
+    if (existingOrders.some((order) => order.exitReason !== null)) return;
+
+    const takeProfitId = position.bracketOrderIds.take_profit;
+    const stopLossId = position.bracketOrderIds.stop_loss;
+    if (takeProfitId) await cancelBrokerOrder(takeProfitId, requestId).catch(() => null);
+    if (stopLossId) await cancelBrokerOrder(stopLossId, requestId).catch(() => null);
+
+    const brokerResult = await submitOrder(
+      {
+        idempotency_key: `intraday-exit:${position.proposalId}:${exitReason}`,
+        symbol: position.symbol,
+        side: 'SELL',
+        quantity: position.quantity,
+        order_type: 'MARKET',
+      },
+      requestId,
+    );
+    if (brokerResult.fills.length === 0) return;
+
+    const exitOrder = await createOrder(client, {
+      executionId: execution.id,
+      symbol: position.symbol,
+      side: 'SELL',
+      quantity: position.quantity,
+      orderType: 'MARKET',
+      brokerOrderId: brokerResult.broker_order_id,
+      bracketOrderIds: {
+        ...position.bracketOrderIds,
+        cancelled_take_profit: takeProfitId ?? null,
+        cancelled_stop_loss: stopLossId ?? null,
+      },
+    });
+    const persistedFills = await persistFills(client, exitOrder.id, brokerResult.fills);
+    await updateOrderStatus(client, exitOrder.id, brokerResult.status, {
+      filledQuantity: filledQuantity(brokerResult.fills),
+      averageFillPrice: averageFillPrice(brokerResult.fills),
+      brokerOrderId: brokerResult.broker_order_id,
+      exitReason,
+    });
+
+    const proposal = await findProposalByIdForUpdate(client, position.proposalId);
+    if (proposal) {
+      await updatePositionFromFills(client, { ...proposal, side: 'SELL' }, brokerResult.fills);
+    }
+    await writePortfolioSnapshot(client, requestId, `INTRADAY_${exitReason}`);
+
+    await createAuditLog(client, {
+      eventType: 'INTRADAY_POSITION_AUTO_CLOSED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'trade_proposal',
+      entityId: position.proposalId,
+      action: `AUTO_CLOSE_${exitReason}`,
+      afterData: {
+        orderId: exitOrder.id,
+        symbol: position.symbol,
+        quantity: position.quantity,
+        exitReason,
+        fills: persistedFills.map((fill) => ({ id: fill.id, price: fill.price, quantity: fill.quantity })),
+      },
+      requestId: requestId ?? null,
+    });
+  });
+}
+
+/**
+ * Finds every open Phase 25 intraday position and automatically closes any
+ * that have exceeded their configured maximum holding time, or that fall
+ * inside the session's force-close-before-close window. Safe to call
+ * repeatedly (each close is idempotent per execution — see
+ * closeIntradayPosition) and never throws: one position's broker error must
+ * not block the others or the caller (dashboard load) that triggered this.
+ */
+export async function reconcileIntradayTimeExits(
+  pool: Pool,
+  actor: ActorContext = SYSTEM_RECONCILIATION_ACTOR,
+  requestId?: string,
+): Promise<IntradayTimeExitResult> {
+  const result: IntradayTimeExitResult = { checked: 0, closed: 0, errors: 0 };
+  let positions: OpenIntradayPosition[];
+  try {
+    positions = await findOpenIntradayPositions(pool);
+  } catch {
+    return result;
+  }
+  if (positions.length === 0) return result;
+
+  const settings = await loadPhase25Settings(pool);
+  const now = new Date();
+  const sessionStatus = computeIntradaySessionStatus(now, settings);
+
+  for (const position of positions) {
+    result.checked += 1;
+    try {
+      const phase25 = position.riskSnapshot.phase25 as Record<string, unknown> | undefined;
+      const maxHoldingMinutes = Number(phase25?.maxHoldingMinutes ?? settings.maxHoldingMinutes);
+      const forceCloseEnabled = phase25?.forceCloseEnabled !== false;
+      const elapsedMinutes = (now.getTime() - position.enteredAt.getTime()) / 60_000;
+
+      let exitReason: 'MAX_HOLDING_TIME' | 'END_OF_DAY' | null = null;
+      if (maxHoldingMinutes > 0 && elapsedMinutes >= maxHoldingMinutes) {
+        exitReason = 'MAX_HOLDING_TIME';
+      } else if (
+        forceCloseEnabled
+        && (sessionStatus === 'FORCE_CLOSE_WINDOW' || sessionStatus === 'CLOSED')
+      ) {
+        exitReason = 'END_OF_DAY';
+      }
+      if (!exitReason) continue;
+
+      await closeIntradayPosition(pool, position, exitReason, actor, requestId);
+      result.closed += 1;
     } catch {
       result.errors += 1;
     }

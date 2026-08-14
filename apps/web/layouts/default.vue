@@ -47,6 +47,7 @@ const navItems = [
   { to: '/', label: 'Dashboard' },
   { to: '/proposals', label: 'Proposals' },
   { to: '/signals', label: 'Signals' },
+  { to: '/intraday', label: 'Intraday' },
   { to: '/orders', label: 'Orders' },
   { to: '/positions', label: 'Positions' },
   { to: '/portfolio', label: 'Portfolio' },
