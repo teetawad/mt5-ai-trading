@@ -5,6 +5,10 @@ set "PROJECT_ROOT=%~dp0"
 set "RUNTIME_DIR=%PROJECT_ROOT%.trade-runtime"
 set "TRADE_PROJECT_ROOT=%PROJECT_ROOT%"
 set "TRADE_RUNTIME_DIR=%RUNTIME_DIR%"
+rem A trailing backslash immediately before a closing quote is parsed as an
+rem escaped quote by CommandLineToArgvW, which would swallow the next
+rem argument — strip it before passing PROJECT_ROOT as a quoted CLI arg.
+set "PROJECT_ROOT_ARG=%PROJECT_ROOT:~0,-1%"
 set "NO_PAUSE=0"
 set "STARTUP_EXIT_CODE=0"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
@@ -52,19 +56,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if errorlevel 1 goto fail
 
 echo.
-echo Checking service ports...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$checks = @(" ^
-  "  @{ Name = 'Web'; Port = 3000 }," ^
-  "  @{ Name = 'API'; Port = 4000 }," ^
-  "  @{ Name = 'Trading Engine'; Port = 8000 }" ^
-  ");" ^
-  "foreach ($check in $checks) {" ^
-  "  $connection = Get-NetTCPConnection -LocalPort $check.Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;" ^
-  "  if ($connection) { Write-Host ('ERROR: ' + $check.Name + ' cannot start because port ' + $check.Port + ' is already listening. Owning PID: ' + $connection.OwningProcess); exit 1 }" ^
-  "  Write-Host ('OK: Port ' + $check.Port + ' is free for ' + $check.Name + '.');" ^
-  "}"
-if errorlevel 1 goto fail
+echo Checking for stale Trade Platform processes and freeing their ports...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%trade-launcher.ps1" -Action PreStartCleanup -ProjectRoot "%PROJECT_ROOT_ARG%" -RuntimeDir "%RUNTIME_DIR%"
+if errorlevel 1 (
+    echo.
+    echo ERROR: One or more ports are occupied by a process this launcher cannot
+    echo safely identify as its own. See the PID and command line above, close
+    echo it yourself if appropriate, then re-run start-trade.bat.
+    goto fail
+)
 
 echo.
 echo Checking Docker...
@@ -168,57 +168,13 @@ if errorlevel 1 (
 echo OK: Database migrations completed.
 
 echo.
-echo Opening service windows...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ErrorActionPreference = 'Stop';" ^
-  "$runtime = $env:TRADE_RUNTIME_DIR;" ^
-  "$root = $env:TRADE_PROJECT_ROOT;" ^
-  "function Start-TradeService([string] $name, [string] $dir, [string] $cmd) {" ^
-  "  if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw ($name + ' directory not found: ' + $dir); }" ^
-  "  $pidFile = Join-Path $runtime ($name + '.pid');" ^
-  "  $launcher = Join-Path $runtime ($name + '.cmd');" ^
-  "  if (Test-Path -LiteralPath $pidFile) {" ^
-  "    $existing = Get-Content -LiteralPath $pidFile -TotalCount 1 -ErrorAction SilentlyContinue;" ^
-  "    if ($existing -and (Get-Process -Id ([int] $existing) -ErrorAction SilentlyContinue)) {" ^
-  "      throw ($name + ' already appears to be running as PID ' + $existing + '. Run stop-trade.bat first.');" ^
-  "    }" ^
-  "    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue;" ^
-  "  }" ^
-  "  Write-Host ('Starting ' + $name + '...');" ^
-  "  Set-Content -LiteralPath $launcher -Encoding ASCII -Value @('@echo off', ('title ' + $name), 'echo ============================================================', ('echo ' + $name), 'echo ============================================================', ('cd /d ' + [char]34 + $dir + [char]34), 'echo Working directory: %CD%', 'echo Command:', ('echo   ' + $cmd), 'echo.', $cmd, 'echo.', ('echo ' + $name + ' exited with errorlevel %%ERRORLEVEL%%.'), 'echo Review the error above.', 'pause');" ^
-  "  $process = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', $launcher) -PassThru;" ^
-  "  Set-Content -LiteralPath $pidFile -Encoding ASCII -Value $process.Id;" ^
-  "  Write-Host ($name + ' wrapper CMD PID: ' + $process.Id);" ^
-  "}" ^
-  "Start-TradeService 'TRADE_API' (Join-Path $root 'apps\api') 'call npm run dev';" ^
-  "Start-TradeService 'TRADE_ENGINE' (Join-Path $root 'services\trading-engine') '.venv\Scripts\uvicorn.exe main:app --reload';" ^
-  "Start-TradeService 'TRADE_WEB' (Join-Path $root 'apps\web') 'call npm run dev';"
+echo Opening service windows and waiting for them to listen...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%trade-launcher.ps1" -Action StartAll -ProjectRoot "%PROJECT_ROOT_ARG%" -RuntimeDir "%RUNTIME_DIR%"
 if errorlevel 1 (
-    echo ERROR: Failed to open one or more service windows.
+    echo ERROR: Failed to start one or more services. Check the TRADE_* window for the error.
     goto fail
 )
-echo OK: Service windows opened: TRADE_API, TRADE_ENGINE, TRADE_WEB.
-
-echo.
-echo Waiting for services to listen...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$checks = @(" ^
-  "  @{ Name = 'API'; Port = 4000 }," ^
-  "  @{ Name = 'Trading Engine'; Port = 8000 }," ^
-  "  @{ Name = 'Web'; Port = 3000 }" ^
-  ");" ^
-  "foreach ($check in $checks) {" ^
-  "  Write-Host ('Waiting for ' + $check.Name + ' on port ' + $check.Port + '...');" ^
-  "  $deadline = (Get-Date).AddSeconds(45);" ^
-  "  do {" ^
-  "    $connection = Get-NetTCPConnection -LocalPort $check.Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;" ^
-  "    if ($connection) { Write-Host ('OK: ' + $check.Name + ' is listening on port ' + $check.Port + ' with PID ' + $connection.OwningProcess + '.'); $ready = $true; break }" ^
-  "    Start-Sleep -Seconds 1;" ^
-  "  } while ((Get-Date) -lt $deadline);" ^
-  "  if (-not $ready) { Write-Host ('ERROR: ' + $check.Name + ' did not listen on port ' + $check.Port + ' within 45 seconds. Check the TRADE_* window for the service error.'); exit 1 }" ^
-  "  $ready = $false;" ^
-  "}"
-if errorlevel 1 goto fail
+echo OK: TRADE_API, TRADE_ENGINE, TRADE_WEB are listening on their ports.
 
 echo.
 echo Opening http://localhost:3000 in the default browser...

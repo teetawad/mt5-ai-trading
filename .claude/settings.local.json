@@ -92,7 +92,18 @@
       "Bash(pkill -f \"tsx src/index.ts\")",
       "Bash(pkill -f \"nuxt dev\")",
       "Bash(docker start *)",
-      "Bash(taskkill *)"
+      "Bash(taskkill *)",
+      "PowerShell(taskkill *)",
+      "Bash(cmd //c \"start-trade.bat --no-pause\")",
+      "Bash(tee /tmp/start_trade_run1.log)",
+      "Bash(cmd //c \"C:\\\\\\\\Users\\\\\\\\Teetawad\\\\\\\\Desktop\\\\\\\\trade\\\\\\\\start-trade.bat --no-pause\")",
+      "Bash(tee /tmp/start_trade_run2.log)",
+      "Bash(cmd //c \"C:\\\\\\\\Users\\\\\\\\Teetawad\\\\\\\\Desktop\\\\\\\\trade\\\\\\\\stop-trade.bat --no-pause\")",
+      "Bash(tee /tmp/stop_trade_run1.log)",
+      "Bash(tee /tmp/stop_trade_run2.log)",
+      "Bash(tee /tmp/stop_trade_run3.log)",
+      "Bash(tee /tmp/start_trade_unrelated_test.log)",
+      "PowerShell(Get-Process *)"
     ]
   }
 }
