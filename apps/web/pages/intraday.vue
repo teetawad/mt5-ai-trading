@@ -121,14 +121,18 @@
         v-if="result"
         class="mt-4 grid gap-4 lg:grid-cols-2"
       >
-        <div class="rounded-lg border border-sky-400/30 bg-slate-950/70 p-4">
+        <div class="rounded-lg border border-emerald-400/30 bg-slate-950/70 p-4">
           <div class="flex items-start justify-between gap-3">
             <div>
-              <div class="text-xs font-semibold uppercase tracking-wide text-sky-300">Multi-Timeframe Breakdown</div>
+              <div class="text-xs font-semibold uppercase tracking-wide text-emerald-300">AI ANALYSIS</div>
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <StatusPill :label="result.analysis.decision" />
                 <StatusPill :label="result.analysis.session_status" />
               </div>
+            </div>
+            <div class="text-right text-xs text-slate-500">
+              Confidence
+              <div class="mt-1 text-sm font-semibold text-slate-100">{{ percent(result.analysis.confidence) }}</div>
             </div>
           </div>
 
@@ -160,8 +164,24 @@
               <dd class="mt-1 text-slate-100">{{ money(result.analysis.atr) }} ({{ pct(result.analysis.atr_pct) }})</dd>
             </div>
             <div>
-              <dt class="text-xs uppercase text-slate-500">Spread</dt>
-              <dd class="mt-1 text-slate-100">{{ pct(result.analysis.spread_pct) }} — {{ result.analysis.liquidity_ok ? 'OK' : 'TOO WIDE' }}</dd>
+              <dt class="text-xs uppercase text-slate-500">Liquidity</dt>
+              <dd class="mt-1 text-slate-100">{{ pct(result.analysis.spread_pct) }} spread — {{ result.analysis.liquidity_ok ? 'OK' : 'TOO WIDE' }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Entry</dt>
+              <dd class="mt-1 text-slate-100">{{ money(result.analysis.entry_price) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Stop loss / Take profit</dt>
+              <dd class="mt-1 text-slate-100">{{ maybeMoney(result.analysis.stop_loss) }} / {{ maybeMoney(result.analysis.take_profit) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Risk/reward</dt>
+              <dd class="mt-1 text-slate-100">{{ ratio(result.analysis.risk_reward) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Expected holding period</dt>
+              <dd class="mt-1 text-slate-100">up to {{ result.analysis.expected_holding_minutes }} min</dd>
             </div>
           </dl>
 
@@ -178,49 +198,56 @@
           </div>
         </div>
 
-        <div class="rounded-lg border border-emerald-400/30 bg-slate-950/70 p-4">
-          <div class="text-xs font-semibold uppercase tracking-wide text-emerald-300">Trade Plan</div>
+        <div class="rounded-lg border border-sky-400/30 bg-slate-950/70 p-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-xs font-semibold uppercase tracking-wide text-sky-300">RISK ENGINE DECISION</div>
+              <div class="mt-2">
+                <StatusPill :label="result.sizingPreview.passed ? 'PASS' : 'REJECT'" />
+              </div>
+            </div>
+          </div>
 
           <dl class="mt-4 grid gap-3 text-sm sm:grid-cols-2">
             <div>
-              <dt class="text-xs uppercase text-slate-500">Entry</dt>
-              <dd class="mt-1 text-slate-100">{{ money(result.analysis.entry_price) }}</dd>
-            </div>
-            <div>
-              <dt class="text-xs uppercase text-slate-500">Stop loss</dt>
-              <dd class="mt-1 text-slate-100">{{ maybeMoney(result.analysis.stop_loss) }}</dd>
-            </div>
-            <div>
-              <dt class="text-xs uppercase text-slate-500">Take profit</dt>
-              <dd class="mt-1 text-slate-100">{{ maybeMoney(result.analysis.take_profit) }}</dd>
-            </div>
-            <div>
-              <dt class="text-xs uppercase text-slate-500">Risk/reward</dt>
-              <dd class="mt-1 text-slate-100">{{ ratio(result.analysis.risk_reward) }}</dd>
-            </div>
-            <div>
-              <dt class="text-xs uppercase text-slate-500">Expected holding period</dt>
-              <dd class="mt-1 text-slate-100">up to {{ result.analysis.expected_holding_minutes }} min</dd>
-            </div>
-            <div>
-              <dt class="text-xs uppercase text-slate-500">Position size (preview)</dt>
+              <dt class="text-xs uppercase text-slate-500">Position size</dt>
               <dd class="mt-1 text-slate-100">{{ quantity(result.sizingPreview.quantity) }}</dd>
             </div>
             <div>
-              <dt class="text-xs uppercase text-slate-500">Max loss (preview)</dt>
-              <dd class="mt-1 text-slate-100">{{ maybeMoney(snapshotField('maxLoss')) }}</dd>
+              <dt class="text-xs uppercase text-slate-500">Max loss / budget</dt>
+              <dd class="mt-1 text-slate-100">{{ maybeMoney(snapshotString('maxLoss')) }} / {{ maybeMoney(snapshotString('riskBudget')) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Spread / slippage</dt>
+              <dd class="mt-1 text-slate-100">{{ spreadSlippage() }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Cooldown</dt>
+              <dd class="mt-1 text-slate-100">{{ cooldownStatus() }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Daily loss</dt>
+              <dd class="mt-1 text-slate-100">{{ dailyLossStatus() }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Pending orders</dt>
+              <dd class="mt-1 text-slate-100">{{ pendingOrderStatus() }}</dd>
             </div>
             <div>
               <dt class="text-xs uppercase text-slate-500">Trades today (symbol)</dt>
               <dd class="mt-1 text-slate-100">{{ tradeCounts()?.symbolToday ?? '-' }} / {{ tradeCounts()?.symbolLimit ?? '-' }}</dd>
             </div>
+            <div>
+              <dt class="text-xs uppercase text-slate-500">Trades today (total)</dt>
+              <dd class="mt-1 text-slate-100">{{ tradeCounts()?.totalToday ?? '-' }} / {{ tradeCounts()?.totalLimit ?? '-' }}</dd>
+            </div>
           </dl>
 
           <div class="mt-4">
             <ProgressMeter
-              label="Server-Side Risk Gate"
-              :percent="result.sizingPreview.passed ? 100 : 0"
-              :value-label="result.sizingPreview.passed ? 'All checks passed' : 'Blocked'"
+              label="Daily Loss Used vs Limit"
+              :percent="dailyLossPercent()"
+              :value-label="dailyLossStatus()"
               :status-label="result.sizingPreview.passed ? 'PASS' : 'REJECT'"
               :helper="result.sizingPreview.failedRules.join(', ') || 'No failed rules'"
             />
@@ -253,6 +280,7 @@
 type IntradayAnalysis = {
   symbol: string;
   decision: 'BUY' | 'HOLD';
+  confidence: number;
   reasons: string[];
   trend_direction: string;
   trend_strength_pct: string;
@@ -383,13 +411,23 @@ async function submitForApproval() {
   }
 }
 
-function snapshotField(key: string): string | null {
+type CooldownSnapshot = { configuredSeconds?: number; remainingSeconds?: number; passed?: boolean };
+type TradeCountsSnapshot = { symbolToday?: number; symbolLimit?: number; totalToday?: number; totalLimit?: number };
+
+function snapshotString(key: string): string | null {
   const value = result.value?.sizingPreview.snapshot[key];
   return typeof value === 'string' ? value : null;
 }
-function tradeCounts(): { symbolToday?: number; symbolLimit?: number } | null {
+function tradeCounts(): TradeCountsSnapshot | null {
   const value = result.value?.sizingPreview.snapshot.tradeCounts;
-  return value && typeof value === 'object' ? value as { symbolToday?: number; symbolLimit?: number } : null;
+  return value && typeof value === 'object' ? value as TradeCountsSnapshot : null;
+}
+function cooldownSnapshot(): CooldownSnapshot | null {
+  const value = result.value?.sizingPreview.snapshot.cooldown;
+  return value && typeof value === 'object' ? value as CooldownSnapshot : null;
+}
+function failedRules(): string[] {
+  return result.value?.sizingPreview.failedRules ?? [];
 }
 function money(value: string): string {
   return `$${Number(value).toFixed(2)}`;
@@ -401,11 +439,42 @@ function pct(value: string | null | undefined): string {
   if (!value) return '-';
   return `${Number(value).toFixed(2)}%`;
 }
+function percent(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '-';
+  return `${(value * 100).toFixed(0)}%`;
+}
 function ratio(value: string | null | undefined): string {
   return value ? Number(value).toFixed(2) : '-';
 }
 function quantity(value: string | null | undefined): string {
   if (!value) return '-';
   return Number(value).toLocaleString(undefined, { maximumFractionDigits: 8 });
+}
+function spreadSlippage(): string {
+  const spread = snapshotString('spreadPct');
+  const slippage = snapshotString('estimatedSlippagePct');
+  return `${spread ? pct(spread) : '-'} spread / ${slippage ? pct(slippage) : '-'} slippage`;
+}
+function cooldownStatus(): string {
+  const cooldown = cooldownSnapshot();
+  if (!cooldown) return '-';
+  if (cooldown.passed) return 'PASS';
+  return `BLOCKED (${cooldown.remainingSeconds ?? 0}s remaining)`;
+}
+function dailyLossStatus(): string {
+  const used = snapshotString('dailyLossUsed');
+  const limit = snapshotString('dailyLossLimit');
+  const status = failedRules().includes('PHASE25_MAX_DAILY_LOSS') ? 'BLOCKED' : 'PASS';
+  return `${status} (${used ? money(used) : '$0.00'} / ${limit ? money(limit) : '-'})`;
+}
+function dailyLossPercent(): number {
+  const used = Number(snapshotString('dailyLossUsed') ?? 0);
+  const limit = Number(snapshotString('dailyLossLimit') ?? 0);
+  return limit > 0 ? (used / limit) * 100 : 0;
+}
+function pendingOrderStatus(): string {
+  const value = result.value?.sizingPreview.snapshot.conflictingPendingOrders;
+  const count = Array.isArray(value) ? value.length : 0;
+  return count > 0 ? `BLOCKED (${count})` : 'CLEAR';
 }
 </script>

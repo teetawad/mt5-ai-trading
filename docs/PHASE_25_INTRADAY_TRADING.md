@@ -31,6 +31,11 @@ rejects it exactly like any other proposal.
   automatically downstream (bracket SL/TP, max holding time, end-of-day
   force-close) rather than a second strategy-emitted `SELL` signal — see
   "Automatic exits" in `docs/PAPER_BROKER.md`.
+- **Confidence** (`IntradayAnalysis.confidence`, `[0, 1]`) is deterministic,
+  not a model output: below all three timeframe confirmations it is capped
+  at `confirmations / 3 * 0.5`; with trend + setup + entry all confirmed it
+  scales from `0.5` up to `1.0` with how far the ATR-derived risk/reward
+  clears `min_risk_reward` (`strategy/intraday/analysis.py::_confidence`).
 
 **No look-ahead:** every bar list passed to `analyze_multi_timeframe` is
 trimmed to timestamps ≤ `now` before any indicator is computed, and only the
@@ -72,6 +77,10 @@ per-day trade-count limits:
   `PHASE25_BID_ASK_SPREAD`, `PHASE25_LIQUIDITY` — re-check the same
   conditions server-side using Node's own live market fetch (defense in
   depth against staleness between the Python analysis call and this one).
+- `PHASE25_ESTIMATED_SLIPPAGE` — `phase25_estimated_slippage_pct` (the
+  assumed per-share slippage rate used in position sizing) must not exceed
+  `phase25_max_estimated_slippage_pct`, mirroring Phase 22's equivalent pair
+  of settings.
 - `PHASE25_INVALID_STOP_DISTANCE`, `PHASE25_MIN_RISK_REWARD`.
 - `PHASE25_POSITION_SIZE`, `PHASE25_MAX_LOSS_PER_TRADE` — quantity is sized
   down from `phase25_default_quantity` by risk-per-trade
@@ -89,7 +98,8 @@ per-day trade-count limits:
   (`RISK_REJECTED`) so an earlier rejection doesn't consume a trade slot.
 
 All Phase 25 system settings are listed in
-`database/migrations/0020_phase25_intraday_settings.sql`.
+`database/migrations/0020_phase25_intraday_settings.sql` and
+`database/migrations/0021_phase25_slippage_settings.sql`.
 
 ## Automatic exits
 

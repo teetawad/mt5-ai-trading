@@ -50,6 +50,7 @@ function buyAnalysis(overrides: Partial<IntradayAnalysisDTO> = {}): IntradayAnal
     symbol: 'AAPL',
     as_of: '2024-01-15T15:00:00.000Z',
     decision: 'BUY',
+    confidence: 0.75,
     reasons: ['1h trend UP, 15m setup confirmed, 5m entry timing confirmed'],
     trend_direction: 'UP',
     trend_strength_pct: '1.50000000',
@@ -78,6 +79,7 @@ function holdAnalysis(overrides: Partial<IntradayAnalysisDTO> = {}): IntradayAna
   return {
     ...buyAnalysis(),
     decision: 'HOLD',
+    confidence: 0.2,
     reasons: ['5m entry timing (momentum + volume) not triggered'],
     stop_loss: null,
     take_profit: null,
@@ -175,6 +177,8 @@ describe('computeIntradaySessionStatus (pure function, no DB)', () => {
     takeProfitAtrMultiple: '3.0',
     minRiskReward: '1.5',
     maxSpreadPct: '0.5',
+    estimatedSlippagePct: '0.05',
+    maxEstimatedSlippagePct: '0.25',
     minVolumeRatio: '1.0',
     maxHoldingMinutes: 120,
     defaultQuantity: '1',
@@ -319,6 +323,22 @@ describe('Phase 25 intraday trading mode', () => {
       stop_loss_price: '97.00000000',
       take_profit_price: '106.00000000',
     });
+  });
+
+  it.skipIf(SKIP)('rejects when estimated slippage exceeds the configured maximum', async () => {
+    await pool.query("UPDATE system_settings SET value = '5'::jsonb WHERE key = 'phase25_estimated_slippage_pct'");
+    vi.mocked(analyzeIntraday).mockResolvedValue(buyAnalysis());
+
+    const res = await request(app)
+      .post('/signals/intraday-decision')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ symbol: 'AAPL' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.proposal.status).toBe('RISK_REJECTED');
+    expect(res.body.proposal.riskSnapshot.phase25.failedRules).toContain('PHASE25_ESTIMATED_SLIPPAGE');
+
+    await pool.query("UPDATE system_settings SET value = '0.05'::jsonb WHERE key = 'phase25_estimated_slippage_pct'");
   });
 
   it.skipIf(SKIP)('rejects once the per-symbol daily trade limit is reached', async () => {

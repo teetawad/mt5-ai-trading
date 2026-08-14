@@ -414,6 +414,7 @@ export interface IntradayAnalysisDTO {
   symbol: string;
   as_of: string;
   decision: IntradayDecisionValue;
+  confidence: number;
   reasons: string[];
   trend_direction: TrendDirectionValue;
   trend_strength_pct: string;

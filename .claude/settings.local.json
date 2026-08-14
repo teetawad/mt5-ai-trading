@@ -90,7 +90,9 @@
       "Bash(curl -s http://127.0.0.1:8000/health)",
       "Bash(pkill -f \"uvicorn main:app\")",
       "Bash(pkill -f \"tsx src/index.ts\")",
-      "Bash(pkill -f \"nuxt dev\")"
+      "Bash(pkill -f \"nuxt dev\")",
+      "Bash(docker start *)",
+      "Bash(taskkill *)"
     ]
   }
 }

@@ -32,6 +32,8 @@ export interface Phase25Settings {
   takeProfitAtrMultiple: string;
   minRiskReward: string;
   maxSpreadPct: string;
+  estimatedSlippagePct: string;
+  maxEstimatedSlippagePct: string;
   minVolumeRatio: string;
   maxHoldingMinutes: number;
   defaultQuantity: string;
@@ -68,6 +70,10 @@ export async function loadPhase25Settings(db: Pool | PoolClient): Promise<Phase2
     takeProfitAtrMultiple: String(await getSettingValue(db, 'phase25_take_profit_atr_multiple') ?? '3.0'),
     minRiskReward: String(await getSettingValue(db, 'phase25_min_risk_reward') ?? '1.5'),
     maxSpreadPct: String(await getSettingValue(db, 'phase25_max_spread_pct') ?? '0.5'),
+    estimatedSlippagePct: String(await getSettingValue(db, 'phase25_estimated_slippage_pct') ?? '0.05'),
+    maxEstimatedSlippagePct: String(
+      await getSettingValue(db, 'phase25_max_estimated_slippage_pct') ?? '0.25',
+    ),
     minVolumeRatio: String(await getSettingValue(db, 'phase25_min_volume_ratio') ?? '1.0'),
     maxHoldingMinutes: Number(await getSettingValue(db, 'phase25_max_holding_minutes') ?? 120),
     defaultQuantity: String(await getSettingValue(db, 'phase25_default_quantity') ?? '1'),
@@ -187,6 +193,8 @@ export async function phase25RiskControls(
   const mid = bid.plus(ask).div(2);
   const spreadPct = mid.gt(0) ? ask.minus(bid).div(mid).mul(100) : new Decimal(0);
   const maxSpreadPct = decimal(settings.maxSpreadPct);
+  const estimatedSlippagePct = decimal(settings.estimatedSlippagePct);
+  const maxEstimatedSlippagePct = decimal(settings.maxEstimatedSlippagePct);
   const minRiskReward = decimal(settings.minRiskReward);
   const maxLossPerTradeUsd = decimal(settings.maxLossPerTradeUsd);
   const maxPositionSizeUsd = decimal(input.riskCfg.max_position_size_usd);
@@ -205,6 +213,7 @@ export async function phase25RiskControls(
   if (analysis.session_status !== 'OPEN_FOR_ENTRIES') failedRules.push('PHASE25_SESSION_STATUS');
   if (input.market.is_stale) failedRules.push('PHASE25_FRESH_MARKET_DATA');
   if (spreadPct.gt(maxSpreadPct)) failedRules.push('PHASE25_BID_ASK_SPREAD');
+  if (estimatedSlippagePct.gt(maxEstimatedSlippagePct)) failedRules.push('PHASE25_ESTIMATED_SLIPPAGE');
   if (!analysis.liquidity_ok) failedRules.push('PHASE25_LIQUIDITY');
 
   const riskPerShare = stopLoss ? entry.minus(stopLoss) : new Decimal(0);
@@ -219,7 +228,7 @@ export async function phase25RiskControls(
 
   const estimatedFeePerShare = new Decimal('0.005');
   const minFee = new Decimal('1');
-  const slippagePerShare = entry.mul(new Decimal('0.0005'));
+  const slippagePerShare = entry.mul(estimatedSlippagePct.div(100));
   const riskQuantity = riskPerShare.gt(0)
     ? maxLossPerTradeUsd.div(riskPerShare.plus(slippagePerShare).plus(estimatedFeePerShare))
     : new Decimal(0);
@@ -296,6 +305,8 @@ export async function phase25RiskControls(
     maxLoss: money(maxLoss),
     riskBudget: money(maxLossPerTradeUsd),
     spreadPct: money(spreadPct),
+    estimatedSlippagePct: money(estimatedSlippagePct),
+    estimatedSlippageUsd: money(estimatedSlippageUsd),
     dailyLossUsed: money(dailyPnl.lt(0) ? dailyPnl.abs() : new Decimal(0)),
     dailyLossLimit: money(maxDailyLossUsd),
     cooldown: {

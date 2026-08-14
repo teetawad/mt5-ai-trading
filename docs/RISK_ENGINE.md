@@ -255,6 +255,8 @@ than a fixed percentage, and this layer adds per-day trade-count caps:
 
 - **PHASE25_INTRADAY_MODE_DISABLED** — master toggle (`phase25_intraday_mode_enabled`).
 - **PHASE25_SESSION_STATUS** — must be `OPEN_FOR_ENTRIES` (see below).
+- **PHASE25_ESTIMATED_SLIPPAGE** — `phase25_estimated_slippage_pct` must not
+  exceed `phase25_max_estimated_slippage_pct` (mirrors Phase 22).
 - **PHASE25_MIN_RISK_REWARD** — `(takeProfit − entry) / (entry − stopLoss)` must clear `phase25_min_risk_reward`.
 - **PHASE25_MAX_LOSS_PER_TRADE**, **PHASE25_MAX_DAILY_LOSS**, **PHASE25_COOLDOWN**,
   **PHASE25_DUPLICATE_EXPOSURE**, **PHASE25_DUPLICATE_PENDING_ORDER** — same

@@ -53,6 +53,7 @@ class IntradayAnalysis(BaseModel):
     symbol: str
     as_of: str
     decision: IntradayDecision
+    confidence: float
     reasons: list[str]
 
     trend_direction: TrendDirection
@@ -97,6 +98,29 @@ class IntradayAnalysis(BaseModel):
     @field_serializer("stop_loss", "take_profit", "risk_reward")
     def _ser_opt_dec(self, v: Decimal | None) -> str | None:
         return _money(v) if v is not None else None
+
+
+def _confidence(
+    *,
+    trend_up: bool,
+    setup_confirmed: bool,
+    entry_confirmed: bool,
+    risk_reward: Decimal | None,
+    min_risk_reward: Decimal,
+) -> float:
+    """Deterministic confidence in [0, 1].
+
+    Below 3/3 confirmations (trend + setup + entry), confidence is capped at
+    0.5 and simply reflects how many of the three agree. With all three
+    confirmed, confidence scales from 0.5 up to 1.0 with how far the
+    ATR-derived risk/reward clears the configured minimum — a marginal pass
+    is a weaker signal than a comfortable one.
+    """
+    confirmations = sum([trend_up, setup_confirmed, entry_confirmed])
+    if confirmations < 3 or risk_reward is None or risk_reward <= 0:
+        return round(confirmations / 3 * 0.5, 4)
+    reward_margin = float(risk_reward / min_risk_reward) if min_risk_reward > 0 else 1.0
+    return round(max(0.5, min(1.0, 0.5 + (reward_margin - 1) * 0.25)), 4)
 
 
 def session_status(now: datetime, config: IntradayStrategyConfig) -> SessionStatus:
@@ -237,10 +261,19 @@ def analyze_multi_timeframe(
             " liquidity and risk/reward checks passed",
         ]
 
+    confidence = _confidence(
+        trend_up=trend_direction == TrendDirection.UP,
+        setup_confirmed=setup_confirmed,
+        entry_confirmed=entry_confirmed,
+        risk_reward=risk_reward if risk_per_share > 0 else None,
+        min_risk_reward=config.min_risk_reward,
+    )
+
     return IntradayAnalysis(
         symbol=symbol,
         as_of=as_of.isoformat(),
         decision=decision,
+        confidence=confidence,
         reasons=reasons,
         trend_direction=trend_direction,
         trend_strength_pct=trend_strength_pct,
@@ -276,6 +309,7 @@ def _hold(
         symbol=symbol,
         as_of=as_of.isoformat(),
         decision=IntradayDecision.HOLD,
+        confidence=0.0,
         reasons=reasons,
         trend_direction=TrendDirection.FLAT,
         trend_strength_pct=zero,

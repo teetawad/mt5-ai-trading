@@ -7,7 +7,6 @@ required here.
 """
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 from market_data.provider import MarketDataProvider, SymbolNotFoundError
 from strategy.base import Strategy
@@ -93,7 +92,7 @@ class IntradayMultiTimeframeStrategy(Strategy):
                 quantity=self._config.quantity,
                 signal_type=SignalType.MARKET,
                 reference_price=snapshot.price,
-                confidence=_confidence(analysis.risk_reward),
+                confidence=analysis.confidence,
                 metadata={
                     "trend_direction": analysis.trend_direction.value,
                     "trend_strength_pct": str(analysis.trend_strength_pct),
@@ -113,9 +112,3 @@ class IntradayMultiTimeframeStrategy(Strategy):
 
 def _lookback_start(*, hours: int) -> str:
     return (datetime.now(tz=UTC) - timedelta(hours=max(hours, 1))).isoformat()
-
-
-def _confidence(risk_reward: Decimal | None) -> float:
-    if risk_reward is None or risk_reward <= 0:
-        return 0.5
-    return float(min(Decimal("1"), risk_reward / Decimal("4")))

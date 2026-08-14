@@ -205,6 +205,7 @@ class TestAnalyzeMultiTimeframe:
         assert result.take_profit is not None
         assert result.stop_loss < result.entry_price < result.take_profit
         assert result.risk_reward >= cfg.min_risk_reward
+        assert 0.5 <= result.confidence <= 1.0
 
     def test_flat_series_holds(self):
         cfg = IntradayStrategyConfig()
@@ -221,6 +222,7 @@ class TestAnalyzeMultiTimeframe:
             now=SESSION_NOW,
         )
         assert result.decision == IntradayDecision.HOLD
+        assert result.confidence < 0.5
 
     def test_insufficient_history_holds_with_reason(self):
         cfg = IntradayStrategyConfig()
@@ -235,6 +237,7 @@ class TestAnalyzeMultiTimeframe:
         )
         assert result.decision == IntradayDecision.HOLD
         assert any("Insufficient" in reason for reason in result.reasons)
+        assert result.confidence == 0.0
 
     def test_session_gating_blocks_entry_even_with_perfect_trend(self):
         cfg = IntradayStrategyConfig()
@@ -323,6 +326,45 @@ class TestAnalyzeMultiTimeframe:
         )
         assert with_future.decision == baseline.decision == IntradayDecision.HOLD
         assert with_future.trend_strength_pct == baseline.trend_strength_pct
+
+    def test_confidence_increases_with_risk_reward_margin(self):
+        """A BUY with a larger cushion above min_risk_reward should be a
+        higher-confidence signal than one that only just clears it."""
+        # Deliberately clear of the exact min_risk_reward boundary (rather
+        # than testing equality against it) — ATR is itself an average of
+        # true ranges and rarely divides out to a perfectly clean decimal,
+        # so an exact-equality margin case is a precision trap, not a
+        # meaningful assertion.
+        marginal_cfg = IntradayStrategyConfig(
+            take_profit_atr_multiple=Decimal("2.4"), min_risk_reward=Decimal("1.5")
+        )
+        comfortable_cfg = IntradayStrategyConfig(
+            take_profit_atr_multiple=Decimal("9.0"), min_risk_reward=Decimal("1.5")
+        )
+        bars_1h, bars_15m, bars_5m = _uptrend(marginal_cfg)
+
+        marginal = analyze_multi_timeframe(
+            symbol="AAPL",
+            bars_1h=bars_1h,
+            bars_15m=bars_15m,
+            bars_5m=bars_5m,
+            snapshot=_snapshot(bars_5m),
+            config=marginal_cfg,
+            now=SESSION_NOW,
+        )
+        comfortable = analyze_multi_timeframe(
+            symbol="AAPL",
+            bars_1h=bars_1h,
+            bars_15m=bars_15m,
+            bars_5m=bars_5m,
+            snapshot=_snapshot(bars_5m),
+            config=comfortable_cfg,
+            now=SESSION_NOW,
+        )
+        assert marginal.decision == comfortable.decision == IntradayDecision.BUY
+        assert comfortable.confidence > marginal.confidence
+        assert 0.5 <= marginal.confidence < 0.6
+        assert comfortable.confidence <= 1.0
 
 
 # ── IntradayMultiTimeframeStrategy (registry wrapper) ───────────────────────
