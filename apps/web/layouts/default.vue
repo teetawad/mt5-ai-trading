@@ -1,16 +1,18 @@
 <template>
   <div class="min-h-screen text-slate-100 flex flex-col">
-    <PaperTradingBanner />
+    <div class="border-b border-emerald-400/30 bg-emerald-400/10 px-4 py-2 text-center text-xs font-bold uppercase tracking-widest text-emerald-100">
+      MT5 AI DEMO TRADING LAB - DEMO ONLY - REAL/LIVE ACCOUNTS ARE BLOCKED SERVER-SIDE
+    </div>
     <nav class="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/90 px-4 py-3 shadow-[0_12px_40px_rgba(2,6,23,0.35)] backdrop-blur shrink-0">
       <div class="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <NuxtLink
           to="/"
           class="flex items-center gap-3 text-lg font-semibold tracking-tight text-white"
         >
-          <span class="grid h-9 w-9 place-items-center rounded-lg border border-sky-400/30 bg-sky-400/10 text-sm text-sky-200">PT</span>
+          <span class="grid h-9 w-9 place-items-center rounded-lg border border-emerald-400/30 bg-emerald-400/10 text-sm text-emerald-200">MT5</span>
           <span>
-            <span class="block leading-5">Paper Trade</span>
-            <span class="block text-[11px] font-bold uppercase tracking-widest text-amber-200">Simulated execution</span>
+            <span class="block leading-5">AI Demo Lab</span>
+            <span class="block text-[11px] font-bold uppercase tracking-widest text-emerald-200">MT5 demo execution</span>
           </span>
         </NuxtLink>
         <div class="flex flex-col gap-3 lg:flex-row lg:items-center">
@@ -45,16 +47,12 @@
 <script setup lang="ts">
 const navItems = [
   { to: '/', label: 'Dashboard' },
-  { to: '/hourly', label: 'Hourly' },
-  { to: '/proposals', label: 'Proposals' },
-  { to: '/signals', label: 'Signals' },
-  { to: '/crypto', label: 'Crypto' },
-  { to: '/orders', label: 'Orders' },
+  { to: '/scanner', label: 'Scanner' },
+  { to: '/analysis', label: 'AI Analysis' },
   { to: '/positions', label: 'Positions' },
-  { to: '/portfolio', label: 'Portfolio' },
   { to: '/risk', label: 'Risk' },
-  { to: '/audit', label: 'Audit' },
-  { to: '/settings', label: 'Settings' },
+  { to: '/ai-lab', label: 'AI Lab' },
+  { to: '/history', label: 'History' },
 ];
 
 const { logout } = useAuth();

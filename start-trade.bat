@@ -7,7 +7,7 @@ set "TRADE_PROJECT_ROOT=%PROJECT_ROOT%"
 set "TRADE_RUNTIME_DIR=%RUNTIME_DIR%"
 rem A trailing backslash immediately before a closing quote is parsed as an
 rem escaped quote by CommandLineToArgvW, which would swallow the next
-rem argument — strip it before passing PROJECT_ROOT as a quoted CLI arg.
+rem argument - strip it before passing PROJECT_ROOT as a quoted CLI arg.
 set "PROJECT_ROOT_ARG=%PROJECT_ROOT:~0,-1%"
 set "NO_PAUSE=0"
 set "STARTUP_EXIT_CODE=0"

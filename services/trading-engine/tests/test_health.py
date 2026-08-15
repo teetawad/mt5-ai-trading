@@ -14,11 +14,11 @@ def test_health_check_returns_ok() -> None:
     assert data["timestamp"]
 
 
-def test_health_mode_is_paper_never_live() -> None:
+def test_health_mode_is_mt5_demo_never_live() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
-    assert data["mode"] == "PAPER"
+    assert data["mode"] == "MT5_DEMO_ONLY"
     assert data["mode"] != "LIVE"
 
 
@@ -27,4 +27,4 @@ def test_root_returns_service_info() -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["service"] == "trading-engine"
-    assert data["mode"] == "PAPER"
+    assert data["mode"] == "MT5_DEMO_ONLY"

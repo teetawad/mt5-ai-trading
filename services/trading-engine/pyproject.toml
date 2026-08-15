@@ -1,7 +1,7 @@
 [project]
 name = "trading-engine"
 version = "0.1.0"
-description = "Internal paper trading engine service"
+description = "Internal MT5 DEMO trading engine service"
 requires-python = ">=3.12"
 
 [tool.ruff]

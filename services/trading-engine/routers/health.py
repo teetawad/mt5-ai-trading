@@ -10,6 +10,6 @@ async def health_check() -> dict[str, str]:
     return {
         "status": "ok",
         "service": "trading-engine",
-        "mode": "PAPER",
+        "mode": "MT5_DEMO_ONLY",
         "timestamp": datetime.now(UTC).isoformat(),
     }

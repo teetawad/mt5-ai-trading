@@ -7,7 +7,7 @@ healthRouter.get('/', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     service: 'api',
-    mode: 'PAPER',
+    mode: 'MT5_DEMO_ONLY',
     timestamp: new Date().toISOString(),
   });
 });

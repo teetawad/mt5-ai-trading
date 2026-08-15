@@ -18,35 +18,13 @@ async function main() {
   const HOST = process.env.API_HOST || '0.0.0.0';
 
   app.listen(PORT, HOST, () => {
-    console.log(`[api] Paper Trading API running at http://${HOST}:${PORT}`);
-    console.log('[api] Mode: PAPER TRADING — no real-money execution');
+    console.log(`[api] MT5 AI DEMO Trading Lab API running at http://${HOST}:${PORT}`);
+    console.log('[api] Mode: MT5 DEMO ONLY — real/live execution is blocked server-side');
   });
 
-  // Restart recovery: reconcile any bracket order whose SL/TP leg filled on
-  // the broker side while this process was down. Best-effort — never blocks
-  // startup or crashes the process on failure.
-  try {
-    const { getPool } = await import('./db/client');
-    const { reconcileBracketOrders } = await import('./services/trade-execution-service');
-    const outcome = await reconcileBracketOrders(getPool());
-    if (outcome.checked > 0) {
-      console.log(
-        `[api] Bracket reconciliation on startup: checked ${outcome.checked}, `
-        + `reconciled ${outcome.reconciled}, errors ${outcome.errors}`,
-      );
-    }
-  } catch (err) {
-    console.error('[api] Bracket reconciliation on startup failed (non-fatal):', err);
-  }
-
-  // Phase 27 hourly scheduler: the "Hourly Scanner" that detects newly
-  // closed 1H candles and evaluates each watchlist symbol exactly once.
-  // Started here (not app.ts) for the same reason bracket reconciliation
-  // is — this file is never imported by the test suite (tests hit `app`
-  // via supertest), so the scheduler never runs during `npm test`.
   const { getPool: getPoolForScheduler } = await import('./db/client');
-  const { startHourlyScheduler } = await import('./services/hourly-scheduler');
-  startHourlyScheduler(getPoolForScheduler());
+  const { startMt5HourlyScheduler } = await import('./services/mt5-hourly-scheduler');
+  startMt5HourlyScheduler(getPoolForScheduler());
 }
 
 main().catch((error) => {

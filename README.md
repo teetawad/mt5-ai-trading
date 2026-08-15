@@ -1,38 +1,30 @@
-# Paper Trading Platform
+# MT5 AI DEMO Trading Lab
 
-**PAPER TRADING ONLY — No real-money execution.**
+DEMO ONLY. The system blocks REAL/LIVE MT5 accounts server-side before any order.
 
-A human-in-the-loop paper trading simulator.
-Every simulated trade requires owner approval.
-No live broker integration exists or is permitted.
+## Windows Setup
 
-## Quick Start
+1. Install MetaTrader 5 and log in to a DEMO account in the terminal.
+2. Copy `.env.example` to `.env`.
+3. Set `MT5_TERMINAL_PATH`, `MT5_ALLOWED_DEMO_LOGIN`, and `MT5_ALLOWED_DEMO_SERVER`.
+4. Do not put the MT5 password in `.env`.
+5. Start services:
 
-See `docs/DEVELOPMENT.md` for full setup instructions.
-
-```bash
-cp .env.example .env
-# Edit .env — set POSTGRES_PASSWORD and other values
-
+```powershell
 docker compose up -d postgres
-cd apps/api && npm install && npm run dev
-cd apps/web && npm install && npm run dev
-cd services/trading-engine && python -m venv .venv && source .venv/Scripts/activate && pip install -r requirements-dev.txt && uvicorn main:app --reload
+npm install
+npm run db:migrate --workspace=apps/api
+pip install -r services/trading-engine/requirements-dev.txt
+.\start-trade.bat
 ```
 
-## Services
-
-| Service | URL | Notes |
-|---|---|---|
-| Frontend | http://localhost:3000 | Public |
-| API | http://localhost:4000 | Public |
-| Trading Engine | http://localhost:8000 | Internal only |
-| PostgreSQL | localhost:5432 | Dev container |
+Frontend: http://localhost:3000  
+API: http://localhost:4000  
+Trading engine: http://localhost:8000
 
 ## Architecture
 
-See `docs/ARCHITECTURE.md`.
-
-## Safety
-
-This system is paper-trading only. See `CLAUDE.md` for safety rules.
+Python trading engine owns MT5 terminal access. Node API owns auth, audit logs,
+PostgreSQL persistence, risk controls, scanner scheduling, assisted proposals,
+and AUTO-DEMO gating. All MT5 order sends are centralized behind
+`DemoExecutionGateway`.
