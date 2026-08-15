@@ -531,6 +531,90 @@ export async function analyzeCrypto(
   return res.json() as Promise<CryptoAnalysisDTO>;
 }
 
+// ── Hourly (Phase 27) ────────────────────────────────────────────────────────
+
+export interface HourlySessionConfigDTO {
+  market_open?: string;
+  market_close?: string;
+  no_new_trades_minutes_before_close?: number;
+  force_close_before_close_minutes?: number;
+  force_close_enabled?: boolean;
+}
+
+export interface HourlyConfigDTO {
+  trend_ema_fast?: number;
+  trend_ema_slow?: number;
+  momentum_window?: number;
+  volume_window?: number;
+  breakout_lookback_bars?: number;
+  min_volume_ratio?: string;
+  atr_window?: number;
+  stop_atr_multiple?: string;
+  take_profit_atr_multiple?: string;
+  min_risk_reward?: string;
+  max_spread_pct?: string;
+  higher_tf_bars_per_candle?: number;
+  higher_tf_confirmation_required?: boolean;
+  max_holding_hours?: number;
+  quantity?: string;
+  session?: HourlySessionConfigDTO;
+}
+
+export type HourlyDecisionValue = 'BUY' | 'SELL' | 'HOLD';
+
+export interface HourlyAnalysisDTO {
+  symbol: string;
+  as_of: string;
+  candle_timestamp: string;
+  decision: HourlyDecisionValue;
+  confidence: number;
+  reasons: string[];
+  strategy_version: string;
+  trend_direction: TrendDirectionValue;
+  trend_strength_pct: string;
+  momentum_pct: string;
+  volume_ratio: string;
+  breakout: boolean;
+  pullback: boolean;
+  higher_tf_trend_direction: TrendDirectionValue;
+  higher_tf_confirmed: boolean;
+  atr: string;
+  atr_pct: string;
+  spread_pct: string;
+  liquidity_ok: boolean;
+  entry_price: string;
+  stop_loss: string | null;
+  take_profit: string | null;
+  risk_reward: string | null;
+  expected_holding_hours: number;
+  session_status: SessionStatusValue;
+}
+
+export async function analyzeHourly(
+  symbol: string,
+  config: HourlyConfigDTO,
+  hasOpenPosition: boolean,
+  requestId?: string,
+  now?: string,
+): Promise<HourlyAnalysisDTO> {
+  const res = await engineFetch('/hourly/analyze', requestId, {
+    method: 'POST',
+    body: JSON.stringify({
+      symbol,
+      config,
+      has_open_position: hasOpenPosition,
+      ...(now ? { now } : {}),
+    }),
+  });
+  if (res.status === 404) {
+    throw new TradingEngineError(`Symbol not found: ${symbol}`, 404);
+  }
+  if (!res.ok) {
+    throw new TradingEngineError(`Trading engine error: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<HourlyAnalysisDTO>;
+}
+
 // ── Risk Engine ───────────────────────────────────────────────────────────────
 
 export type EvaluationStage = 'PRE_PROPOSAL' | 'PRE_EXECUTION';

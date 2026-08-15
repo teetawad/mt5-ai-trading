@@ -106,7 +106,18 @@
       "PowerShell(Get-Process *)",
       "Bash(where psql *)",
       "Read(//c/Program Files/**)",
-      "Bash(xargs grep -ilE \"ccxt|binance|coinbase\\(?!.*comment\\)|kraken_api|LIVE_TRADING|real.?money|LIVE_BROKER_ENABLED\\\\s*=\\\\s*true\")"
+      "Bash(xargs grep -ilE \"ccxt|binance|coinbase\\(?!.*comment\\)|kraken_api|LIVE_TRADING|real.?money|LIVE_BROKER_ENABLED\\\\s*=\\\\s*true\")",
+      "Bash(export TEST_DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5433/trade_test\")",
+      "Bash(export DATABASE_URL=\"postgresql://trade_user:trade_dev_password_local@localhost:5432/trade_dev\")",
+      "Bash(export SESSION_SECRET=\"dev_session_secret_not_for_production_use_only\")",
+      "Bash(export INTERNAL_SERVICE_TOKEN=\"dev_internal_token_not_for_production_use_only\")",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/test_hourly.py -q)",
+      "Bash(./.venv/Scripts/python.exe -m pytest -q)",
+      "Bash(./.venv/Scripts/python.exe -m ruff check .)",
+      "Bash(./.venv/Scripts/python.exe -m mypy .)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(echo \"TC_EXIT=$?\")",
+      "Bash(echo \"BUILD_EXIT=$?\")"
     ]
   }
 }

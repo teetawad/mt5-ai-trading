@@ -137,19 +137,19 @@
             <p class="text-xs font-bold uppercase tracking-widest text-sky-300">Risk Engine Decision</p>
             <div class="mt-3 flex flex-wrap items-center gap-2">
               <StatusPill :label="selected.riskSnapshot?.result ?? 'UNKNOWN'" />
-              <StatusPill :label="String(phase22(selected)?.result ?? 'NO_PHASE22')" />
+              <StatusPill :label="String(advancedRisk(selected)?.result ?? 'NO_ADVANCED_RISK')" />
             </div>
             <div class="mt-4 grid gap-3 sm:grid-cols-2">
               <ProgressMeter
                 label="Risk/Reward"
                 :percent="riskRewardPercent(selected)"
-                :value-label="ratio(phase22(selected)?.riskReward)"
+                :value-label="ratio(advancedRisk(selected)?.riskReward)"
                 status-label="R/R"
               />
               <ProgressMeter
                 label="Daily Loss Used"
                 :percent="dailyLossPercent(selected)"
-                :value-label="currency(phase22(selected)?.dailyLossUsed)"
+                :value-label="currency(advancedRisk(selected)?.dailyLossUsed)"
                 status-label="LIMIT"
               />
             </div>
@@ -183,51 +183,51 @@
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Entry</dt>
-          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.entry) }}</dd>
+          <dd class="mt-1 font-medium">{{ currency(advancedRisk(selected)?.entry) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Stop Loss</dt>
-          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.stopLoss) }}</dd>
+          <dd class="mt-1 font-medium">{{ currency(advancedRisk(selected)?.stopLoss) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Take Profit</dt>
-          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.takeProfit) }}</dd>
+          <dd class="mt-1 font-medium">{{ currency(advancedRisk(selected)?.takeProfit) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Risk/Reward</dt>
-          <dd class="mt-1 font-medium">{{ ratio(phase22(selected)?.riskReward) }}</dd>
+          <dd class="mt-1 font-medium">{{ ratio(advancedRisk(selected)?.riskReward) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Max Loss</dt>
-          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.maxLoss) }}</dd>
+          <dd class="mt-1 font-medium">{{ currency(advancedRisk(selected)?.maxLoss) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Spread</dt>
-          <dd class="mt-1 font-medium">{{ percent(phase22(selected)?.spreadPct) }}</dd>
+          <dd class="mt-1 font-medium">{{ percent(advancedRisk(selected)?.spreadPct) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Estimated Slippage</dt>
-          <dd class="mt-1 font-medium">{{ percent(phase22(selected)?.estimatedSlippagePct) }}</dd>
+          <dd class="mt-1 font-medium">{{ percent(advancedRisk(selected)?.estimatedSlippagePct) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Daily Loss Used</dt>
-          <dd class="mt-1 font-medium">{{ currency(phase22(selected)?.dailyLossUsed) }}</dd>
+          <dd class="mt-1 font-medium">{{ currency(advancedRisk(selected)?.dailyLossUsed) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Cooldown</dt>
-          <dd class="mt-1 font-medium">{{ cooldown(phase22(selected)?.cooldown) }}</dd>
+          <dd class="mt-1 font-medium">{{ cooldown(advancedRisk(selected)?.cooldown) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Pending Order Status</dt>
-          <dd class="mt-1 font-medium">{{ pendingOrderStatus(phase22(selected)) }}</dd>
+          <dd class="mt-1 font-medium">{{ pendingOrderStatus(advancedRisk(selected)) }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Risk Engine Decision</dt>
           <dd class="mt-1 font-medium">{{ selected.riskSnapshot?.result ?? '-' }}</dd>
         </div>
         <div>
-          <dt class="text-xs uppercase text-slate-500">Phase 22 Risk Result</dt>
-          <dd class="mt-1 font-medium">{{ phase22(selected)?.result ?? '-' }}</dd>
+          <dt class="text-xs uppercase text-slate-500">Advanced Risk Result</dt>
+          <dd class="mt-1 font-medium">{{ advancedRisk(selected)?.result ?? '-' }}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase text-slate-500">Created</dt>
@@ -257,6 +257,9 @@ type Proposal = {
     result?: string;
     aiDecision?: AiDecision;
     phase22?: Phase22Risk;
+    phase25?: Phase22Risk;
+    phase26?: Phase22Risk;
+    phase27?: Phase22Risk;
   } | null;
   createdAt: string;
   expiresAt: string;
@@ -453,8 +456,13 @@ function cooldown(value?: Phase22Risk['cooldown']): string {
   return value.passed ? 'Passed' : `${value.remainingSeconds ?? 0}s remaining`;
 }
 
-function phase22(proposal: Proposal): Phase22Risk | undefined {
-  const value = proposal.riskSnapshot?.phase22;
+// Whichever phase-specific risk snapshot the proposal actually carries —
+// mirrors the server-side bracketFromProposal priority (phase27 ?? phase25
+// ?? phase26 ?? phase22), since only one of these is ever set per proposal
+// and they all share the same shape (Phase22Risk).
+function advancedRisk(proposal: Proposal): Phase22Risk | undefined {
+  const snapshot = proposal.riskSnapshot;
+  const value = snapshot?.phase27 ?? snapshot?.phase25 ?? snapshot?.phase26 ?? snapshot?.phase22;
   return value && typeof value === 'object' ? value : undefined;
 }
 
@@ -483,14 +491,14 @@ function statusCount(status: string): number {
 }
 
 function dailyLossPercent(proposal: Proposal): number {
-  const risk = phase22(proposal);
+  const risk = advancedRisk(proposal);
   const used = numeric(risk?.dailyLossUsed);
   const limit = numeric(risk?.maxLoss);
   return limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
 }
 
 function riskRewardPercent(proposal: Proposal): number {
-  return Math.min(100, (numeric(phase22(proposal)?.riskReward) / 3) * 100);
+  return Math.min(100, (numeric(advancedRisk(proposal)?.riskReward) / 3) * 100);
 }
 
 function numeric(value?: unknown): number {

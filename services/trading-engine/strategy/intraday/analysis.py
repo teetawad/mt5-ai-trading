@@ -15,29 +15,32 @@ maximum holding time, end-of-day force-close) rather than via a second
 strategy-emitted SELL signal — see docs/PAPER_BROKER.md.
 """
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 
 from pydantic import BaseModel, field_serializer
 
 from market_data.snapshot import MarketBar, MarketSnapshot
+from strategy.common.session import SessionStatus, session_status_for
 
 from .config import IntradayStrategyConfig
 from .indicators import atr, ema, roc_pct, volume_ratio
+
+__all__ = [
+    "IntradayAnalysis",
+    "IntradayDecision",
+    "SessionStatus",
+    "TrendDirection",
+    "analyze_multi_timeframe",
+    "session_status",
+]
 
 
 class TrendDirection(StrEnum):
     UP = "UP"
     DOWN = "DOWN"
     FLAT = "FLAT"
-
-
-class SessionStatus(StrEnum):
-    CLOSED = "CLOSED"
-    OPEN_FOR_ENTRIES = "OPEN_FOR_ENTRIES"
-    NO_NEW_TRADES_NEAR_CLOSE = "NO_NEW_TRADES_NEAR_CLOSE"
-    FORCE_CLOSE_WINDOW = "FORCE_CLOSE_WINDOW"
 
 
 class IntradayDecision(StrEnum):
@@ -124,24 +127,7 @@ def _confidence(
 
 
 def session_status(now: datetime, config: IntradayStrategyConfig) -> SessionStatus:
-    session = config.session
-    open_time = time.fromisoformat(session.market_open)
-    close_time = time.fromisoformat(session.market_close)
-    current = now.timetz().replace(tzinfo=None)
-    if current < open_time or current >= close_time:
-        return SessionStatus.CLOSED
-
-    close_today = now.replace(
-        hour=close_time.hour, minute=close_time.minute, second=0, microsecond=0
-    )
-    remaining = close_today - now
-    if session.force_close_enabled and remaining <= timedelta(
-        minutes=session.force_close_before_close_minutes
-    ):
-        return SessionStatus.FORCE_CLOSE_WINDOW
-    if remaining <= timedelta(minutes=session.no_new_trades_minutes_before_close):
-        return SessionStatus.NO_NEW_TRADES_NEAR_CLOSE
-    return SessionStatus.OPEN_FOR_ENTRIES
+    return session_status_for(config.session, now)
 
 
 def _closed_bars(bars: list[MarketBar], now: datetime) -> list[MarketBar]:

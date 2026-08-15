@@ -24,7 +24,12 @@ import {
   findOpenPositions,
   upsertPosition,
 } from '../db/repositories/positions';
-import { findOpenBracketOrders, findOpenIntradayPositions, OpenIntradayPosition } from '../db/repositories/orders';
+import {
+  findOpenBracketOrders,
+  findOpenHourlyPositions,
+  findOpenIntradayPositions,
+  OpenIntradayPosition,
+} from '../db/repositories/orders';
 import { getSettingValue } from '../db/repositories/system-settings';
 import {
   findProposalByIdForUpdate,
@@ -33,6 +38,7 @@ import {
 import { Execution, Fill, Order, Position, TradeProposal } from '../db/types';
 import { assertValidProposalTransition, InvalidStateTransitionError } from './proposal-state-machine';
 import { computeIntradaySessionStatus, loadPhase25Settings } from './intraday-decision-service';
+import { computeHourlySessionStatus, loadPhase27Settings } from './hourly-decision-service';
 import {
   cancelOrder as cancelBrokerOrder,
   FillEventDTO,
@@ -149,7 +155,10 @@ function bracketFromProposal(proposal: TradeProposal): {
   take_profit_price: string;
 } | undefined {
   const advanced = (
-    proposal.riskSnapshot.phase25 ?? proposal.riskSnapshot.phase26 ?? proposal.riskSnapshot.phase22
+    proposal.riskSnapshot.phase27
+    ?? proposal.riskSnapshot.phase25
+    ?? proposal.riskSnapshot.phase26
+    ?? proposal.riskSnapshot.phase22
   ) as Record<string, unknown> | undefined;
   if (
     proposal.side !== 'BUY'
@@ -1031,6 +1040,150 @@ export async function reconcileIntradayTimeExits(
       if (!exitReason) continue;
 
       await closeIntradayPosition(pool, position, exitReason, actor, requestId);
+      result.closed += 1;
+    } catch {
+      result.errors += 1;
+    }
+  }
+
+  return result;
+}
+
+export interface HourlyTimeExitResult {
+  checked: number;
+  closed: number;
+  errors: number;
+}
+
+/**
+ * Closes one Phase 27 hourly position that has exceeded its configured
+ * maximum holding hours or is inside the session's force-close window.
+ * Near-verbatim copy of closeIntradayPosition — same "no second owner
+ * approval" reasoning applies identically here (see docs/PAPER_BROKER.md).
+ */
+async function closeHourlyPosition(
+  pool: Pool,
+  position: OpenIntradayPosition,
+  exitReason: 'MAX_HOLDING_TIME' | 'END_OF_DAY',
+  actor: ActorContext,
+  requestId: string | undefined,
+): Promise<void> {
+  await withTransaction(pool, async (client) => {
+    const execution = await findExecutionByIdempotencyKey(client, executionKey(position.proposalId));
+    if (!execution) return;
+
+    const existingOrders = await findOrdersByExecution(client, execution.id);
+    if (existingOrders.some((order) => order.exitReason !== null)) return;
+
+    const takeProfitId = position.bracketOrderIds.take_profit;
+    const stopLossId = position.bracketOrderIds.stop_loss;
+    if (takeProfitId) await cancelBrokerOrder(takeProfitId, requestId).catch(() => null);
+    if (stopLossId) await cancelBrokerOrder(stopLossId, requestId).catch(() => null);
+
+    const brokerResult = await submitOrder(
+      {
+        idempotency_key: `hourly-exit:${position.proposalId}:${exitReason}`,
+        symbol: position.symbol,
+        side: 'SELL',
+        quantity: position.quantity,
+        order_type: 'MARKET',
+      },
+      requestId,
+    );
+    if (brokerResult.fills.length === 0) return;
+
+    const exitOrder = await createOrder(client, {
+      executionId: execution.id,
+      symbol: position.symbol,
+      side: 'SELL',
+      quantity: position.quantity,
+      orderType: 'MARKET',
+      brokerOrderId: brokerResult.broker_order_id,
+      bracketOrderIds: {
+        ...position.bracketOrderIds,
+        cancelled_take_profit: takeProfitId ?? null,
+        cancelled_stop_loss: stopLossId ?? null,
+      },
+    });
+    const persistedFills = await persistFills(client, exitOrder.id, brokerResult.fills);
+    await updateOrderStatus(client, exitOrder.id, brokerResult.status, {
+      filledQuantity: filledQuantity(brokerResult.fills),
+      averageFillPrice: averageFillPrice(brokerResult.fills),
+      brokerOrderId: brokerResult.broker_order_id,
+      exitReason,
+    });
+
+    const proposal = await findProposalByIdForUpdate(client, position.proposalId);
+    if (proposal) {
+      await updatePositionFromFills(client, { ...proposal, side: 'SELL' }, brokerResult.fills);
+    }
+    await writePortfolioSnapshot(client, requestId, `HOURLY_${exitReason}`);
+
+    await createAuditLog(client, {
+      eventType: 'HOURLY_POSITION_AUTO_CLOSED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'trade_proposal',
+      entityId: position.proposalId,
+      action: `AUTO_CLOSE_${exitReason}`,
+      afterData: {
+        orderId: exitOrder.id,
+        symbol: position.symbol,
+        quantity: position.quantity,
+        exitReason,
+        fills: persistedFills.map((fill) => ({ id: fill.id, price: fill.price, quantity: fill.quantity })),
+      },
+      requestId: requestId ?? null,
+    });
+  });
+}
+
+/**
+ * Finds every open Phase 27 hourly position and automatically closes any
+ * that have exceeded their configured maximum holding hours, or that fall
+ * inside the session's force-close-before-close window. Safe to call
+ * repeatedly and never throws — same contract as reconcileIntradayTimeExits,
+ * which this is a direct sibling of (hours instead of minutes as the
+ * holding-time unit, phase27 instead of phase25 settings/snapshot key).
+ */
+export async function reconcileHourlyTimeExits(
+  pool: Pool,
+  actor: ActorContext = SYSTEM_RECONCILIATION_ACTOR,
+  requestId?: string,
+): Promise<HourlyTimeExitResult> {
+  const result: HourlyTimeExitResult = { checked: 0, closed: 0, errors: 0 };
+  let positions: OpenIntradayPosition[];
+  try {
+    positions = await findOpenHourlyPositions(pool);
+  } catch {
+    return result;
+  }
+  if (positions.length === 0) return result;
+
+  const settings = await loadPhase27Settings(pool);
+  const now = new Date();
+  const sessionStatus = computeHourlySessionStatus(now, settings);
+
+  for (const position of positions) {
+    result.checked += 1;
+    try {
+      const phase27 = position.riskSnapshot.phase27 as Record<string, unknown> | undefined;
+      const maxHoldingHours = Number(phase27?.maxHoldingHours ?? settings.maxHoldingHours);
+      const forceCloseEnabled = phase27?.forceCloseEnabled !== false;
+      const elapsedHours = (now.getTime() - position.enteredAt.getTime()) / 3_600_000;
+
+      let exitReason: 'MAX_HOLDING_TIME' | 'END_OF_DAY' | null = null;
+      if (maxHoldingHours > 0 && elapsedHours >= maxHoldingHours) {
+        exitReason = 'MAX_HOLDING_TIME';
+      } else if (
+        forceCloseEnabled
+        && (sessionStatus === 'FORCE_CLOSE_WINDOW' || sessionStatus === 'CLOSED')
+      ) {
+        exitReason = 'END_OF_DAY';
+      }
+      if (!exitReason) continue;
+
+      await closeHourlyPosition(pool, position, exitReason, actor, requestId);
       result.closed += 1;
     } catch {
       result.errors += 1;

@@ -11,3 +11,5 @@ export * from './positions';
 export * from './portfolio-snapshots';
 export * from './audit-logs';
 export * from './system-settings';
+export * from './hourly-watchlist';
+export * from './hourly-candle-processing';

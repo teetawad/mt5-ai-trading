@@ -568,6 +568,85 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` complete · `[!]` blocke
 
 ---
 
+## Phase 27 -- Hourly Intraday Trading
+
+- [x] New primary trading architecture: single 1H-candle strategy for US
+      stocks, replacing browser-click-triggered analysis with a server-side
+      scheduler; Phase 25's 1h/15m/5m intraday mode is deprecated (disabled
+      from nav, kept functional for debugging) not deleted; Phase 26 crypto
+      untouched
+- [x] Hourly Scanner (`apps/api/src/services/hourly-scheduler.ts`) — new
+      server-side scheduler, the first of its kind in this codebase (no
+      scheduler/queue existed previously; deferred by `planning/
+      DESIGN_DECISIONS.md` DD-004 until a concrete need was demonstrated)
+- [x] Detects a newly closed 1H candle per watchlist symbol via the existing
+      historical-bars endpoint (no new Python detection endpoint needed)
+- [x] Evaluates each configured watchlist symbol exactly once per completed
+      candle — enforced by a database `UNIQUE(symbol, candle_timestamp)`
+      claim constraint (`hourly_candle_processing`), not scheduler timing
+- [x] Survives restart without reprocessing a candle — all dedup state lives
+      in the database, none in scheduler memory; verified by a test that
+      calls `tick()` twice with identical latest-candle data
+- [x] Records last-processed-candle per symbol, surfaced on the Dashboard
+- [x] Does nothing while market rules disallow new entries or the master
+      toggle is off (`phase27_hourly_mode_enabled`, default **on**)
+- [x] Configurable watchlist (`hourly_watchlist` table) — enable/disable per
+      symbol; seeded with AAPL only, not the entire market
+- [x] Single-timeframe hourly strategy (Python, `strategy/hourly/`): 1h
+      trend, momentum, volume, price structure (breakout/pullback), ATR
+      volatility/bracket sizing, and an optional higher-timeframe
+      confirmation (resampled from the same closed 1h series) that may only
+      veto a signal, never trigger one alone
+- [x] No-look-ahead guarantee (bar trimming in live analysis) — explicitly
+      tested; session-status gating extracted into a shared module reused by
+      Phase 25 and Phase 27 (`strategy/common/session.py`)
+- [x] BUY / SELL / HOLD decision output (SELL closes an existing long on a
+      confirmed bearish reversal; this PAPER broker cannot short)
+- [x] AI output includes decision, confidence, reasons, entry/SL/TP,
+      risk/reward, expected holding duration, signal candle timestamp, and
+      model/strategy version
+- [x] Risk-based position sizing (Node `phase27RiskControls`, whole shares)
+- [x] Stop Loss / Take Profit PAPER bracket orders (reuses the existing
+      Phase 22/23/25/26 broker bracket mechanism unmodified, ATR-derived
+      prices, BUY only)
+- [x] Maximum holding hours automatic exit; end-of-day automatic
+      force-close — both reuse the existing bracket-cancel-then-market-sell
+      pattern from Phase 25, requiring no new owner approval
+- [x] Per-symbol cooldown (`phase27_cooldown_seconds_per_symbol`, default
+      one candle) independent of the global cooldown setting
+- [x] Maximum trades per symbol per day / maximum total trades per day
+- [x] Max loss per trade / max daily loss (shared with the platform-wide
+      limit)
+- [x] Duplicate signal protection (candle claim) and duplicate/pending-order
+      protection (existing symbol-scoped checks)
+- [x] Fresh market data check; kill switch enforced (unmodified, shared
+      Python risk engine)
+- [x] Owner approval required for every new position (entry, quantity, stop
+      loss, take profit shown at approval time); no second approval for
+      already-approved bracket/time/EOD exits
+- [x] Hourly Trading UI (`apps/web/pages/hourly.vue`, now the primary
+      nav-linked page): watchlist admin, candlestick chart with entry/SL/TP
+      markers (new `CandlestickChart.vue` component), symbol analysis panel,
+      master enable/disable toggle, settings table
+- [x] Dashboard extended with session status, next candle analysis time,
+      watchlist, daily loss used, and recent hourly signals
+- [x] `PAPER TRADING ONLY` — no live trading endpoint, credential, or SDK
+      introduced; every hourly order still routes through
+      `PaperBrokerAdapter` only
+- [x] Documented in `docs/PHASE_27_HOURLY_TRADING.md`, with cross-references
+      added to `docs/ARCHITECTURE.md`, `docs/RISK_ENGINE.md`,
+      `docs/PAPER_BROKER.md`, `docs/ORDER_STATE_MACHINE.md`,
+      `docs/DATABASE.md`, `docs/API.md`, `docs/THREAT_MODEL.md`,
+      `docs/TEST_PLAN.md`, `docs/DEVELOPMENT.md`
+- [x] Python tests (hourly strategy analysis, resampling edge cases,
+      broadened architectural-boundary check, endpoint) and Node tests
+      (hourly risk controls, decision service, route-level BUY/SELL/HOLD
+      flow, scheduler claim/restart-safety/candle-close behavior) — all
+      passing
+- [ ] Owner review
+
+---
+
 ## Paper MVP Definition of Done
 
 - [x] All automated tests pass

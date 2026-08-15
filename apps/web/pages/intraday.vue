@@ -2,11 +2,18 @@
   <div class="space-y-6">
     <div>
       <p class="text-xs font-bold uppercase tracking-widest text-amber-200">PAPER TRADING ONLY</p>
-      <h1 class="page-title">Intraday Mode</h1>
+      <h1 class="page-title">Intraday Mode (Phase 25 — deprecated)</h1>
       <p class="page-subtitle">
-        Multi-timeframe analysis (1h trend / 15m setup / 5m entry). Every BUY decision still
-        creates a PENDING_APPROVAL proposal — nothing is submitted to the PAPER broker without
-        owner approval.
+        Superseded by <NuxtLink
+          to="/hourly"
+          class="underline decoration-dotted"
+        >
+          Hourly Trading
+        </NuxtLink>,
+        the platform's primary strategy. Disabled by default and kept here only for debugging —
+        this is not linked from the main navigation. Multi-timeframe analysis (1h trend / 15m
+        setup / 5m entry). Every BUY decision still creates a PENDING_APPROVAL proposal — nothing
+        is submitted to the PAPER broker without owner approval.
       </p>
     </div>
 

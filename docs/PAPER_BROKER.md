@@ -203,10 +203,14 @@ server-side by `phase22RiskControls` (Node) from `phase22_stop_loss_pct` /
 never registers one for a SELL.
 
 The broker-layer mechanism below is entirely generic — `phase25RiskControls`
-(ATR-derived bracket, stocks) and `phase26RiskControls` (ATR-derived bracket,
-crypto) both reuse it unmodified via the same `request.bracket` field. A
-crypto SELL (closing an existing long) is not a bracket order — see
-`docs/RISK_ENGINE.md` — and cancels no pending bracket of its own.
+(ATR-derived bracket, stocks), `phase26RiskControls` (ATR-derived bracket,
+crypto), and `phase27RiskControls` (ATR-derived bracket, hourly stocks) all
+reuse it unmodified via the same `request.bracket` field. `bracketFromProposal`
+(`trade-execution-service.ts`) checks `riskSnapshot.phase27` first, then
+falls through to `phase25`/`phase26`/`phase22` — only one is ever set per
+proposal. A crypto SELL (closing an existing long) is not a bracket order —
+see `docs/RISK_ENGINE.md` — and cancels no pending bracket of its own; the
+same is true for an hourly SELL.
 
 **local_paper (`PaperBrokerAdapter`, default `BROKER_PROVIDER`):**
 - On a filled BUY entry with `request.bracket` set, the adapter fills the entry
@@ -268,7 +272,7 @@ already resolves each leg independently via `DELETE /orders/:id`, and
 cancelling one side of a live Alpaca bracket already stops the other from
 firing on Alpaca's own infrastructure.
 
-### Automatic exits beyond SL/TP (Phase 25)
+### Automatic exits beyond SL/TP (Phase 25, extended in Phase 27)
 
 Maximum holding time and end-of-day force-close (Phase 25) execute the same
 way bracket SL/TP already did: **without requesting a new owner approval.**
@@ -280,6 +284,13 @@ automatic exit as requiring fresh approval would be inconsistent with how
 bracket SL/TP already behaves, and would leave a window where a position
 that has breached its own configured safety limit sits open waiting on a
 human. See "Unresolved decisions" in `docs/PHASE_25_INTRADAY_TRADING.md`.
+
+Phase 27 reuses the identical reasoning and mechanism for hourly positions:
+`reconcileHourlyTimeExits` / `closeHourlyPosition` are near-verbatim copies
+of `reconcileIntradayTimeExits` / `closeIntradayPosition`, cancelling the
+pending bracket first and then submitting a MARKET SELL, with
+`MAX_HOLDING_TIME`/`END_OF_DAY` measured in hours (`phase27_max_holding_hours`)
+rather than minutes. See `docs/PHASE_27_HOURLY_TRADING.md`.
 
 ---
 

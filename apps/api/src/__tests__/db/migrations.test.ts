@@ -26,7 +26,7 @@ describe('migrations', () => {
     );
     expect(rows.length).toBeGreaterThanOrEqual(16);
     expect(rows[0].version).toBe('0001_create_users');
-    expect(rows[rows.length - 1].version).toBe('0022_phase26_crypto_trading');
+    expect(rows[rows.length - 1].version).toBe('0025_phase27_hourly_settings');
   });
 
   it.skipIf(SKIP)('all expected tables exist', async () => {
@@ -40,6 +40,8 @@ describe('migrations', () => {
       'audit_logs',
       'executions',
       'fills',
+      'hourly_candle_processing',
+      'hourly_watchlist',
       'orders',
       'portfolio_snapshots',
       'positions',

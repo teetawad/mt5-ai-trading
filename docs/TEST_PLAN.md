@@ -158,6 +158,109 @@ All 20 required scenarios must have automated tests before Paper MVP is declared
 
 ---
 
+## Phase 27 Hourly Trading Test Scenarios
+
+Covers the CLAUDE.md/Phase 27 requirement list specifically. See
+`docs/PHASE_27_HOURLY_TRADING.md` for full architecture context.
+
+### Scenario 21: One signal max per symbol per completed 1H candle
+- Call `tick()` against a watchlist symbol with a newly closed 1H candle.
+- Verify exactly one `hourly_candle_processing` row and one proposal are
+  created for that `(symbol, candle_timestamp)`.
+- Location: `apps/api/src/__tests__/hourly-scheduler.test.ts`,
+  `services/trading-engine/tests/test_hourly.py`.
+
+### Scenario 22: Restart does not duplicate candle processing
+- Call `tick()` twice against the same latest closed candle (no in-memory
+  state carries over between calls — this simulates a process restart).
+- Verify the second call claims nothing new and creates no second proposal.
+- Location: `apps/api/src/__tests__/hourly-scheduler.test.ts`.
+
+### Scenario 23: Incomplete candle cannot trigger
+- Present a bar whose close time (`open + 1h`) is in the future.
+- Verify the scheduler never claims it, and `analyze_hourly` never uses a
+  bar timestamped after `now` (no-look-ahead).
+- Location: `apps/api/src/__tests__/hourly-scheduler.test.ts`,
+  `services/trading-engine/tests/test_hourly.py`.
+
+### Scenario 24: BUY / SELL / HOLD decisions
+- Confirmed uptrend with no open position → `BUY` with an ATR bracket.
+- Confirmed downtrend with an open position → `SELL`, no bracket.
+- Flat/unconfirmed series → `HOLD`.
+- Location: `services/trading-engine/tests/test_hourly.py`,
+  `apps/api/src/__tests__/hourly.test.ts`.
+
+### Scenario 25: Risk rejection overrides the AI decision
+- Mock a `BUY` analysis with a session status other than
+  `OPEN_FOR_ENTRIES`.
+- Verify the proposal transitions to `RISK_REJECTED` with
+  `PHASE27_SESSION_STATUS` in `failedRules`, despite the AI decision.
+- Location: `apps/api/src/__tests__/hourly.test.ts`.
+
+### Scenario 26: Owner approval required
+- Verify a `BUY`/`SELL` decision always creates a `PENDING_APPROVAL`
+  proposal, never an executed order, and that
+  `POST /trade-proposals/:id/approve` requires `role='owner'`.
+- Location: `apps/api/src/__tests__/hourly.test.ts` (reuses the generic
+  approval-authorization tests already covering every proposal source).
+
+### Scenario 27: Duplicate approval protection
+- Approve the same proposal twice with the same `requestId`.
+- Verify the second call is idempotent (same result, no second broker
+  order submitted).
+- Location: `apps/api/src/__tests__/hourly.test.ts`.
+
+### Scenario 28: Bracket take-profit / stop-loss
+- Approve a `BUY` proposal; verify the submitted order carries
+  `bracket: {stop_loss_price, take_profit_price}` matching the Phase 27
+  risk snapshot, with no `fractionable`/`fee_bps` fields (whole shares, not
+  crypto).
+- Location: `apps/api/src/__tests__/hourly.test.ts`.
+
+### Scenario 29: Max daily loss
+- Verify `PHASE27_MAX_DAILY_LOSS` (Node) and the shared Python
+  `MAX_DAILY_LOSS` rule both gate hourly proposals identically to every
+  other phase.
+- Location: `apps/api/src/__tests__/hourly.test.ts` (reuses the generic
+  daily-loss mechanism already tested by `trade-proposals.test.ts`).
+
+### Scenario 30: Cooldown
+- Approve and fill a `BUY` proposal for a symbol, then immediately attempt
+  another hourly decision for the same symbol.
+- Verify `PHASE27_COOLDOWN` blocks it (default `phase27_cooldown_seconds_
+  per_symbol` = 3600s, one candle).
+- Location: `apps/api/src/__tests__/hourly.test.ts`.
+
+### Scenario 31: Max trades per day
+- Reach `phase27_max_trades_per_symbol_per_day`, then attempt one more.
+- Verify `PHASE27_MAX_TRADES_PER_SYMBOL_PER_DAY` rejects it.
+- Location: `apps/api/src/__tests__/hourly.test.ts`.
+
+### Scenario 32: Pending order blocking
+- With an active (non-terminal-status) order already open for a symbol,
+  attempt a new hourly decision for that symbol.
+- Verify `PHASE27_DUPLICATE_PENDING_ORDER` rejects it (shared mechanism,
+  `findActiveOrdersBySymbol`, already exercised by Phase 22/25/26 tests).
+
+### Scenario 33: End-of-day behavior
+- Fast-forward an open hourly position's `created_at` past
+  `phase27_max_holding_hours`, or move `now` into the session's
+  `FORCE_CLOSE_WINDOW`/`CLOSED` state.
+- Verify `reconcileHourlyTimeExits` closes the position with exit reason
+  `MAX_HOLDING_TIME` or `END_OF_DAY`, cancelling the pending bracket first,
+  with no new owner approval required, and that a second pass is a no-op.
+- Location: `apps/api/src/__tests__/hourly.test.ts`, following the
+  `UPDATE orders SET created_at = NOW() - INTERVAL '...'` time-fast-forward
+  pattern already used in `intraday.test.ts`.
+
+### Scenario 34: Accounting/reconciliation unchanged
+- Run the existing `position-accounting.test.ts` suite unmodified against
+  hourly fills — weighted-average cost, realized/unrealized P&L, and fee
+  handling are asset/phase-agnostic and required zero changes for this
+  phase.
+
+---
+
 ## Additional Test Areas
 
 ### State Machine Tests

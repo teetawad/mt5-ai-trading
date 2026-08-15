@@ -38,6 +38,15 @@ async function main() {
   } catch (err) {
     console.error('[api] Bracket reconciliation on startup failed (non-fatal):', err);
   }
+
+  // Phase 27 hourly scheduler: the "Hourly Scanner" that detects newly
+  // closed 1H candles and evaluates each watchlist symbol exactly once.
+  // Started here (not app.ts) for the same reason bracket reconciliation
+  // is — this file is never imported by the test suite (tests hit `app`
+  // via supertest), so the scheduler never runs during `npm test`.
+  const { getPool: getPoolForScheduler } = await import('./db/client');
+  const { startHourlyScheduler } = await import('./services/hourly-scheduler');
+  startHourlyScheduler(getPoolForScheduler());
 }
 
 main().catch((error) => {

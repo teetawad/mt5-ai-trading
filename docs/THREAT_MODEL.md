@@ -216,6 +216,46 @@ bypassing the risk engine.
 
 ---
 
+### T17: Hourly Scheduler as a New Always-On Server-Side Surface (Phase 27)
+**Attack:** The Phase 27 hourly scheduler (`hourly-scheduler.ts`) is the
+first background process in this codebase that acts without any user
+request triggering it — an attacker who can influence its inputs
+(`hourly_watchlist`, `hourly_candle_processing`, market data) could try to
+force duplicate proposal creation, starve legitimate candles, or exploit a
+timing race across a process restart.
+**Impact:** Duplicate trade proposals for the same candle; a symbol
+silently stuck and never re-evaluated; scheduler downtime masking missed
+entries.
+**Mitigations:**
+- **Duplicate candle processing** is prevented by a database constraint,
+  not application logic: `hourly_candle_processing.UNIQUE(symbol,
+  candle_timestamp)`. Only one `INSERT` per `(symbol, candle_timestamp)`
+  pair can ever succeed, regardless of how many scheduler ticks, processes,
+  or retries race to claim it — this is enforced by PostgreSQL itself, the
+  same trust boundary already relied on for `executions.idempotency_key`
+  (see T7).
+- **Restart races** are inherently safe: the scheduler carries no
+  in-memory state between ticks. A process restart simply re-asks the same
+  question ("is there a newer closed candle than what's claimed?") that
+  every other tick already asks — there is no separate "resume" code path
+  to get wrong.
+- **Watchlist tampering** — adding or enabling a symbol requires
+  `role='owner'` (`POST /hourly/watchlist`, `PATCH /hourly/watchlist/:id`),
+  same authorization model as every other owner-only mutation; reads
+  (`GET /hourly/watchlist`) require authentication only.
+- **A claim stuck in `CLAIMED`** (scheduler crash mid-analysis) is never
+  retried automatically — that one candle is permanently forfeited for that
+  symbol rather than risking a duplicate signal. This is a fail-safe
+  trade-off, not a gap: an operator can observe stuck `CLAIMED` rows via
+  `hourly_candle_processing` and investigate, but nothing in the system
+  will silently retry and risk double-processing.
+- Everything downstream of a successful claim (risk evaluation, owner
+  approval, execution) is identical to every other signal source in this
+  system — the scheduler introduces a new *entry point* into the pipeline,
+  not a new *execution path* around it.
+
+---
+
 ## Controls Summary
 
 | Category | Control |

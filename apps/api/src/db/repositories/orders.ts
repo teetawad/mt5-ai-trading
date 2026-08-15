@@ -163,6 +163,38 @@ export async function findOpenIntradayPositions(
   }));
 }
 
+/** Open Phase 27 (hourly) BUY positions with no exit recorded yet — used by
+ * reconcileHourlyTimeExits to find candidates for a maximum-holding-time or
+ * end-of-day force-close exit. Identical shape to findOpenIntradayPositions,
+ * filtered on the phase27 risk-snapshot key instead of phase25. */
+export async function findOpenHourlyPositions(
+  db: Pool | PoolClient,
+): Promise<OpenIntradayPosition[]> {
+  const { rows } = await db.query(
+    `SELECT o.id AS order_id, e.proposal_id AS proposal_id, o.symbol, o.quantity,
+            o.bracket_order_ids, o.created_at AS entered_at, p.risk_snapshot
+     FROM orders o
+     JOIN executions e ON e.id = o.execution_id
+     JOIN trade_proposals p ON p.id = e.proposal_id
+     WHERE o.side = 'BUY'
+       AND o.status = 'FILLED'
+       AND p.risk_snapshot ? 'phase27'
+       AND NOT EXISTS (
+         SELECT 1 FROM orders x
+         WHERE x.execution_id = o.execution_id AND x.exit_reason IS NOT NULL
+       )`,
+  );
+  return rows.map((row) => ({
+    orderId: row.order_id as string,
+    proposalId: row.proposal_id as string,
+    symbol: row.symbol as string,
+    quantity: row.quantity as string,
+    bracketOrderIds: row.bracket_order_ids as Record<string, string | null>,
+    enteredAt: row.entered_at as Date,
+    riskSnapshot: row.risk_snapshot as Record<string, unknown>,
+  }));
+}
+
 export async function findActiveOrdersBySymbol(
   db: Pool | PoolClient,
   symbol: string,

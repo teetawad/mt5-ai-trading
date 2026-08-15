@@ -179,6 +179,17 @@ bracket exit does. Like bracket exits, this never changes the proposal's own
 state machine — the proposal stays terminal at `FILLED`; only the `orders`
 sub-state changes. See `docs/PHASE_25_INTRADAY_TRADING.md`.
 
+### Phase 27 (Hourly)
+
+Hourly proposals flow through this identical, unmodified state machine and
+`orders.exit_reason` set — no new states or exit reasons were added.
+`bracketFromProposal` checks `riskSnapshot.phase27` first (ahead of
+`phase25`/`phase26`/`phase22`) so hourly bracket entries and exits use the
+same `recordApprovedBracketExit`/`reconcileBracketOrders` path unchanged.
+`reconcileHourlyTimeExits` sets `MAX_HOLDING_TIME`/`END_OF_DAY` exactly like
+`reconcileIntradayTimeExits` does for Phase 25 (hours instead of minutes as
+the holding-time unit). See `docs/PHASE_27_HOURLY_TRADING.md`.
+
 ---
 
 ## Signal State (separate from Proposal)

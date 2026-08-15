@@ -43,8 +43,15 @@ import {
   phase26RiskControls,
   runCryptoAnalysis,
 } from './crypto-decision-service';
+import {
+  Phase27Settings,
+  ensureHourlyStrategy,
+  loadPhase27Settings,
+  phase27RiskControls,
+  runHourlyAnalysis,
+} from './hourly-decision-service';
 import { assetClassForSymbol, isCryptoSymbol, SUPPORTED_CRYPTO_PATTERN } from './asset-class';
-import { CryptoAnalysisDTO, IntradayAnalysisDTO } from './trading-engine-client';
+import { CryptoAnalysisDTO, HourlyAnalysisDTO, IntradayAnalysisDTO } from './trading-engine-client';
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -91,10 +98,17 @@ export interface CreateSignalInput {
   aiDecision?: AiDecision | null;
   phase25?: { analysis: IntradayAnalysisDTO; settings: Phase25Settings } | null;
   phase26?: { analysis: CryptoAnalysisDTO; settings: Phase26Settings } | null;
+  phase27?: { analysis: HourlyAnalysisDTO; settings: Phase27Settings } | null;
 }
 
 export interface ActorContext {
-  actorId: string;
+  // Nullable to allow a system actor (e.g. the hourly scheduler, which has
+  // no human user id) to create signals/proposals — mirrors
+  // trade-execution-service.ts's own ActorContext.actorId and its
+  // SYSTEM_RECONCILIATION_ACTOR constant, which already proves
+  // createAuditLog tolerates a null actor. Approval/rejection still require
+  // a real actor — see requireActorId, used only in those two paths.
+  actorId: string | null;
   actorEmail: string;
   requestId?: string | null;
   ipAddress?: string | null;
@@ -401,6 +415,7 @@ function proposalSnapshot(proposal: TradeProposal): Record<string, unknown> {
     estimatedNotional: proposal.estimatedNotional,
     phase22: proposal.riskSnapshot.phase22 ?? null,
     phase25: proposal.riskSnapshot.phase25 ?? null,
+    phase27: proposal.riskSnapshot.phase27 ?? null,
     status: proposal.status,
     expiresAt: proposal.expiresAt.toISOString(),
   };
@@ -411,6 +426,16 @@ function requireRequestId(requestId: string | null | undefined): string {
     throw new ValidationError('requestId is required');
   }
   return requestId.trim();
+}
+
+/** Approval/rejection require a real, authenticated actor — unlike
+ * proposal creation, which the hourly scheduler may drive with a null
+ * (system) actor. Only used on the approve/reject paths. */
+function requireActorId(actorId: string | null): string {
+  if (!actorId) {
+    throw new ValidationError('An authenticated actor is required to approve or reject a proposal');
+  }
+  return actorId;
 }
 
 async function withTransaction<T>(
@@ -466,41 +491,54 @@ export async function createSignalAndProposal(
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
     const latestSnapshot = await findLatestSnapshot(client);
     const referencePrice = input.referencePrice ?? market.price;
-    const advanced = input.phase25
-      ? await phase25RiskControls(client, {
+    const advanced = input.phase27
+      ? await phase27RiskControls(client, {
         symbol,
         strategyId: strategy.id,
-        analysis: input.phase25.analysis,
+        side: input.side,
+        analysis: input.phase27.analysis,
         market,
         paperPortfolio,
         latestSnapshot,
         riskCfg: cfg,
-        settings: input.phase25.settings,
+        settings: input.phase27.settings,
         requestedQuantity: input.quantity,
       })
-      : input.phase26
-        ? await phase26RiskControls(client, {
+      : input.phase25
+        ? await phase25RiskControls(client, {
           symbol,
           strategyId: strategy.id,
-          side: input.side,
-          analysis: input.phase26.analysis,
+          analysis: input.phase25.analysis,
           market,
           paperPortfolio,
           latestSnapshot,
           riskCfg: cfg,
-          settings: input.phase26.settings,
+          settings: input.phase25.settings,
           requestedQuantity: input.quantity,
         })
-        : await phase22RiskControls(client, {
-          symbol,
-          side: input.side,
-          requestedQuantity: input.quantity,
-          entryPrice: market.price,
-          market,
-          paperPortfolio,
-          latestSnapshot,
-          cfg,
-        });
+        : input.phase26
+          ? await phase26RiskControls(client, {
+            symbol,
+            strategyId: strategy.id,
+            side: input.side,
+            analysis: input.phase26.analysis,
+            market,
+            paperPortfolio,
+            latestSnapshot,
+            riskCfg: cfg,
+            settings: input.phase26.settings,
+            requestedQuantity: input.quantity,
+          })
+          : await phase22RiskControls(client, {
+            symbol,
+            side: input.side,
+            requestedQuantity: input.quantity,
+            entryPrice: market.price,
+            market,
+            paperPortfolio,
+            latestSnapshot,
+            cfg,
+          });
     const proposalQuantity = advanced.quantity;
     const estimatedNotional = advanced.estimatedNotional;
 
@@ -551,11 +589,13 @@ export async function createSignalAndProposal(
       failed_rules: combinedFailedRules,
       reason: [riskResult.reason, advanced.reason].filter(Boolean).join('; ') || null,
       aiDecision: input.aiDecision ?? null,
-      ...(input.phase25
-        ? { phase25: advanced.snapshot }
-        : input.phase26
-          ? { phase26: advanced.snapshot }
-          : { phase22: advanced.snapshot }),
+      ...(input.phase27
+        ? { phase27: advanced.snapshot }
+        : input.phase25
+          ? { phase25: advanced.snapshot }
+          : input.phase26
+            ? { phase26: advanced.snapshot }
+            : { phase22: advanced.snapshot }),
     };
 
     await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, actor.requestId);
@@ -566,11 +606,13 @@ export async function createSignalAndProposal(
       result: combinedRiskResult.result,
       rulesChecked: [
         ...riskResult.rules_checked,
-        input.phase25
-          ? 'PHASE25_ADVANCED_RISK_CONTROLS'
-          : input.phase26
-            ? 'PHASE26_ADVANCED_RISK_CONTROLS'
-            : 'PHASE22_ADVANCED_RISK_CONTROLS',
+        input.phase27
+          ? 'PHASE27_ADVANCED_RISK_CONTROLS'
+          : input.phase25
+            ? 'PHASE25_ADVANCED_RISK_CONTROLS'
+            : input.phase26
+              ? 'PHASE26_ADVANCED_RISK_CONTROLS'
+              : 'PHASE22_ADVANCED_RISK_CONTROLS',
       ],
       failedRules: combinedFailedRules,
       reason: combinedRiskResult.reason,
@@ -908,6 +950,89 @@ export async function createCryptoDecisionAndProposal(
   return { analysis, ...result };
 }
 
+export interface CreateHourlyDecisionInput {
+  symbol: string;
+}
+
+export interface HourlyDecisionWorkflowResult {
+  analysis: HourlyAnalysisDTO;
+  signal: Signal | null;
+  riskCheck: RiskCheck | null;
+  riskResult: RiskResultDTO | null;
+  proposal: TradeProposal | null;
+}
+
+/** Phase 27: BUY opens a bracket-protected long on a newly closed 1H
+ * candle. SELL closes an existing long on a confirmed reversal — sized to
+ * the full position held, never a new short — and carries no bracket. HOLD
+ * never reaches createSignalAndProposal. Same shape as
+ * createCryptoDecisionAndProposal, but this is the path the hourly
+ * scheduler drives (via a system ActorContext with a null actorId) as well
+ * as the manual debug route — both go through this one function so the
+ * dedup/claim guarantee lives entirely in the scheduler's candle-claim step
+ * upstream, not here. */
+export async function createHourlyDecisionAndProposal(
+  pool: Pool,
+  input: CreateHourlyDecisionInput,
+  actor: ActorContext,
+): Promise<HourlyDecisionWorkflowResult> {
+  const symbol = String(input.symbol ?? '').trim().toUpperCase();
+  if (!SUPPORTED_US_STOCK_PATTERN.test(symbol)) {
+    throw new ValidationError('symbol must be a supported US stock symbol');
+  }
+  const tradingMode = await getSettingValue<string>(pool, 'trading_mode');
+  if ((tradingMode ?? 'PAPER') !== 'PAPER') {
+    throw new ValidationError('Hourly signals are available in PAPER mode only');
+  }
+
+  const paperPortfolio = await getPaperPortfolio(actor.requestId ?? undefined);
+  const existingQty = new Decimal(paperPortfolio.positions[symbol] ?? '0');
+  const hasOpenPosition = existingQty.gt(0);
+
+  const { analysis, settings } = await runHourlyAnalysis(
+    symbol,
+    pool,
+    hasOpenPosition,
+    actor.requestId ?? undefined,
+  );
+  if (!settings.hourlyModeEnabled) {
+    throw new ValidationError('Hourly trading mode is disabled — enable it in Settings first');
+  }
+
+  if (analysis.decision === 'HOLD') {
+    await createAuditLog(pool, {
+      eventType: 'HOURLY_DECISION_HOLD',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'signal',
+      entityId: null,
+      action: 'HOURLY_HOLD_NO_TRADE',
+      afterData: { analysis },
+      requestId: actor.requestId ?? null,
+    });
+    return { analysis, signal: null, riskCheck: null, riskResult: null, proposal: null };
+  }
+
+  const strategy = await ensureHourlyStrategy(pool);
+  const quantity = analysis.decision === 'BUY' ? settings.defaultQuantity : existingQty.toFixed(0);
+
+  const result = await createSignalAndProposal(pool, {
+    strategyId: strategy.id,
+    symbol,
+    side: analysis.decision,
+    quantity,
+    orderType: 'MARKET',
+    referencePrice: analysis.entry_price,
+    reason: `HOURLY TREND / PAPER ONLY: ${analysis.decision}`
+      + ` (candle ${analysis.candle_timestamp}, ${analysis.trend_direction} trend,`
+      + ` R:R ${analysis.risk_reward ?? '-'})`,
+    confidence: null,
+    phase27: { analysis, settings },
+  }, actor);
+
+  return { analysis, ...result };
+}
+
 export async function cancelProposal(
   pool: Pool,
   proposalId: string,
@@ -949,6 +1074,7 @@ export async function approveProposal(
   actor: ActorContext,
 ): Promise<ApprovalWorkflowResult> {
   const requestId = requireRequestId(actor.requestId);
+  const approverId = requireActorId(actor.actorId);
 
   return withTransaction(pool, async (client) => {
     const proposal = await findProposalByIdForUpdate(client, proposalId);
@@ -978,49 +1104,69 @@ export async function approveProposal(
     const riskSnapshot = proposal.riskSnapshot as Record<string, unknown> | undefined;
     const isPhase25 = Boolean(riskSnapshot?.phase25);
     const isPhase26 = Boolean(riskSnapshot?.phase26);
-    const advanced = isPhase25
-      ? await phase25RiskControls(client, {
+    const isPhase27 = Boolean(riskSnapshot?.phase27);
+    const advanced = isPhase27
+      ? await phase27RiskControls(client, {
         symbol: proposal.symbol,
         strategyId: proposal.strategyId,
-        analysis: (await runIntradayAnalysis(proposal.symbol, client, actor.requestId ?? undefined)).analysis,
+        side: proposal.side,
+        analysis: (await runHourlyAnalysis(
+          proposal.symbol,
+          client,
+          decimal(paperPortfolio.positions[proposal.symbol]).gt(0),
+          actor.requestId ?? undefined,
+        )).analysis,
         market,
         paperPortfolio,
         latestSnapshot,
         riskCfg: cfg,
-        settings: await loadPhase25Settings(client),
+        settings: await loadPhase27Settings(client),
         requestedQuantity: proposal.quantity,
         excludeProposalId: proposal.id,
       })
-      : isPhase26
-        ? await phase26RiskControls(client, {
+      : isPhase25
+        ? await phase25RiskControls(client, {
           symbol: proposal.symbol,
           strategyId: proposal.strategyId,
-          side: proposal.side,
-          analysis: (await runCryptoAnalysis(
-            proposal.symbol,
-            client,
-            decimal(paperPortfolio.positions[proposal.symbol]).gt(0),
-            actor.requestId ?? undefined,
-          )).analysis,
+          analysis: (await runIntradayAnalysis(proposal.symbol, client, actor.requestId ?? undefined)).analysis,
           market,
           paperPortfolio,
           latestSnapshot,
           riskCfg: cfg,
-          settings: await loadPhase26Settings(client),
+          settings: await loadPhase25Settings(client),
           requestedQuantity: proposal.quantity,
           excludeProposalId: proposal.id,
         })
-        : await phase22RiskControls(client, {
-          symbol: proposal.symbol,
-          side: proposal.side,
-          requestedQuantity: proposal.quantity,
-          entryPrice: market.price,
-          market,
-          paperPortfolio,
-          latestSnapshot,
-          cfg,
-          excludeProposalId: proposal.id,
-        });
+        : isPhase26
+          ? await phase26RiskControls(client, {
+            symbol: proposal.symbol,
+            strategyId: proposal.strategyId,
+            side: proposal.side,
+            analysis: (await runCryptoAnalysis(
+              proposal.symbol,
+              client,
+              decimal(paperPortfolio.positions[proposal.symbol]).gt(0),
+              actor.requestId ?? undefined,
+            )).analysis,
+            market,
+            paperPortfolio,
+            latestSnapshot,
+            riskCfg: cfg,
+            settings: await loadPhase26Settings(client),
+            requestedQuantity: proposal.quantity,
+            excludeProposalId: proposal.id,
+          })
+          : await phase22RiskControls(client, {
+            symbol: proposal.symbol,
+            side: proposal.side,
+            requestedQuantity: proposal.quantity,
+            entryPrice: market.price,
+            market,
+            paperPortfolio,
+            latestSnapshot,
+            cfg,
+            excludeProposalId: proposal.id,
+          });
 
     const riskResult = await evaluateRisk(
       {
@@ -1053,11 +1199,13 @@ export async function approveProposal(
       result: (riskResult.result === 'PASS' && advanced.passed ? 'PASS' : 'REJECT') as RiskResultDTO['result'],
       failed_rules: combinedFailedRules,
       reason: [riskResult.reason, advanced.reason].filter(Boolean).join('; ') || null,
-      ...(isPhase25
-        ? { phase25: advanced.snapshot }
-        : isPhase26
-          ? { phase26: advanced.snapshot }
-          : { phase22: advanced.snapshot }),
+      ...(isPhase27
+        ? { phase27: advanced.snapshot }
+        : isPhase25
+          ? { phase25: advanced.snapshot }
+          : isPhase26
+            ? { phase26: advanced.snapshot }
+            : { phase22: advanced.snapshot }),
     };
 
     await maybeAutoDisableKillSwitchOnDailyLoss(client, combinedFailedRules, actor, requestId);
@@ -1069,11 +1217,13 @@ export async function approveProposal(
       result: combinedRiskResult.result,
       rulesChecked: [
         ...riskResult.rules_checked,
-        isPhase25
-          ? 'PHASE25_ADVANCED_RISK_CONTROLS'
-          : isPhase26
-            ? 'PHASE26_ADVANCED_RISK_CONTROLS'
-            : 'PHASE22_ADVANCED_RISK_CONTROLS',
+        isPhase27
+          ? 'PHASE27_ADVANCED_RISK_CONTROLS'
+          : isPhase25
+            ? 'PHASE25_ADVANCED_RISK_CONTROLS'
+            : isPhase26
+              ? 'PHASE26_ADVANCED_RISK_CONTROLS'
+              : 'PHASE22_ADVANCED_RISK_CONTROLS',
       ],
       failedRules: combinedFailedRules,
       reason: combinedRiskResult.reason,
@@ -1100,7 +1250,7 @@ export async function approveProposal(
 
     const approval = await createApproval(client, {
       proposalId: proposal.id,
-      approvedBy: actor.actorId,
+      approvedBy: approverId,
       action: 'APPROVE',
       requestId,
       ipAddress: actor.ipAddress ?? null,
@@ -1170,6 +1320,7 @@ export async function rejectProposal(
   actor: ActorContext,
 ): Promise<ApprovalWorkflowResult> {
   const requestId = requireRequestId(actor.requestId);
+  const approverId = requireActorId(actor.actorId);
 
   return withTransaction(pool, async (client) => {
     const proposal = await findProposalByIdForUpdate(client, proposalId);
@@ -1192,7 +1343,7 @@ export async function rejectProposal(
 
     const approval = await createApproval(client, {
       proposalId: proposal.id,
-      approvedBy: actor.actorId,
+      approvedBy: approverId,
       action: 'REJECT',
       reason,
       requestId,

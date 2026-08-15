@@ -333,6 +333,54 @@ in `docs/PHASE_26_CRYPTO_TRADING.md`.
 
 ---
 
+## Phase 27 Hourly Risk Controls (Node-side)
+
+A fifth advanced-risk-controls layer, `phase27RiskControls` in
+`hourly-decision-service.ts`, runs for proposals created via
+`POST /signals/hourly-decision` — either by an owner clicking "Submit for
+Approval" on `/hourly`, or by the Phase 27 hourly scheduler itself (see
+`docs/PHASE_27_HOURLY_TRADING.md`). Same two-layer (Python + Node)
+evaluation model and immutable-at-`PENDING_APPROVAL` bracket snapshot as
+Phase 22/25/26, bidirectional like Phase 26 but sized in **whole shares**
+like Phase 25 (US stocks, not fractional):
+
+- **PHASE27_HOURLY_MODE_DISABLED** — master toggle (`phase27_hourly_mode_enabled`,
+  default **on** — this is the primary strategy family).
+- **PHASE27_NO_ENTRY_SIGNAL** — the Python analysis decision no longer
+  matches the side requested.
+- **PHASE27_SESSION_STATUS** — must be `OPEN_FOR_ENTRIES`.
+- **PHASE27_FRESH_MARKET_DATA**, **PHASE27_BID_ASK_SPREAD**,
+  **PHASE27_ESTIMATED_SLIPPAGE**, **PHASE27_LIQUIDITY** — re-checked
+  server-side against live market data, same defense-in-depth reasoning as
+  the equivalent Phase 25/26 rules.
+- **PHASE27_INVALID_STOP_DISTANCE**, **PHASE27_MIN_RISK_REWARD** (BUY only).
+- **PHASE27_POSITION_SIZE**, **PHASE27_MAX_LOSS_PER_TRADE** (BUY only) —
+  quantity sized down from `phase27_default_quantity` by risk-per-trade
+  (`phase27_max_loss_per_trade_usd`), available cash,
+  `max_position_size_usd`, and `max_portfolio_concentration_pct`, then
+  rounded **down to whole shares** (`toDecimalPlaces(0, ROUND_DOWN)`).
+- **PHASE27_NO_POSITION_TO_SELL** — SELL requested with no (or zero) held
+  quantity; SELL is sized to `min(requested, held)`, never risk-budgeted.
+- **PHASE27_MAX_DAILY_LOSS** — same day-boundary `dailyPnl` used everywhere
+  else, the platform-wide `max_daily_loss_usd`. Unlike Phase 26, no
+  additional hourly-specific daily-loss budget was added.
+- **PHASE27_DUPLICATE_EXPOSURE** (BUY only), **PHASE27_DUPLICATE_PENDING_ORDER**.
+- **PHASE27_COOLDOWN** — `phase27_cooldown_seconds_per_symbol` (default
+  3600s, one candle), independent of the global cooldown setting.
+- **PHASE27_MAX_TRADES_PER_SYMBOL_PER_DAY**, **PHASE27_MAX_TRADES_PER_DAY_TOTAL**
+  — same shape as the equivalent Phase 25/26 rules, scoped to the hourly
+  strategy only.
+
+These, plus the unmodified, shared Python risk engine's 14 rules above,
+cover the full required risk list without any change to `risk/engine.py`.
+
+Full detail — the single-timeframe signal layer, the hourly scheduler that
+drives most proposals through this pipeline without an owner click, and the
+higher-timeframe confirmation veto — live in
+`docs/PHASE_27_HOURLY_TRADING.md`.
+
+---
+
 ## Risk Configuration API
 
 ```

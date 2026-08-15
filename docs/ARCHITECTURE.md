@@ -71,6 +71,10 @@ No real-money execution is present or permitted in this codebase.
 - Enforces state machine transitions.
 - Manages kill switch.
 - Emits audit events.
+- Runs the Phase 27 hourly scheduler (`hourly-scheduler.ts`) as an always-on
+  background component of the process (started from `index.ts`, never from
+  `app.ts`) — the only in-process background timer in this codebase. See
+  "Request Flow: Hourly Scanner" below.
 
 ### services/trading-engine (Python/FastAPI)
 - **Internal service only** — not exposed to the internet.
@@ -120,6 +124,32 @@ No real-money execution is present or permitted in this codebase.
 19. All DB writes in single transaction; execution idempotency key prevents doubles
 ```
 
+## Request Flow: Hourly Scanner (Phase 27)
+
+```
+1. hourly-scheduler.ts ticks on a plain setInterval (default every 60s)
+2. For each ENABLED hourly_watchlist symbol (skipped entirely if the
+   phase27_hourly_mode_enabled master toggle is off):
+   a. Fetch the latest 1H bar from trading-engine's historical-bars endpoint
+   b. Confirm the bar's close time (open + 1h) is <= now (no-look-ahead guard)
+   c. Compare against the last-processed candle for that symbol
+3. If the candle is new: INSERT INTO hourly_candle_processing
+   (symbol, candle_timestamp) — the UNIQUE(symbol, candle_timestamp)
+   constraint is the entire "exactly once per candle, restart-safe"
+   guarantee; only the caller whose INSERT succeeds proceeds
+4. On a successful claim: run the identical Signal → Trade Proposal flow
+   above (createHourlyDecisionAndProposal → createSignalAndProposal),
+   using a system ActorContext (no human user) for the audit trail
+5. Mark the claim row ANALYZED or ERROR; one symbol's failure never blocks
+   the others or the timer itself
+```
+
+This is the only entry point into the proposal pipeline that is not
+triggered by an owner clicking something in the browser — everything
+downstream of step 4 (risk evaluation, `PENDING_APPROVAL`, owner approval,
+execution) is identical to every other signal source. See
+`docs/PHASE_27_HOURLY_TRADING.md`.
+
 ---
 
 ## Separation of Concerns — Strict Rules
@@ -150,6 +180,9 @@ Avoiding eventual-consistency systems reduces complexity and failure modes.
 **Reason:** A message queue adds complexity and new failure modes.
 For paper trading at low throughput, synchronous HTTP between api and trading-engine
 is sufficient. A queue can be introduced later if needed.
+This still holds as of Phase 27: the hourly scheduler is a plain
+`setInterval` timer, not a queue — its "exactly once" guarantee comes from a
+database `UNIQUE` constraint, not from any message-broker semantics.
 
 ### Decision 4: BrokerAdapter interface designed now
 **Reason:** Prepares clean seam for future live broker without touching execution logic.

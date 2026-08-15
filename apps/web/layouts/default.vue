@@ -45,9 +45,9 @@
 <script setup lang="ts">
 const navItems = [
   { to: '/', label: 'Dashboard' },
+  { to: '/hourly', label: 'Hourly' },
   { to: '/proposals', label: 'Proposals' },
   { to: '/signals', label: 'Signals' },
-  { to: '/intraday', label: 'Intraday' },
   { to: '/crypto', label: 'Crypto' },
   { to: '/orders', label: 'Orders' },
   { to: '/positions', label: 'Positions' },

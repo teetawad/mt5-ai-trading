@@ -104,6 +104,23 @@ cd services/trading-engine && .venv/Scripts/python.exe -m mypy .
 See `.env.example` for all required variables and descriptions.
 Never commit `.env` to version control.
 
+## Hourly Scheduler (Phase 27)
+
+The hourly scheduler (`apps/api/src/services/hourly-scheduler.ts`) is
+started from `apps/api/src/index.ts` when the real API process boots — it
+is never imported by `app.ts`, which is what the test suite exercises via
+`supertest`, so **it never runs during `npm test`**. Two env vars control it:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `HOURLY_SCHEDULER_ENABLED` | `true` | Set to `false` to disable the interval timer entirely (e.g. for a read-only replica process). |
+| `HOURLY_SCHEDULER_TICK_MS` | `60000` (60s) | How often `tick()` runs. Each tick is cheap when nothing is new — it only does real work (an analysis + proposal creation) after successfully claiming a newly closed candle. |
+
+To exercise scheduler logic in a test, call `tick(pool)` directly (see
+`apps/api/src/__tests__/hourly-scheduler.test.ts`) rather than relying on
+the interval — `tick()` is a plain async function with no dependency on
+`setInterval` having fired.
+
 ## Database
 
 ```bash

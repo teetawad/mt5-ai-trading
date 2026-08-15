@@ -448,7 +448,11 @@ class TestRegistry:
 
 class TestArchitecturalBoundary:
     def _strategy_source_files(self) -> list[pathlib.Path]:
-        return [p for p in STRATEGY_DIR.glob("*.py") if p.name != "__init__.py"]
+        # rglob (not glob): recurses into subpackages (strategy/intraday/,
+        # strategy/crypto/, strategy/hourly/, strategy/common/) so the same
+        # boundary check covers every strategy module with one test, rather
+        # than a hand-rolled copy per subpackage.
+        return [p for p in STRATEGY_DIR.rglob("*.py") if p.name != "__init__.py"]
 
     def test_strategy_files_exist(self) -> None:
         files = self._strategy_source_files()

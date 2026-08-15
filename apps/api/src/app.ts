@@ -11,6 +11,7 @@ import { riskRouter } from './routes/risk';
 import { signalsRouter } from './routes/signals';
 import { intradayRouter } from './routes/intraday';
 import { cryptoRouter } from './routes/crypto';
+import { hourlyRouter } from './routes/hourly';
 import { tradeProposalsRouter } from './routes/trade-proposals';
 import { executionsRouter } from './routes/executions';
 import { ordersRouter } from './routes/orders';
@@ -42,6 +43,7 @@ export function createApp() {
   app.use('/signals', signalsRouter);
   app.use('/intraday', intradayRouter);
   app.use('/crypto', cryptoRouter);
+  app.use('/hourly', hourlyRouter);
   app.use('/trade-proposals', tradeProposalsRouter);
   app.use('/executions', executionsRouter);
   app.use('/orders', ordersRouter);

@@ -368,6 +368,71 @@ Notes:
 
 ---
 
+## Hourly (Phase 27 — primary strategy)
+
+```
+GET   /hourly/watchlist              — list watchlist symbols (enabled + last-processed candle)
+POST  /hourly/watchlist              — add a symbol, enabled by default (owner only)
+PATCH /hourly/watchlist/:id          — enable/disable a watchlist symbol (owner only)
+GET   /hourly/analysis/:symbol       — single-timeframe analysis + sizing preview (no proposal created)
+POST  /signals/hourly-decision       — run the hourly strategy; BUY/SELL creates a PENDING_APPROVAL proposal (owner only)
+GET   /settings/hourly-mode          — current hourly-mode master-toggle state
+PUT   /settings/hourly-mode          — enable/disable hourly mode (owner only, audit logged)
+```
+
+Both the Phase 27 scheduler (`hourly-scheduler.ts`, ticking on a server-side
+interval) and the manual "Analyze"/"Submit for Approval" UI flow on
+`/hourly` drive the same `createHourlyDecisionAndProposal` function — the
+scheduler calls it directly in-process; the UI reaches it through
+`POST /signals/hourly-decision`.
+
+### POST /signals/hourly-decision
+
+Request:
+```json
+{ "symbol": "AAPL" }
+```
+
+Response 201 (BUY):
+```json
+{
+  "analysis": { "decision": "BUY", "candle_timestamp": "2024-01-15T14:00:00Z", "trend_direction": "UP", "risk_reward": "2.00000000", "strategy_version": "27.0.0", "...": "..." },
+  "signal": { "id": "...", "status": "RISK_PASS" },
+  "riskCheck": { "id": "...", "result": "PASS" },
+  "riskResult": { "result": "PASS", "failed_rules": [] },
+  "proposal": { "id": "...", "assetClass": "STOCK", "status": "PENDING_APPROVAL" }
+}
+```
+
+Response 201 (SELL — closes an existing long, no bracket):
+```json
+{
+  "analysis": { "decision": "SELL", "trend_direction": "DOWN", "risk_reward": null, "...": "..." },
+  "proposal": { "id": "...", "side": "SELL", "status": "PENDING_APPROVAL" }
+}
+```
+
+Response 200 (HOLD — no proposal created):
+```json
+{
+  "analysis": { "decision": "HOLD", "reasons": ["..."] },
+  "signal": null, "riskCheck": null, "riskResult": null, "proposal": null
+}
+```
+
+Notes:
+- Rejects with 422 if `phase27_hourly_mode_enabled` is false, or if
+  `symbol` is not a supported US stock pattern.
+- A `BUY` decision's proposal carries `riskSnapshot.phase27` (ATR-derived
+  bracket, whole-share sizing, session status, higher-timeframe
+  confirmation, trade-count usage) — see `docs/PHASE_27_HOURLY_TRADING.md`.
+- This endpoint never submits a broker order — approval does, exactly like
+  every other proposal source. When called by the scheduler, the acting
+  `ActorContext` has `actorId: null` (no human user) — audit events still
+  record `actorEmail: 'system-hourly-scheduler@internal'`.
+
+---
+
 ## Risk
 
 ```

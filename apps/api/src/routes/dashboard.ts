@@ -7,13 +7,23 @@ import { listOrders } from '../db/repositories/orders';
 import { listRiskChecks } from '../db/repositories/risk-checks';
 import { getSetting, getSettingValue } from '../db/repositories/system-settings';
 import { expireOpenProposals, listProposals } from '../db/repositories/trade-proposals';
+import { findStrategyByName } from '../db/repositories/strategies';
+import { listSignals } from '../db/repositories/signals';
+import { listWatchlist } from '../db/repositories/hourly-watchlist';
+import { findLastProcessedCandle } from '../db/repositories/hourly-candle-processing';
 import {
   ensureDayStartSnapshot,
   getDayStartEquity,
   getLivePortfolioView,
   reconcileBracketOrders,
+  reconcileHourlyTimeExits,
   reconcileIntradayTimeExits,
 } from '../services/trade-execution-service';
+import {
+  HOURLY_STRATEGY_NAME,
+  computeHourlySessionStatus,
+  loadPhase27Settings,
+} from '../services/hourly-decision-service';
 import {
   getBrokerOpenOrders,
   getBrokerHealth,
@@ -64,6 +74,7 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
   const requestIdentifier = requestId(req);
   await reconcileBracketOrders(pool, undefined, requestIdentifier);
   await reconcileIntradayTimeExits(pool, undefined, requestIdentifier);
+  await reconcileHourlyTimeExits(pool, undefined, requestIdentifier);
   // Must run before listProposals below so a proposal whose expiresAt has
   // passed is flipped to EXPIRED here too — otherwise this endpoint's
   // "pending" count can disagree with GET /trade-proposals (which already
@@ -123,6 +134,25 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
   const brokerBuyingPower = paperAccount?.buying_power ?? paperAccount?.cash ?? null;
   const reconciliation = cashReconciliation(accountStatus, brokerCash, internalCash);
 
+  const hourlySettings = await loadPhase27Settings(pool);
+  const hourlySessionStatus = computeHourlySessionStatus(new Date(), hourlySettings);
+  const nextHourlyAnalysisAt = new Date(
+    Math.ceil(Date.now() / 3_600_000) * 3_600_000,
+  ).toISOString();
+  const [watchlist, hourlyStrategy] = await Promise.all([
+    listWatchlist(pool),
+    findStrategyByName(pool, HOURLY_STRATEGY_NAME),
+  ]);
+  const watchlistWithLastCandle = await Promise.all(
+    watchlist.map(async (entry) => ({
+      ...entry,
+      lastProcessedCandle: await findLastProcessedCandle(pool, entry.symbol),
+    })),
+  );
+  const recentHourlySignals = hourlyStrategy
+    ? await listSignals(pool, { strategyId: hourlyStrategy.id, limit: 10 })
+    : [];
+
   res.json({
     tradingMode: 'PAPER',
     paperTrading: true,
@@ -181,6 +211,14 @@ dashboardRouter.get('/paper', async (req: Request, res: Response) => {
     },
     killSwitch: {
       enabled: killSwitchSetting?.value !== false,
+    },
+    hourly: {
+      modeEnabled: hourlySettings.hourlyModeEnabled,
+      sessionStatus: hourlySessionStatus,
+      nextAnalysisAt: nextHourlyAnalysisAt,
+      watchlist: watchlistWithLastCandle,
+      recentSignals: recentHourlySignals,
+      dailyLossUsed: dailyPnl.startsWith('-') ? dailyPnl.slice(1) : '0.00000000',
     },
     pendingProposals,
     riskResults: riskChecks,

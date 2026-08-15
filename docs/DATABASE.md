@@ -28,6 +28,9 @@ positions (current state — updated on fill)
 portfolio_snapshots (point-in-time snapshots)
 audit_logs (append-only)
 system_settings (key-value)
+
+hourly_watchlist (Phase 27 — symbols the hourly scheduler evaluates)
+hourly_candle_processing (Phase 27 — per-candle claim, signal_id → signals.id)
 ```
 
 ---
@@ -402,6 +405,65 @@ INSERT INTO system_settings (key, value, description) VALUES
     ('price_drift_threshold_pct', '0.02', 'Max allowed price drift from reference (2%) — CONFIGURE BEFORE USE'),
     ('market_data_staleness_seconds', '60', 'Seconds before market data is considered stale — CONFIGURE BEFORE USE');
 ```
+
+---
+
+### hourly_watchlist (Phase 27)
+
+```sql
+CREATE TABLE hourly_watchlist (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    symbol        TEXT NOT NULL UNIQUE,
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by    UUID REFERENCES users(id)
+);
+
+CREATE INDEX hourly_watchlist_enabled_idx ON hourly_watchlist(enabled);
+```
+
+Notes:
+- The set of US stock symbols the Phase 27 hourly scheduler evaluates —
+  intentionally not the entire market. Seeded with `AAPL` only.
+- A `enabled = false` row is skipped by the scheduler entirely; no analysis
+  call is made for it on any tick.
+
+---
+
+### hourly_candle_processing (Phase 27)
+
+```sql
+CREATE TABLE hourly_candle_processing (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    symbol            TEXT NOT NULL,
+    candle_timestamp  TIMESTAMPTZ NOT NULL, -- open-time of the closed 1H bar (UTC)
+    status            TEXT NOT NULL DEFAULT 'CLAIMED' CHECK (status IN ('CLAIMED', 'ANALYZED', 'ERROR')),
+    signal_id         UUID REFERENCES signals(id),
+    error_message     TEXT,
+    claimed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at      TIMESTAMPTZ,
+    UNIQUE (symbol, candle_timestamp)
+);
+
+CREATE INDEX hourly_candle_processing_symbol_idx
+    ON hourly_candle_processing(symbol, candle_timestamp DESC);
+```
+
+Notes:
+- `UNIQUE (symbol, candle_timestamp)` is the entire "one signal max per
+  symbol per completed 1H candle, restart-safe" guarantee. The scheduler
+  does `INSERT ... ON CONFLICT (symbol, candle_timestamp) DO NOTHING
+  RETURNING id`; only the caller whose `INSERT` succeeds may analyze that
+  candle. State lives here, not in any scheduler process's memory, so a
+  restart is safe by construction.
+- A row stuck in `CLAIMED` (process died mid-analysis) is never retried
+  automatically — one forfeited candle is accepted in exchange for never
+  risking a duplicate signal.
+- `phase27_*` system settings (EMA windows, ATR multiples, session bounds,
+  risk thresholds — ~27 keys) are listed in full in
+  `database/migrations/0025_phase27_hourly_settings.sql`, following the same
+  key/value `system_settings` pattern as every other phase.
 
 ---
 
