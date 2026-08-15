@@ -17,6 +17,12 @@ export interface Mt5Actor {
   requestId?: string | null;
 }
 
+export interface InstrumentFilter {
+  search?: string;
+  assetClass?: string;
+  enabled?: boolean;
+}
+
 async function settings(pool: Pool): Promise<Record<string, unknown>> {
   const keys = [
     'mt5_auto_demo_enabled',
@@ -83,6 +89,76 @@ export async function syncMt5Instruments(pool: Pool, requestId?: string) {
   return { imported: symbols.length };
 }
 
+export async function listMt5Instruments(pool: Pool, filter: InstrumentFilter = {}) {
+  const values: unknown[] = [];
+  const where: string[] = [];
+
+  if (filter.search?.trim()) {
+    values.push(`%${filter.search.trim()}%`);
+    where.push(`(i.symbol ILIKE $${values.length} OR i.description ILIKE $${values.length})`);
+  }
+
+  if (filter.assetClass && filter.assetClass !== 'ALL') {
+    values.push(filter.assetClass);
+    where.push(`i.asset_class = $${values.length}`);
+  }
+
+  if (typeof filter.enabled === 'boolean') {
+    values.push(filter.enabled);
+    where.push(`COALESCE(w.enabled, false) = $${values.length}`);
+  }
+
+  const result = await pool.query(
+    `SELECT i.id, i.symbol, i.broker_symbol, i.asset_class, i.description, i.currency_base,
+        i.currency_profit, i.point, i.trade_tick_size, i.trade_tick_value, i.volume_min,
+        i.volume_max, i.volume_step, i.trade_stops_level, i.visible, i.updated_at,
+        w.id AS watchlist_id, COALESCE(w.enabled, false) AS watchlist_enabled, w.rank
+     FROM instruments i
+     LEFT JOIN watchlists w ON w.symbol = i.symbol AND w.name = 'Owner MT5 Demo Watchlist'
+     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+     ORDER BY COALESCE(w.enabled, false) DESC, COALESCE(w.rank, 9999) ASC, i.asset_class ASC, i.symbol ASC
+     LIMIT 1000`,
+    values,
+  );
+
+  return { instruments: result.rows };
+}
+
+export async function setMt5WatchlistSymbols(pool: Pool, symbols: string[], enabled: boolean, actor: Mt5Actor) {
+  const cleanSymbols = [...new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))];
+  if (!cleanSymbols.length) return { updated: 0, symbols: [] };
+
+  const result = await pool.query(
+    `WITH selected AS (
+       SELECT symbol FROM instruments WHERE symbol = ANY($1::text[])
+     ), upserted AS (
+       INSERT INTO watchlists(name, symbol, enabled, rank)
+       SELECT 'Owner MT5 Demo Watchlist', symbol, $2::boolean,
+         row_number() OVER (ORDER BY symbol)::int
+       FROM selected
+       ON CONFLICT(name, symbol) DO UPDATE SET
+         enabled = EXCLUDED.enabled,
+         updated_at = now()
+       RETURNING symbol, enabled
+     )
+     SELECT symbol, enabled FROM upserted ORDER BY symbol`,
+    [cleanSymbols, enabled],
+  );
+
+  await createAuditLog(pool, {
+    eventType: 'MT5_WATCHLIST_UPDATED',
+    actorId: actor.actorId,
+    actorEmail: actor.actorEmail,
+    entityType: 'watchlist',
+    entityId: null,
+    action: enabled ? 'ENABLE_SYMBOLS' : 'DISABLE_SYMBOLS',
+    afterData: { symbols: result.rows.map((row) => row.symbol), enabled },
+    requestId: actor.requestId ?? null,
+  });
+
+  return { updated: result.rowCount ?? 0, symbols: result.rows };
+}
+
 export async function scannerSnapshot(pool: Pool, actor: Mt5Actor) {
   const cfg = await settings(pool);
   const status = await getMt5Status(actor.requestId ?? undefined);
@@ -110,7 +186,13 @@ export async function scannerSnapshot(pool: Pool, actor: Mt5Actor) {
       openPositions,
       tradesToday,
     });
-    rows.push({ rank: rows.length + 1, assetClass: row.asset_class, ...decision, risk });
+    rows.push({
+      rank: rows.length + 1,
+      assetClass: row.asset_class,
+      freshness: decision.market_state ?? 'LIVE',
+      ...decision,
+      risk,
+    });
   }
   return { status, autoDemoEnabled: cfg.mt5_auto_demo_enabled === true, scanner: rows };
 }

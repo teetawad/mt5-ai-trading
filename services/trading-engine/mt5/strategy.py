@@ -9,6 +9,11 @@ from typing import Any
 @dataclass(frozen=True)
 class BaselineDecision:
     symbol: str
+    bid: str | None
+    ask: str | None
+    spread: str | None
+    quote_timestamp: str | None
+    market_state: str
     decision: str
     confidence: float
     opportunity_score: float
@@ -37,11 +42,32 @@ def analyze_completed_h1(
     """Deterministic BASELINE strategy over completed H1 candles only."""
 
     closed = sorted(bars_h1, key=lambda b: b["time"])
+    bid = _d(tick.get("bid") or 0)
+    ask = _d(tick.get("ask") or 0)
+    spread = ask - bid if ask and bid else Decimal(0)
+    tick_time = tick.get("time")
+    quote_timestamp = (
+        datetime.fromtimestamp(int(tick_time), tz=UTC).isoformat()
+        if tick_time
+        else None
+    )
+    age_seconds = (
+        (datetime.now(tz=UTC) - datetime.fromtimestamp(int(tick_time), tz=UTC)).total_seconds()
+        if tick_time
+        else None
+    )
+    market_state = "MARKET_CLOSED" if age_seconds is not None and age_seconds > 900 else "LIVE"
+
     if len(closed) < 30:
         now = datetime.now(tz=UTC).isoformat()
-        entry = _d(tick.get("ask") or tick.get("last") or 0)
+        entry = ask or _d(tick.get("last") or 0)
         return BaselineDecision(
             symbol,
+            _q(bid) if bid else None,
+            _q(ask) if ask else None,
+            _q(spread) if spread else None,
+            quote_timestamp,
+            market_state,
             "NO_TRADE",
             0,
             0,
@@ -73,9 +99,6 @@ def analyze_completed_h1(
     volume_ratio = (
         volumes[-1] / (sum(volumes[-21:-1]) / Decimal(20)) if sum(volumes[-21:-1]) else Decimal(0)
     )
-    bid = _d(tick.get("bid") or 0)
-    ask = _d(tick.get("ask") or 0)
-    spread = ask - bid
     entry = ask if trend == "UP" else bid
     min_stop_distance = max(atr * Decimal("1.5"), point * Decimal("20"), spread * Decimal("3"))
     decision = "NO_TRADE"
@@ -83,6 +106,9 @@ def analyze_completed_h1(
 
     if spread <= 0 or entry <= 0:
         reasons.append("Invalid bid/ask quote")
+    elif market_state == "MARKET_CLOSED":
+        decision = "NO_TRADE"
+        reasons.append("Market appears closed or quote is stale")
     elif trend == "UP" and momentum > 0 and volume_ratio >= Decimal("0.8"):
         decision = "BUY"
         reasons.append("BASELINE: H1 trend and momentum are positive on a completed candle")
@@ -121,6 +147,11 @@ def analyze_completed_h1(
     }
     return BaselineDecision(
         symbol=symbol,
+        bid=_q(bid) if bid else None,
+        ask=_q(ask) if ask else None,
+        spread=_q(spread) if spread else None,
+        quote_timestamp=quote_timestamp,
+        market_state=market_state,
         decision=decision,
         confidence=round(confidence, 4),
         opportunity_score=round(opportunity, 2),

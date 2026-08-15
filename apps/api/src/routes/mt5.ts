@@ -2,7 +2,14 @@ import { Router, Request, Response } from 'express';
 import { getPool } from '../db/client';
 import { requireAuth, requireOwner } from '../auth/middleware';
 import { getSetting, setSetting } from '../db/repositories/system-settings';
-import { executeAutoDemo, runAssistedAnalysis, scannerSnapshot, syncMt5Instruments } from '../services/mt5-demo-lab-service';
+import {
+  executeAutoDemo,
+  listMt5Instruments,
+  runAssistedAnalysis,
+  scannerSnapshot,
+  setMt5WatchlistSymbols,
+  syncMt5Instruments,
+} from '../services/mt5-demo-lab-service';
 import { getMt5Status } from '../services/mt5-client';
 
 export const mt5Router = Router();
@@ -10,8 +17,11 @@ export const mt5Router = Router();
 mt5Router.use(requireAuth);
 
 function actor(req: Request) {
+  const actorId = req.user?.sub && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.user.sub)
+    ? req.user.sub
+    : null;
   return {
-    actorId: req.user?.sub ?? null,
+    actorId,
     actorEmail: req.user?.email ?? 'system@internal',
     requestId: req.header('X-Request-ID') ?? null,
   };
@@ -44,9 +54,43 @@ mt5Router.post('/sync-instruments', requireOwner, async (req: Request, res: Resp
   }
 });
 
+mt5Router.get('/instruments', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const enabledParam = String(req.query.enabled ?? 'all');
+    const enabled = enabledParam === 'enabled' ? true : enabledParam === 'disabled' ? false : undefined;
+    res.json(await listMt5Instruments(getPool(), {
+      search: typeof req.query.search === 'string' ? req.query.search : undefined,
+      assetClass: typeof req.query.assetClass === 'string' ? req.query.assetClass : undefined,
+      enabled,
+    }));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.patch('/watchlist', requireOwner, async (req: Request, res: Response) => {
+  try {
+    if (!Array.isArray(req.body?.symbols) || typeof req.body?.enabled !== 'boolean') {
+      res.status(422).json({ error: 'INVALID_WATCHLIST_UPDATE', message: 'symbols[] and enabled are required' });
+      return;
+    }
+    res.json(await setMt5WatchlistSymbols(getPool(), req.body.symbols, req.body.enabled, actor(req)));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
 mt5Router.get('/scanner', requireOwner, async (req: Request, res: Response) => {
   try {
     res.json(await scannerSnapshot(getPool(), actor(req)));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.post('/scanner/run', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.status(201).json(await scannerSnapshot(getPool(), actor(req)));
   } catch (err) {
     mt5Error(res, err);
   }

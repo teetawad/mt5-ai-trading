@@ -21,7 +21,7 @@
           >
             <EmptyState
               :title="emptyLabel"
-              message="The page will update when paper-trading records are available."
+              message="The page will update when records are available."
             />
           </td>
         </tr>

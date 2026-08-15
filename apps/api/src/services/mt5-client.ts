@@ -59,6 +59,11 @@ export interface Mt5SymbolDTO {
 
 export interface Mt5DecisionDTO {
   symbol: string;
+  bid?: string | null;
+  ask?: string | null;
+  spread?: string | null;
+  quote_timestamp?: string | null;
+  market_state?: 'LIVE' | 'MARKET_CLOSED';
   decision: 'BUY' | 'SELL' | 'HOLD' | 'NO_TRADE';
   confidence: number;
   opportunity_score: number;
