@@ -220,10 +220,7 @@ VALUES
   ('mt5_quote_staleness_seconds', '10'::jsonb, 'Reject execution on stale MT5 quotes.'),
   ('mt5_allowed_deviation_points', '20'::jsonb, 'Max MT5 order deviation.'),
   ('mt5_cooldown_minutes', '60'::jsonb, 'Per-symbol cooldown between new entries.')
-ON CONFLICT (key) DO UPDATE
-SET value = EXCLUDED.value,
-    description = EXCLUDED.description,
-    updated_at = now();
+ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO ai_models(name, kind)
 VALUES ('MT5_H1_BASELINE', 'BASELINE')

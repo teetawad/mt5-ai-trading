@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -19,6 +19,14 @@ class BaselineDecision:
     opportunity_score: float
     reasons: list[str]
     reference_entry: str
+    current_price: str | None
+    entry_strategy: str
+    entry_zone_low: str | None
+    entry_zone_high: str | None
+    trigger_price: str | None
+    entry_reason: str
+    valid_until: str
+    current_entry_status: str
     stop_loss: str | None
     take_profit: str | None
     risk_reward: str | None
@@ -73,6 +81,14 @@ def analyze_completed_h1(
             0,
             ["Insufficient completed H1 history"],
             _q(entry),
+            _q(entry) if entry else None,
+            "NO_ENTRY",
+            None,
+            None,
+            None,
+            "Not enough completed 1-hour candle history to plan an entry.",
+            now,
+            "BLOCKED",
             None,
             None,
             None,
@@ -130,6 +146,55 @@ def analyze_completed_h1(
     if sl is not None and tp is not None:
         rr = abs(tp - entry) / abs(entry - sl)
 
+    entry_strategy = "NO_ENTRY"
+    entry_zone_low: Decimal | None = None
+    entry_zone_high: Decimal | None = None
+    trigger_price: Decimal | None = None
+    entry_reason = "Conditions are not suitable for a new entry."
+    current_entry_status = "BLOCKED"
+    latest_close = closes[-1]
+    recent_high = max(highs[-6:])
+    recent_low = min(lows[-6:])
+    if decision == "BUY":
+        extended = entry - latest_close
+        if extended <= atr * Decimal("0.25"):
+            entry_strategy = "MARKET_NOW"
+            entry_reason = "AI considers the current ask price acceptable for a demo entry."
+            current_entry_status = "READY"
+        elif extended <= atr * Decimal("0.80"):
+            entry_strategy = "PULLBACK"
+            entry_zone_low = latest_close
+            entry_zone_high = latest_close + atr * Decimal("0.25")
+            trigger_price = (entry_zone_low + entry_zone_high) / Decimal("2")
+            entry_reason = "AI prefers waiting for price to pull back into a lower entry zone."
+            current_entry_status = "WAITING"
+        else:
+            entry_strategy = "BREAKOUT"
+            trigger_price = recent_high + spread
+            entry_reason = "AI prefers entering only if price breaks above recent resistance."
+            current_entry_status = "WAITING"
+    elif decision == "SELL":
+        extended = latest_close - entry
+        if extended <= atr * Decimal("0.25"):
+            entry_strategy = "MARKET_NOW"
+            entry_reason = "AI considers the current bid price acceptable for a demo entry."
+            current_entry_status = "READY"
+        elif extended <= atr * Decimal("0.80"):
+            entry_strategy = "PULLBACK"
+            entry_zone_low = latest_close - atr * Decimal("0.25")
+            entry_zone_high = latest_close
+            trigger_price = (entry_zone_low + entry_zone_high) / Decimal("2")
+            entry_reason = "AI prefers waiting for price to pull back into a higher entry zone."
+            current_entry_status = "WAITING"
+        else:
+            entry_strategy = "BREAKOUT"
+            trigger_price = recent_low - spread
+            entry_reason = "AI prefers entering only if price breaks below recent support."
+            current_entry_status = "WAITING"
+
+    signal_candle_timestamp = datetime.fromtimestamp(int(latest["time"]), tz=UTC)
+    valid_until = (signal_candle_timestamp + timedelta(hours=2)).isoformat()
+
     confidence = (
         0.0
         if decision == "NO_TRADE"
@@ -157,11 +222,19 @@ def analyze_completed_h1(
         opportunity_score=round(opportunity, 2),
         reasons=reasons,
         reference_entry=_q(entry),
+        current_price=_q(entry) if entry else None,
+        entry_strategy=entry_strategy,
+        entry_zone_low=_q(entry_zone_low) if entry_zone_low is not None else None,
+        entry_zone_high=_q(entry_zone_high) if entry_zone_high is not None else None,
+        trigger_price=_q(trigger_price) if trigger_price is not None else None,
+        entry_reason=entry_reason,
+        valid_until=valid_until,
+        current_entry_status=current_entry_status,
         stop_loss=_q(sl) if sl is not None else None,
         take_profit=_q(tp) if tp is not None else None,
         risk_reward=_q(rr) if rr is not None else None,
         expected_holding_hours=8 if decision != "NO_TRADE" else 0,
-        signal_candle_timestamp=datetime.fromtimestamp(int(latest["time"]), tz=UTC).isoformat(),
+        signal_candle_timestamp=signal_candle_timestamp.isoformat(),
         model_version="BASELINE_MT5_H1_V1",
         features=features,
     )

@@ -153,6 +153,8 @@ class MT5Adapter:
 
     def timeframe(self, value: str) -> int:
         mapping = {
+            "M1": self.mt5.TIMEFRAME_M1,
+            "1M": self.mt5.TIMEFRAME_M1,
             "M15": self.mt5.TIMEFRAME_M15,
             "15M": self.mt5.TIMEFRAME_M15,
             "H1": self.mt5.TIMEFRAME_H1,
@@ -238,12 +240,14 @@ class DemoExecutionGateway:
         guard = self.verify_demo_environment()
         if not guard.ok:
             raise MT5DemoSafetyError(guard.reason or "MT5 demo guard failed")
+        self._verify_tradable_symbol(request)
         return _obj(self.adapter.order_check(request))
 
     def execute_market_order(self, request: dict[str, Any]) -> dict[str, Any]:
         guard = self.verify_demo_environment()
         if not guard.ok:
             raise MT5DemoSafetyError(guard.reason or "MT5 demo guard failed")
+        self._verify_tradable_symbol(request)
         check = _obj(self.adapter.order_check(request))
         retcode = int(check.get("retcode", 0) or 0)
         ok_retcode = getattr(self.adapter.mt5, "TRADE_RETCODE_DONE", 10009)
@@ -254,3 +258,23 @@ class DemoExecutionGateway:
         result["checked_request"] = check
         result["executed_at"] = datetime.now(tz=UTC).isoformat()
         return result
+
+    def _verify_tradable_symbol(self, request: dict[str, Any]) -> None:
+        from mt5.session_status import evaluate_symbol_session
+
+        symbol = str(request.get("symbol") or "")
+        stale_seconds = int(
+            os.environ.get(
+                "MT5_QUOTE_STALENESS_SECONDS",
+                os.environ.get("MT5_QUOTE_STALE_SECONDS", "120"),
+            )
+        )
+        status = evaluate_symbol_session(self.adapter, symbol, stale_seconds)
+        if status.market_status != "OPEN":
+            raise MT5DemoSafetyError(
+                f"MT5 market is not open for {symbol}: {status.market_status}"
+            )
+        if status.data_status != "LIVE":
+            raise MT5DemoSafetyError(
+                f"MT5 market data is not live for {symbol}: {status.data_status}"
+            )

@@ -297,12 +297,23 @@ function Start-TradeServiceProcess {
     Remove-Item -LiteralPath $workerPidFile -Force -ErrorAction SilentlyContinue
 
     $launcher = Get-TradeLauncherFile -Service $Service
+    $rootForBatch = $ProjectRoot.TrimEnd('\')
     $lines = @(
         '@echo off',
+        'setlocal EnableExtensions EnableDelayedExpansion',
         ('title ' + $Service.Name),
         'echo ============================================================',
         ('echo ' + $Service.Name),
         'echo ============================================================',
+        ('set "TRADE_ROOT=' + $rootForBatch + '"'),
+        'if exist "%TRADE_ROOT%\.env" (',
+        '  for /f "usebackq tokens=1,* delims==" %%A in ("%TRADE_ROOT%\.env") do (',
+        '    set "__env_key=%%A"',
+        '    set "__env_value=%%B"',
+        '    if not "!__env_key!"=="" if not "!__env_key:~0,1!"=="#" set "!__env_key!=!__env_value!"',
+        '  )',
+        ')',
+        'echo Loaded root environment: %TRADE_ROOT%\.env',
         ('cd /d "' + $Service.Dir + '"'),
         'echo Working directory: %CD%',
         'echo Command:',

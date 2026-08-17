@@ -64,11 +64,29 @@ export interface Mt5DecisionDTO {
   spread?: string | null;
   quote_timestamp?: string | null;
   market_state?: 'LIVE' | 'MARKET_CLOSED';
+  market_status?: 'OPEN' | 'CLOSED' | 'QUOTE_ONLY' | 'TRADE_DISABLED' | 'UNKNOWN';
+  data_status?: 'LIVE' | 'STALE' | 'DISCONNECTED';
+  session_open?: string | null;
+  session_close?: string | null;
+  next_session_open?: string | null;
+  server_time?: string | null;
+  local_time?: string | null;
+  quote_age_seconds?: number | null;
+  source?: string | null;
+  market?: Record<string, unknown>;
   decision: 'BUY' | 'SELL' | 'HOLD' | 'NO_TRADE';
   confidence: number;
   opportunity_score: number;
   reasons: string[];
   reference_entry: string;
+  current_price?: string | null;
+  entry_strategy: 'MARKET_NOW' | 'PULLBACK' | 'BREAKOUT' | 'NO_ENTRY';
+  entry_zone_low?: string | null;
+  entry_zone_high?: string | null;
+  trigger_price?: string | null;
+  entry_reason?: string | null;
+  valid_until?: string | null;
+  current_entry_status?: 'WAITING' | 'READY' | 'TRIGGERED' | 'EXPIRED' | 'CANCELLED' | 'BLOCKED' | 'EXECUTED';
   stop_loss: string | null;
   take_profit: string | null;
   risk_reward: string | null;
@@ -99,6 +117,14 @@ export async function listMt5Symbols(requestId?: string): Promise<Mt5SymbolDTO[]
 
 export async function analyzeMt5Symbol(symbol: string, requestId?: string): Promise<Mt5DecisionDTO> {
   return engineFetch(`/mt5/analyze/${encodeURIComponent(symbol)}`, requestId, { method: 'POST' }) as Promise<Mt5DecisionDTO>;
+}
+
+export async function getMt5MarketStatus(symbol: string, requestId?: string): Promise<Record<string, unknown>> {
+  return engineFetch(`/mt5/market-status/${encodeURIComponent(symbol)}`, requestId) as Promise<Record<string, unknown>>;
+}
+
+export async function getMt5Tick(symbol: string, requestId?: string): Promise<Record<string, unknown>> {
+  return engineFetch(`/mt5/tick/${encodeURIComponent(symbol)}`, requestId) as Promise<Record<string, unknown>>;
 }
 
 export async function listMt5Positions(requestId?: string): Promise<Record<string, unknown>[]> {

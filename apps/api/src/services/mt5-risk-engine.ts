@@ -14,6 +14,8 @@ export interface Mt5RiskInput {
   tradesToday: number;
   quoteAgeSeconds?: number;
   spreadPoints?: number;
+  marketStatus?: 'OPEN' | 'CLOSED' | 'QUOTE_ONLY' | 'TRADE_DISABLED' | 'UNKNOWN';
+  dataStatus?: 'LIVE' | 'STALE' | 'DISCONNECTED';
 }
 
 export interface Mt5RiskResult {
@@ -61,18 +63,22 @@ export function evaluateMt5Risk(input: Mt5RiskInput): Mt5RiskResult {
   const rawVolume = estimatedLossPerLot.gt(0) ? riskBudget.div(estimatedLossPerLot) : new Decimal(0);
   const volume = normalizeVolume(rawVolume, new Decimal('0.01'), new Decimal('100'), new Decimal('0.01'));
 
-  if (input.settings.mt5_kill_switch_enabled !== false) failed.push('KILL_SWITCH');
+  if (input.settings.mt5_kill_switch_enabled !== false) failed.push('SAFETY_SWITCH_ON');
+  if (input.marketStatus === 'CLOSED') failed.push('MARKET_CLOSED');
+  else if (input.marketStatus && input.marketStatus !== 'OPEN') failed.push(`BLOCKED_MARKET_${input.marketStatus}`);
+  if (input.dataStatus === 'STALE') failed.push('STALE_DATA');
+  else if (input.dataStatus && input.dataStatus !== 'LIVE') failed.push(`DATA_${input.dataStatus}`);
   if (input.decision !== 'BUY' && input.decision !== 'SELL') failed.push('NO_EXECUTABLE_DECISION');
   if (!sl) failed.push('STOP_LOSS_REQUIRED');
   if (!tp) failed.push('TAKE_PROFIT_REQUIRED');
   if (riskDistance.lte(0)) failed.push('INVALID_STOP_DISTANCE');
-  if (rr.lt(minRr)) failed.push('MIN_RISK_REWARD');
+  if (rr.lt(minRr)) failed.push('RISK_REWARD_TOO_LOW');
   if (input.openPositions >= maxPositions) failed.push('MAX_SIMULTANEOUS_POSITIONS');
   if (input.tradesToday >= maxTrades) failed.push('MAX_TRADES_PER_DAY');
   if ((input.quoteAgeSeconds ?? 0) > quoteStale) failed.push('STALE_QUOTE');
-  if ((input.spreadPoints ?? 0) > maxSpread) failed.push('SPREAD_LIMIT');
-  if (freeMargin.lte(0)) failed.push('FREE_MARGIN_GUARD');
-  if (volume.lte(0)) failed.push('POSITION_SIZE');
+  if ((input.spreadPoints ?? 0) > maxSpread) failed.push('SPREAD_TOO_HIGH');
+  if (freeMargin.lte(0)) failed.push('MARGIN_INSUFFICIENT');
+  if (volume.lte(0)) failed.push('POSITION_SIZE_INVALID');
 
   const snapshot = {
     authority: 'SERVER_SIDE_MT5_RISK_ENGINE',
@@ -84,6 +90,8 @@ export function evaluateMt5Risk(input: Mt5RiskInput): Mt5RiskResult {
     maxLossPerTrade: maxLoss.toFixed(8),
     openPositions: input.openPositions,
     tradesToday: input.tradesToday,
+    marketStatus: input.marketStatus ?? 'UNKNOWN',
+    dataStatus: input.dataStatus ?? 'UNKNOWN',
     failedRules: failed,
   };
 

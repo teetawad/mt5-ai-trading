@@ -23,6 +23,9 @@ async function main() {
   });
 
   const { getPool: getPoolForScheduler } = await import('./db/client');
+  const { logMt5RiskStartupSummary, syncMt5RiskSettingsToDatabase } = await import('./config/mt5-risk-settings');
+  logMt5RiskStartupSummary();
+  await syncMt5RiskSettingsToDatabase(getPoolForScheduler());
   const { startMt5HourlyScheduler } = await import('./services/mt5-hourly-scheduler');
   startMt5HourlyScheduler(getPoolForScheduler());
 }

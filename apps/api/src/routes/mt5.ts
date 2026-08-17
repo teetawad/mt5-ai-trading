@@ -1,16 +1,22 @@
 import { Router, Request, Response } from 'express';
 import { getPool } from '../db/client';
 import { requireAuth, requireOwner } from '../auth/middleware';
-import { getSetting, setSetting } from '../db/repositories/system-settings';
+import { setSetting } from '../db/repositories/system-settings';
 import {
+  executeAssistedDemo,
   executeAutoDemo,
+  getMt5AnalysisDetail,
+  getMt5Dashboard,
+  getMt5MarketHours,
+  listActiveEntryPlans,
+  listMt5TradeHistory,
   listMt5Instruments,
-  runAssistedAnalysis,
   scannerSnapshot,
   setMt5WatchlistSymbols,
   syncMt5Instruments,
 } from '../services/mt5-demo-lab-service';
-import { getMt5Status } from '../services/mt5-client';
+import { getMt5Status, listMt5Positions } from '../services/mt5-client';
+import { loadMt5RiskSettings, mt5RiskSettingsRows } from '../config/mt5-risk-settings';
 
 export const mt5Router = Router();
 
@@ -88,9 +94,25 @@ mt5Router.get('/scanner', requireOwner, async (req: Request, res: Response) => {
   }
 });
 
+mt5Router.get('/dashboard', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.json(await getMt5Dashboard(getPool(), actor(req)));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/market-hours', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.json(await getMt5MarketHours(getPool(), actor(req)));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
 mt5Router.post('/scanner/run', requireOwner, async (req: Request, res: Response) => {
   try {
-    res.status(201).json(await scannerSnapshot(getPool(), actor(req)));
+    res.status(201).json(await scannerSnapshot(getPool(), actor(req), true));
   } catch (err) {
     mt5Error(res, err);
   }
@@ -98,9 +120,25 @@ mt5Router.post('/scanner/run', requireOwner, async (req: Request, res: Response)
 
 mt5Router.post('/analysis/:symbol', requireOwner, async (req: Request, res: Response) => {
   try {
-    res.status(201).json(await runAssistedAnalysis(getPool(), req.params.symbol, actor(req)));
+    res.status(201).json(await getMt5AnalysisDetail(getPool(), req.params.symbol, actor(req), true));
   } catch (err) {
     mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/analysis/:symbol', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.json(await getMt5AnalysisDetail(getPool(), req.params.symbol, actor(req), false));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.post('/assisted-demo/:symbol', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.status(201).json(await executeAssistedDemo(getPool(), req.params.symbol, actor(req)));
+  } catch (err) {
+    res.status(422).json({ error: (err as Error).message });
   }
 });
 
@@ -112,9 +150,32 @@ mt5Router.post('/auto-demo/:symbol', requireOwner, async (req: Request, res: Res
   }
 });
 
+mt5Router.get('/positions', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.json({ positions: await listMt5Positions(req.header('X-Request-ID') ?? undefined) });
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/history', requireOwner, async (_req: Request, res: Response) => {
+  try {
+    res.json(await listMt5TradeHistory(getPool()));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/entry-plans', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.json(await listActiveEntryPlans(getPool(), actor(req)));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
 mt5Router.get('/auto-demo', requireOwner, async (_req: Request, res: Response) => {
-  const setting = await getSetting(getPool(), 'mt5_auto_demo_enabled');
-  res.json({ enabled: setting?.value === true });
+  res.json({ enabled: loadMt5RiskSettings().mt5_auto_demo_enabled });
 });
 
 mt5Router.put('/auto-demo', requireOwner, async (req: Request, res: Response) => {
@@ -122,25 +183,27 @@ mt5Router.put('/auto-demo', requireOwner, async (req: Request, res: Response) =>
     res.status(422).json({ error: 'enabled must be boolean' });
     return;
   }
-  const updated = await setSetting(getPool(), 'mt5_auto_demo_enabled', req.body.enabled, req.user!.sub);
+  const active = loadMt5RiskSettings().mt5_auto_demo_enabled;
+  if (req.body.enabled !== active) {
+    res.status(409).json({
+      error: 'MT5_ENV_MANAGED_SETTING',
+      message: 'MT5_AUTO_DEMO_ENABLED is controlled by the root .env configuration.',
+      enabled: active,
+    });
+    return;
+  }
+  const updated = await setSetting(getPool(), 'mt5_auto_demo_enabled', active, req.user!.sub);
   res.json({ enabled: updated.value === true });
 });
 
 mt5Router.get('/risk-settings', requireOwner, async (_req: Request, res: Response) => {
-  const keys = [
-    'mt5_kill_switch_enabled',
-    'mt5_max_risk_per_trade_pct',
-    'mt5_max_loss_per_trade',
-    'mt5_max_daily_loss',
-    'mt5_max_drawdown_pct',
-    'mt5_max_simultaneous_positions',
-    'mt5_max_trades_per_day',
-    'mt5_min_risk_reward',
-    'mt5_max_spread_points',
-    'mt5_quote_staleness_seconds',
-    'mt5_allowed_deviation_points',
-    'mt5_cooldown_minutes',
-  ];
-  const rows = await Promise.all(keys.map((key) => getSetting(getPool(), key)));
-  res.json(rows.filter(Boolean));
+  res.json(mt5RiskSettingsRows().filter((row) => row.key !== 'mt5_entry_plan_valid_hours'));
+});
+
+mt5Router.put('/risk-preset', requireOwner, async (_req: Request, res: Response) => {
+  res.status(409).json({
+    error: 'MT5_ENV_MANAGED_SETTING',
+    message: 'MT5 risk settings are controlled by the root .env configuration.',
+    settings: mt5RiskSettingsRows(loadMt5RiskSettings()),
+  });
 });

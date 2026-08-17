@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 
 from auth import verify_internal_token
 from mt5.adapter import DemoExecutionGateway, MT5Adapter, MT5DemoSafetyError, MT5UnavailableError
+from mt5.session_status import evaluate_symbol_session
 from mt5.strategy import analyze_completed_h1
 
 router = APIRouter(prefix="/mt5", tags=["mt5"])
@@ -26,6 +28,18 @@ class MT5OrderRequest(BaseModel):
     take_profit: float
     deviation: int = 20
     comment: str = "MT5_AI_DEMO_LAB"
+
+
+def _quote_stale_seconds() -> int:
+    try:
+        return int(
+            os.environ.get(
+                "MT5_QUOTE_STALENESS_SECONDS",
+                os.environ.get("MT5_QUOTE_STALE_SECONDS", "120"),
+            )
+        )
+    except ValueError:
+        return 120
 
 
 def _obj(value: Any) -> dict[str, Any]:
@@ -110,6 +124,14 @@ async def tick(symbol: str, _: None = Depends(verify_internal_token)) -> dict[st
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/market-status/{symbol}")
+async def market_status(symbol: str, _: None = Depends(verify_internal_token)) -> dict[str, Any]:
+    try:
+        return evaluate_symbol_session(_adapter, symbol, _quote_stale_seconds()).to_dict()
+    except MT5UnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/bars/{symbol}")
 async def bars(
     symbol: str, timeframe: str = "H1", count: int = 200, _: None = Depends(verify_internal_token)
@@ -140,10 +162,43 @@ async def analyze(symbol: str, _: None = Depends(verify_internal_token)) -> dict
         _adapter.symbol_select(symbol, True)
         info = _obj(_adapter.symbol_info(symbol))
         tick = _obj(_adapter.symbol_info_tick(symbol))
+        market = evaluate_symbol_session(_adapter, symbol, _quote_stale_seconds()).to_dict()
         point = Decimal(str(info.get("point") or "0.00001"))
         h1 = _bar_dicts(_adapter.copy_rates_from_pos(symbol, _adapter.timeframe("H1"), 1, 220))
         decision = analyze_completed_h1(symbol, h1, tick, point)
-        return decision.__dict__
+        data = decision.__dict__
+        data["market"] = market
+        data["market_status"] = market["market_status"]
+        data["data_status"] = market["data_status"]
+        data["session_open"] = market["session_open"]
+        data["session_close"] = market["session_close"]
+        data["next_session_open"] = market["next_session_open"]
+        data["server_time"] = market["server_time"]
+        data["local_time"] = market["local_time"]
+        data["quote_age_seconds"] = market["quote_age_seconds"]
+        data["source"] = market["source"]
+        if market["market_status"] != "OPEN" or market["data_status"] != "LIVE":
+            reasons = list(data.get("reasons") or [])
+            if market["market_status"] != "OPEN":
+                reasons.append(f"NO_TRADE: broker market status is {market['market_status']}")
+            if market["data_status"] != "LIVE":
+                reasons.append(f"NO_TRADE: market data status is {market['data_status']}")
+            if market.get("reason"):
+                reasons.append(str(market["reason"]))
+            data["decision"] = "NO_TRADE"
+            data["confidence"] = 0
+            data["opportunity_score"] = 0
+            data["entry_strategy"] = "NO_ENTRY"
+            data["entry_zone_low"] = None
+            data["entry_zone_high"] = None
+            data["trigger_price"] = None
+            data["entry_reason"] = "No entry because broker market or data status is not tradable."
+            data["current_entry_status"] = "BLOCKED"
+            data["stop_loss"] = None
+            data["take_profit"] = None
+            data["risk_reward"] = None
+            data["reasons"] = reasons
+        return data
     except MT5UnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

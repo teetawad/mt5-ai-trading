@@ -55,10 +55,73 @@ describe('MT5 risk engine', () => {
       spreadPoints: 100,
     });
     expect(result.result).toBe('REJECT');
-    expect(result.failedRules).toContain('KILL_SWITCH');
+    expect(result.failedRules).toContain('SAFETY_SWITCH_ON');
     expect(result.failedRules).toContain('STOP_LOSS_REQUIRED');
     expect(result.failedRules).toContain('TAKE_PROFIT_REQUIRED');
     expect(result.failedRules).toContain('STALE_QUOTE');
-    expect(result.failedRules).toContain('SPREAD_LIMIT');
+    expect(result.failedRules).toContain('SPREAD_TOO_HIGH');
+  });
+
+  it('rejects non-open markets and non-live data independently', () => {
+    const result = evaluateMt5Risk({
+      decision: 'BUY',
+      referenceEntry: '100',
+      stopLoss: '99',
+      takeProfit: '102',
+      riskReward: '2',
+      confidence: 0.9,
+      account: { equity: '10000', margin_free: '5000' },
+      terminal: { trade_allowed: true },
+      settings,
+      openPositions: 0,
+      tradesToday: 0,
+      marketStatus: 'CLOSED',
+      dataStatus: 'STALE',
+    });
+    expect(result.result).toBe('REJECT');
+    expect(result.failedRules).toContain('MARKET_CLOSED');
+    expect(result.failedRules).toContain('STALE_DATA');
+  });
+
+  it('does not fail with SAFETY_SWITCH_ON when kill switch is off', () => {
+    const result = evaluateMt5Risk({
+      decision: 'BUY',
+      referenceEntry: '100',
+      stopLoss: '99',
+      takeProfit: '102',
+      riskReward: '2',
+      confidence: 0.7,
+      account: { equity: '300', margin_free: '300' },
+      terminal: { trade_allowed: true },
+      settings: { ...settings, mt5_kill_switch_enabled: false, mt5_max_loss_per_trade: '2.00', mt5_max_risk_per_trade_pct: '0.50' },
+      openPositions: 0,
+      tradesToday: 0,
+      quoteAgeSeconds: 1,
+      spreadPoints: 10,
+      marketStatus: 'OPEN',
+      dataStatus: 'LIVE',
+    });
+    expect(result.failedRules).not.toContain('SAFETY_SWITCH_ON');
+  });
+
+  it('blocks with SAFETY_SWITCH_ON when kill switch is on', () => {
+    const result = evaluateMt5Risk({
+      decision: 'BUY',
+      referenceEntry: '100',
+      stopLoss: '99',
+      takeProfit: '102',
+      riskReward: '2',
+      confidence: 0.7,
+      account: { equity: '300', margin_free: '300' },
+      terminal: { trade_allowed: true },
+      settings: { ...settings, mt5_kill_switch_enabled: true },
+      openPositions: 0,
+      tradesToday: 0,
+      quoteAgeSeconds: 1,
+      spreadPoints: 10,
+      marketStatus: 'OPEN',
+      dataStatus: 'LIVE',
+    });
+    expect(result.failedRules).toContain('SAFETY_SWITCH_ON');
   });
 });

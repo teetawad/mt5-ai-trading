@@ -37,8 +37,90 @@
     </section>
 
     <UiCard
-      title="Watchlist"
-      subtitle="These controls update PostgreSQL watchlist rows. Scanner analysis only runs against enabled instruments."
+      title="Enabled Watchlist"
+      subtitle="Only these instruments are analyzed by the scanner."
+    >
+      <div v-if="enabledInstruments.length" class="flex flex-wrap gap-2">
+        <span
+          v-for="instrument in enabledInstruments"
+          :key="instrument.symbol"
+          class="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs font-semibold text-emerald-100"
+        >
+          {{ instrument.symbol }}
+          <span class="ml-2 font-normal text-emerald-200/80">{{ labelAsset(instrument.asset_class) }}</span>
+        </span>
+      </div>
+      <div v-else class="text-sm text-slate-400">
+        No enabled instruments yet. Enable broker symbols in Instrument Management below.
+      </div>
+    </UiCard>
+
+    <UiCard
+      ref="scanResultsCard"
+      title="Scan Results"
+      subtitle="H1 analysis results for enabled watchlist instruments only."
+      body-class="p-0"
+    >
+      <div class="flex flex-wrap gap-2 border-b border-slate-800/80 p-4">
+        <button
+          v-for="filter in scanFilters"
+          :key="filter.value"
+          class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
+          :class="scanFilter === filter.value ? 'border-sky-400/60 bg-sky-400/15 text-sky-100' : 'border-slate-700 bg-slate-950/80 text-slate-300 hover:border-sky-400/70'"
+          @click="scanFilter = filter.value"
+        >
+          {{ filter.label }}
+        </button>
+      </div>
+      <DataTable
+        :columns="['Symbol','Asset Class','Market Status','Session Open','Session Close','Next Open','Server Time','Local Time','Data Freshness','Bid','Ask','Spread','Decision','Entry Plan','Entry Status','Trigger/Zone','Confidence','Score','Entry','SL','TP','R:R','Risk Engine','Last H1 Candle']"
+        :empty="filteredScannerRows.length === 0"
+        empty-label="No scanner rows. Enable watchlist instruments, then run a scan."
+      >
+        <tr
+          v-for="row in filteredScannerRows"
+          :key="row.symbol"
+          class="border-t border-slate-800/80 hover:bg-slate-800/40"
+        >
+          <td class="whitespace-nowrap px-4 py-3 font-semibold text-white">{{ row.symbol }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ labelAsset(row.assetClass) }}</td>
+          <td class="whitespace-nowrap px-4 py-3 font-semibold" :class="marketClass(row)">
+            {{ marketLabel(row) }}
+          </td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-400">{{ formatDate(row.session_open) }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-400">{{ formatDate(row.session_close) }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-400">{{ formatDate(row.next_session_open) }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-400">{{ formatDate(row.server_time) }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-400">{{ formatDate(row.local_time) }}</td>
+          <td class="whitespace-nowrap px-4 py-3" :class="row.data_status === 'LIVE' ? 'text-emerald-300' : 'text-amber-200'">
+            {{ row.data_status || row.freshness || 'UNKNOWN' }}
+          </td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.bid || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.ask || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.spread || row.features?.spread || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 font-semibold" :class="decisionClass(row.decision)">
+            {{ displayDecision(row) }}
+          </td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.entry_plan?.entry_strategy || row.entry_strategy || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.entry_plan?.current_entry_status || row.current_entry_status || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ entryTrigger(row) }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ pct(row.confidence) }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.opportunity_score }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.reference_entry || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.stop_loss || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.take_profit || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.risk_reward || '-' }}</td>
+          <td class="whitespace-nowrap px-4 py-3 font-semibold" :class="row.risk?.result === 'PASS' ? 'text-emerald-300' : 'text-amber-200'">
+            {{ riskLabel(row) }}
+          </td>
+          <td class="whitespace-nowrap px-4 py-3 text-slate-400">{{ formatDate(row.signal_candle_timestamp) }}</td>
+        </tr>
+      </DataTable>
+    </UiCard>
+
+    <UiCard
+      title="Instrument Management"
+      subtitle="Search all synced MT5 instruments and persist owner watchlist changes in PostgreSQL."
     >
       <div class="grid gap-3 lg:grid-cols-[1fr_12rem_12rem]">
         <label class="block">
@@ -132,46 +214,6 @@
         </tr>
       </DataTable>
     </UiCard>
-
-    <UiCard title="H1 Scanner Results" subtitle="Analysis results for enabled watchlist instruments only." body-class="p-0">
-      <DataTable
-        :columns="['Rank','Symbol','Asset Class','Bid','Ask','Spread','Trend','Momentum','ATR / Vol','AI Decision','Confidence','Score','Entry','SL','TP','R:R','Risk','Last H1 Candle','Freshness']"
-        :empty="!(scanner?.scanner.length)"
-        empty-label="No scanner rows. Enable watchlist instruments, then run a scan."
-      >
-        <tr
-          v-for="row in scanner?.scanner ?? []"
-          :key="row.symbol"
-          class="border-t border-slate-800/80 hover:bg-slate-800/40"
-        >
-          <td class="px-4 py-3 text-slate-400">{{ row.rank }}</td>
-          <td class="whitespace-nowrap px-4 py-3 font-semibold text-white">{{ row.symbol }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ labelAsset(row.assetClass) }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.bid || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.ask || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.spread || row.features?.spread || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.features?.trend || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.features?.momentum_pct || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.features?.atr || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 font-semibold" :class="decisionClass(row.decision)">
-            {{ displayDecision(row) }}
-          </td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ pct(row.confidence) }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.opportunity_score }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.reference_entry || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.stop_loss || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.take_profit || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-300">{{ row.risk_reward || '-' }}</td>
-          <td class="whitespace-nowrap px-4 py-3 font-semibold" :class="row.risk?.result === 'PASS' ? 'text-emerald-300' : 'text-amber-200'">
-            {{ row.risk?.result || '-' }}
-          </td>
-          <td class="whitespace-nowrap px-4 py-3 text-slate-400">{{ formatDate(row.signal_candle_timestamp) }}</td>
-          <td class="whitespace-nowrap px-4 py-3" :class="row.freshness === 'MARKET_CLOSED' ? 'text-amber-200' : 'text-emerald-300'">
-            {{ row.freshness || row.market_state || 'LIVE' }}
-          </td>
-        </tr>
-      </DataTable>
-    </UiCard>
   </div>
 </template>
 
@@ -201,6 +243,14 @@ type ScannerRow = {
   quote_timestamp?: string | null;
   market_state?: string;
   freshness?: string;
+  market_status?: string;
+  data_status?: string;
+  session_open?: string | null;
+  session_close?: string | null;
+  next_session_open?: string | null;
+  server_time?: string | null;
+  local_time?: string | null;
+  source?: string | null;
   decision: string;
   confidence: number;
   opportunity_score: number;
@@ -210,23 +260,45 @@ type ScannerRow = {
   risk_reward?: string | null;
   signal_candle_timestamp: string;
   features?: Record<string, string>;
-  risk?: { result: string; reason?: string | null };
+  risk?: { result: string; reason?: string | null; failedRules?: string[] };
+  entry_strategy?: string;
+  entry_zone_low?: string | null;
+  entry_zone_high?: string | null;
+  trigger_price?: string | null;
+  current_entry_status?: string;
+  entry_plan?: {
+    entry_strategy?: string;
+    entry_zone_low?: string | null;
+    entry_zone_high?: string | null;
+    trigger_price?: string | null;
+    current_entry_status?: string;
+  };
 };
 
 type ScannerResponse = {
   status: { connected: boolean; demo_verified: boolean; blocked_reason?: string | null };
   autoDemoEnabled: boolean;
   scanner: ScannerRow[];
+  watchlistMarketSummary?: {
+    open: number;
+    total: number;
+    nextMarketOpen: string | null;
+    nextMarketOpenSymbol: string | null;
+    nextMarketOpenLocal: string | null;
+    nextH1Analysis: string | null;
+  };
 };
 
 const { apiFetch } = useApi();
 const search = ref('');
 const assetFilter = ref('ALL');
 const enabledFilter = ref('ALL');
+const scanFilter = ref('ALL');
 const selected = ref(new Set<string>());
 const busy = ref(false);
 const message = ref('');
 const errorText = ref('');
+const scanResultsCard = ref<{ $el?: HTMLElement } | null>(null);
 
 const { data: instrumentData, refresh: refreshInstruments } = await useAsyncData(
   'mt5-instruments',
@@ -239,7 +311,15 @@ const { data: scanner, refresh: refreshScanner } = await useAsyncData<ScannerRes
 
 const instruments = computed(() => instrumentData.value?.instruments ?? []);
 const enabledCount = computed(() => instruments.value.filter((instrument) => instrument.watchlist_enabled).length);
+const enabledInstruments = computed(() => instruments.value.filter((instrument) => instrument.watchlist_enabled));
 const selectedSymbols = computed(() => [...selected.value]);
+const scanFilters = [
+  { label: 'All Results', value: 'ALL' },
+  { label: 'Open Now', value: 'OPEN' },
+  { label: 'Closed', value: 'CLOSED' },
+  { label: 'Tradable Now', value: 'TRADABLE' },
+  { label: 'Stale', value: 'STALE' },
+] as const;
 const filteredInstruments = computed(() => {
   const term = search.value.trim().toLowerCase();
   return instruments.value.filter((instrument) => {
@@ -252,6 +332,14 @@ const filteredInstruments = computed(() => {
       || (enabledFilter.value === 'DISABLED' && !instrument.watchlist_enabled);
     return matchesSearch && matchesClass && matchesEnabled;
   });
+});
+const filteredScannerRows = computed(() => {
+  const rows = scanner.value?.scanner ?? [];
+  if (scanFilter.value === 'OPEN') return rows.filter((row) => row.market_status === 'OPEN');
+  if (scanFilter.value === 'CLOSED') return rows.filter((row) => row.market_status && row.market_status !== 'OPEN');
+  if (scanFilter.value === 'TRADABLE') return rows.filter((row) => row.market_status === 'OPEN' && row.data_status === 'LIVE');
+  if (scanFilter.value === 'STALE') return rows.filter((row) => row.data_status === 'STALE');
+  return rows;
 });
 
 const suggested = computed(() => {
@@ -314,6 +402,8 @@ async function runScanNow() {
   try {
     scanner.value = await apiFetch<ScannerResponse>('/mt5/scanner/run', { method: 'POST' });
     message.value = `Scanned ${scanner.value.scanner.length} enabled watchlist symbol${scanner.value.scanner.length === 1 ? '' : 's'}.`;
+    await nextTick();
+    scanResultsCard.value?.$el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : 'Scanner run failed';
   } finally {
@@ -359,8 +449,42 @@ function decisionClass(value: string) {
   return 'text-slate-300';
 }
 
+function marketLabel(row: ScannerRow) {
+  const status = row.market_status ?? ((row.freshness ?? row.market_state) === 'MARKET_CLOSED' ? 'CLOSED' : 'UNKNOWN');
+  if (status === 'TRADE_DISABLED') return '⚫ TRADE_DISABLED';
+  return status;
+}
+
+function marketClass(row: ScannerRow) {
+  const label = marketLabel(row);
+  if (label === 'OPEN') return 'text-emerald-300';
+  if (label === '⚫ TRADE_DISABLED') return 'text-slate-500';
+  if (label === 'QUOTE_ONLY') return 'text-sky-300';
+  if (label === 'UNKNOWN') return 'text-rose-300';
+  return 'text-amber-200';
+}
+
 function displayDecision(row: ScannerRow) {
+  if (row.market_status && row.market_status !== 'OPEN') return `${row.market_status} / NO_TRADE`;
+  if (row.data_status && row.data_status !== 'LIVE') return `${row.data_status} / NO_TRADE`;
   if ((row.freshness ?? row.market_state) === 'MARKET_CLOSED') return 'MARKET CLOSED / NO_TRADE';
   return row.decision;
+}
+
+function riskLabel(row: ScannerRow) {
+  const failed = row.risk?.failedRules ?? [];
+  if (failed.includes('MARKET_CLOSED')) return 'MARKET_CLOSED';
+  if (failed.includes('BLOCKED_MARKET_CLOSED')) return 'BLOCKED_MARKET_CLOSED';
+  if (failed.includes('STALE_DATA')) return 'STALE_DATA';
+  return row.risk?.result || '-';
+}
+
+function entryTrigger(row: ScannerRow) {
+  const plan = row.entry_plan;
+  const strategy = plan?.entry_strategy ?? row.entry_strategy;
+  if (strategy === 'PULLBACK') return `${plan?.entry_zone_low ?? row.entry_zone_low ?? '-'}-${plan?.entry_zone_high ?? row.entry_zone_high ?? '-'}`;
+  if (strategy === 'BREAKOUT') return plan?.trigger_price ?? row.trigger_price ?? '-';
+  if (strategy === 'MARKET_NOW') return row.reference_entry ?? '-';
+  return '-';
 }
 </script>

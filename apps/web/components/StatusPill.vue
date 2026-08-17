@@ -14,6 +14,18 @@ const displayLabel = computed(() => (
 const classes = computed(() => {
   const base = 'inline-flex min-w-20 justify-center rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide';
   const label = displayLabel.value;
+  if (label.includes('BUY')) {
+    return `${base} border-emerald-500/40 bg-emerald-500/10 text-emerald-200`;
+  }
+  if (label.includes('SELL')) {
+    return `${base} border-rose-500/40 bg-rose-500/10 text-rose-200`;
+  }
+  if (label.includes('WAIT') || label.includes('NO_TRADE') || label === 'CLOSED') {
+    return `${base} border-amber-500/40 bg-amber-500/10 text-amber-200`;
+  }
+  if (label === 'OPEN' || label.includes('READY')) {
+    return `${base} border-emerald-500/40 bg-emerald-500/10 text-emerald-200`;
+  }
   if (label.includes('REJECT') || label.includes('ERROR') || label.includes('FAIL') || label.includes('BLOCK')) {
     return `${base} border-rose-500/40 bg-rose-500/10 text-rose-200`;
   }
