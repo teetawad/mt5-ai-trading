@@ -80,6 +80,13 @@
           <InfoTile label="Margin used" help="Margin reported by MT5 if available." :value="money(position.margin)" />
           <InfoTile label="AI plan alignment" help="Live alignment needs the latest saved AI plan." value="MONITORED" />
         </div>
+
+        <div v-if="position.entry_plan_id" class="mt-4 grid gap-3 md:grid-cols-4">
+          <InfoTile label="Planned entry" help="The AI's original planned entry price for this trade." :value="numberText(position.planned_entry)" />
+          <InfoTile label="Actual entry" help="The real MT5 execution price recorded by the EntryPlanWatcher." :value="numberText(position.actual_entry)" />
+          <InfoTile label="AI model / version" help="The model that produced this trade's entry plan." :value="String(position.model_version ?? '-')" />
+          <InfoTile label="Source entry plan" help="The mt5_entry_plans row that the EntryPlanWatcher executed." :value="String(position.entry_plan_id).slice(0, 8)" />
+        </div>
       </article>
     </section>
   </div>
@@ -99,6 +106,10 @@ type PositionRow = {
   margin?: number | string;
   time?: number | string;
   time_msc?: number | string;
+  entry_plan_id?: string | null;
+  model_version?: string | null;
+  planned_entry?: number | string | null;
+  actual_entry?: number | string | null;
 };
 
 const { apiFetch } = useApi();

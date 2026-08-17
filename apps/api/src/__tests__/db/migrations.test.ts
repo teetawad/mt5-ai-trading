@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
+import fs from 'fs';
+import path from 'path';
 import { getTestPool, setupTestDb } from './setup';
+import { getMigrationsDir } from '../../db/migrate';
 
 const SKIP = !process.env.TEST_DATABASE_URL;
 
@@ -24,9 +27,15 @@ describe('migrations', () => {
     const { rows } = await pool.query<{ version: string }>(
       'SELECT version FROM schema_migrations ORDER BY version',
     );
+    const latestMigrationFile = fs
+      .readdirSync(getMigrationsDir())
+      .filter((f) => f.endsWith('.sql'))
+      .sort()
+      .at(-1);
+
     expect(rows.length).toBeGreaterThanOrEqual(16);
     expect(rows[0].version).toBe('0001_create_users');
-    expect(rows[rows.length - 1].version).toBe('0025_phase27_hourly_settings');
+    expect(rows[rows.length - 1].version).toBe(path.basename(latestMigrationFile ?? '', '.sql'));
   });
 
   it.skipIf(SKIP)('all expected tables exist', async () => {

@@ -2,23 +2,25 @@ import { Pool } from 'pg';
 import { createAuditLog } from '../db/repositories/audit-logs';
 import {
   analyzeMt5Symbol,
-  checkMt5Order,
-  getMt5MarketStatus,
   getMt5Status,
-  getMt5Tick,
   listMt5Positions,
   listMt5Symbols,
-  sendMt5Order,
   Mt5DecisionDTO,
 } from './mt5-client';
 import { evaluateMt5Risk } from './mt5-risk-engine';
 import { loadMt5RiskSettings } from '../config/mt5-risk-settings';
+import {
+  buildEntryPlan,
+  computeEntryStatus,
+  executeDemoTradeForSymbol,
+  getEntryPlanWatcherStatus,
+  persistEntryPlan,
+  planDto,
+  EntryStatus,
+  Mt5Actor,
+} from './mt5-entry-plan-watcher';
 
-export interface Mt5Actor {
-  actorId: string | null;
-  actorEmail: string;
-  requestId?: string | null;
-}
+export type { Mt5Actor };
 
 export interface InstrumentFilter {
   search?: string;
@@ -31,132 +33,6 @@ const THAILAND_TIME_ZONE = 'Asia/Bangkok';
 async function settings(pool: Pool): Promise<Record<string, unknown>> {
   void pool;
   return { ...loadMt5RiskSettings() };
-}
-
-type EntryStrategy = 'MARKET_NOW' | 'PULLBACK' | 'BREAKOUT' | 'NO_ENTRY';
-type EntryStatus = 'WAITING' | 'READY' | 'TRIGGERED' | 'EXPIRED' | 'CANCELLED' | 'BLOCKED' | 'EXECUTED';
-
-type EntryPlanInput = {
-  decisionId?: string;
-  symbol: string;
-  side: 'BUY' | 'SELL' | 'NONE';
-  entryStrategy: EntryStrategy;
-  currentBid?: string | null;
-  currentAsk?: string | null;
-  currentPrice?: string | null;
-  entryZoneLow?: string | null;
-  entryZoneHigh?: string | null;
-  triggerPrice?: string | null;
-  referenceEntry?: string | null;
-  stopLoss?: string | null;
-  takeProfit?: string | null;
-  riskReward?: string | null;
-  recommendedVolume?: string | null;
-  maxPlannedLoss?: string | null;
-  confidence: number;
-  opportunityScore: number;
-  entryReason?: string | null;
-  signalCandleTimestamp: string;
-  validUntil: string;
-  marketStatus?: string;
-  dataStatus?: string;
-};
-
-function numberOrNull(value: unknown): number | null {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isoValidUntil(signalCandleTimestamp: string, cfg: Record<string, unknown>, fallback?: string | null): string {
-  const hours = Number(cfg.mt5_entry_plan_valid_hours ?? 2);
-  const signalTime = new Date(signalCandleTimestamp);
-  if (Number.isFinite(signalTime.getTime()) && Number.isFinite(hours) && hours > 0) {
-    return new Date(signalTime.getTime() + hours * 60 * 60 * 1000).toISOString();
-  }
-  return fallback && Number.isFinite(new Date(fallback).getTime()) ? new Date(fallback).toISOString() : new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-}
-
-function currentPriceForSide(input: { side: string; currentBid?: string | null; currentAsk?: string | null; currentPrice?: string | null }) {
-  if (input.side === 'BUY') return numberOrNull(input.currentAsk ?? input.currentPrice);
-  if (input.side === 'SELL') return numberOrNull(input.currentBid ?? input.currentPrice);
-  return numberOrNull(input.currentPrice);
-}
-
-function computeEntryStatus(input: EntryPlanInput, now = new Date()): EntryStatus {
-  if (input.entryStrategy === 'NO_ENTRY' || input.side === 'NONE') return 'BLOCKED';
-  if (new Date(input.validUntil).getTime() <= now.getTime()) return 'EXPIRED';
-  if (input.marketStatus && input.marketStatus !== 'OPEN') return 'BLOCKED';
-  if (input.dataStatus && input.dataStatus !== 'LIVE') return 'BLOCKED';
-  const current = currentPriceForSide(input);
-  if (current === null) return 'BLOCKED';
-  if (input.entryStrategy === 'MARKET_NOW') return 'READY';
-  if (input.entryStrategy === 'PULLBACK') {
-    const low = numberOrNull(input.entryZoneLow);
-    const high = numberOrNull(input.entryZoneHigh);
-    if (low === null || high === null) return 'BLOCKED';
-    return current >= Math.min(low, high) && current <= Math.max(low, high) ? 'TRIGGERED' : 'WAITING';
-  }
-  const trigger = numberOrNull(input.triggerPrice);
-  if (trigger === null) return 'BLOCKED';
-  if (input.side === 'BUY') return current >= trigger ? 'TRIGGERED' : 'WAITING';
-  return current <= trigger ? 'TRIGGERED' : 'WAITING';
-}
-
-function buildEntryPlan(decision: Mt5DecisionDTO, risk: { recommendedVolume?: string; riskAmount?: string }, cfg: Record<string, unknown>): EntryPlanInput {
-  const side = decision.decision === 'BUY' || decision.decision === 'SELL' ? decision.decision : 'NONE';
-  const strategy = decision.entry_strategy ?? (side === 'NONE' ? 'NO_ENTRY' : 'MARKET_NOW');
-  const validUntil = isoValidUntil(decision.signal_candle_timestamp, cfg, decision.valid_until);
-  const plan: EntryPlanInput = {
-    symbol: decision.symbol,
-    side,
-    entryStrategy: strategy,
-    currentBid: decision.bid ?? null,
-    currentAsk: decision.ask ?? null,
-    currentPrice: decision.current_price ?? (side === 'BUY' ? decision.ask : decision.bid) ?? decision.reference_entry,
-    entryZoneLow: decision.entry_zone_low ?? null,
-    entryZoneHigh: decision.entry_zone_high ?? null,
-    triggerPrice: decision.trigger_price ?? null,
-    referenceEntry: decision.reference_entry,
-    stopLoss: decision.stop_loss,
-    takeProfit: decision.take_profit,
-    riskReward: decision.risk_reward,
-    recommendedVolume: risk.recommendedVolume ?? null,
-    maxPlannedLoss: risk.riskAmount ?? null,
-    confidence: decision.confidence,
-    opportunityScore: decision.opportunity_score,
-    entryReason: decision.entry_reason ?? null,
-    signalCandleTimestamp: decision.signal_candle_timestamp,
-    validUntil,
-    marketStatus: decision.market_status,
-    dataStatus: decision.data_status,
-  };
-  return plan;
-}
-
-function planDto(plan: EntryPlanInput, status?: EntryStatus) {
-  const currentStatus = status ?? computeEntryStatus(plan);
-  return {
-    side: plan.side,
-    entry_strategy: plan.entryStrategy,
-    current_bid: plan.currentBid ?? null,
-    current_ask: plan.currentAsk ?? null,
-    current_price: plan.currentPrice ?? null,
-    entry_zone_low: plan.entryZoneLow ?? null,
-    entry_zone_high: plan.entryZoneHigh ?? null,
-    trigger_price: plan.triggerPrice ?? null,
-    reference_entry: plan.referenceEntry ?? null,
-    stop_loss: plan.stopLoss ?? null,
-    take_profit: plan.takeProfit ?? null,
-    risk_reward: plan.riskReward ?? null,
-    recommended_volume: plan.recommendedVolume ?? null,
-    max_planned_loss: plan.maxPlannedLoss ?? null,
-    confidence: plan.confidence,
-    opportunity_score: plan.opportunityScore,
-    entry_reason: plan.entryReason ?? null,
-    signal_candle_timestamp: plan.signalCandleTimestamp,
-    valid_until: plan.validUntil,
-    current_entry_status: currentStatus,
-  };
 }
 
 function beginnerEntryLabel(strategy?: string): string {
@@ -229,71 +105,6 @@ function tradeButtonDiagnostics(input: {
   };
 }
 
-async function persistEntryPlan(pool: Pool, decisionId: string, plan: EntryPlanInput, status = computeEntryStatus(plan)) {
-  const result = await pool.query(
-    `INSERT INTO mt5_entry_plans(ai_decision_id, symbol, side, entry_strategy, status,
-        current_bid, current_ask, current_price, entry_zone_low, entry_zone_high,
-        trigger_price, reference_entry, stop_loss, take_profit, risk_reward,
-        recommended_volume, max_planned_loss, confidence, opportunity_score,
-        entry_reason, signal_candle_timestamp, valid_until,
-        triggered_at, expired_at, reached_trigger, time_to_trigger_seconds)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
-        CASE WHEN $5 = 'TRIGGERED' THEN now() ELSE NULL END,
-        CASE WHEN $5 = 'EXPIRED' THEN now() ELSE NULL END,
-        CASE WHEN $5 = 'TRIGGERED' THEN true ELSE false END,
-        CASE WHEN $5 = 'TRIGGERED' THEN GREATEST(0, EXTRACT(EPOCH FROM (now() - $21::timestamptz)))::int ELSE NULL END)
-     ON CONFLICT(ai_decision_id) DO UPDATE SET
-        status=EXCLUDED.status,
-        current_bid=EXCLUDED.current_bid,
-        current_ask=EXCLUDED.current_ask,
-        current_price=EXCLUDED.current_price,
-        entry_zone_low=EXCLUDED.entry_zone_low,
-        entry_zone_high=EXCLUDED.entry_zone_high,
-        trigger_price=EXCLUDED.trigger_price,
-        reference_entry=EXCLUDED.reference_entry,
-        stop_loss=EXCLUDED.stop_loss,
-        take_profit=EXCLUDED.take_profit,
-        risk_reward=EXCLUDED.risk_reward,
-        recommended_volume=EXCLUDED.recommended_volume,
-        max_planned_loss=EXCLUDED.max_planned_loss,
-        confidence=EXCLUDED.confidence,
-        opportunity_score=EXCLUDED.opportunity_score,
-        entry_reason=EXCLUDED.entry_reason,
-        valid_until=EXCLUDED.valid_until,
-        triggered_at=COALESCE(mt5_entry_plans.triggered_at, EXCLUDED.triggered_at),
-        expired_at=COALESCE(mt5_entry_plans.expired_at, EXCLUDED.expired_at),
-        reached_trigger=mt5_entry_plans.reached_trigger OR EXCLUDED.reached_trigger,
-        time_to_trigger_seconds=COALESCE(mt5_entry_plans.time_to_trigger_seconds, EXCLUDED.time_to_trigger_seconds),
-        updated_at=now()
-     RETURNING *`,
-    [
-      decisionId,
-      plan.symbol,
-      plan.side,
-      plan.entryStrategy,
-      status,
-      plan.currentBid ?? null,
-      plan.currentAsk ?? null,
-      plan.currentPrice ?? null,
-      plan.entryZoneLow ?? null,
-      plan.entryZoneHigh ?? null,
-      plan.triggerPrice ?? null,
-      plan.referenceEntry ?? null,
-      plan.stopLoss ?? null,
-      plan.takeProfit ?? null,
-      plan.riskReward ?? null,
-      plan.recommendedVolume ?? null,
-      plan.maxPlannedLoss ?? null,
-      plan.confidence,
-      plan.opportunityScore,
-      plan.entryReason ?? null,
-      plan.signalCandleTimestamp,
-      plan.validUntil,
-    ],
-  );
-  return result.rows[0];
-}
-
 function assetClass(symbol: Record<string, unknown>): string {
   const path = String(symbol.path ?? symbol.description ?? '').toLowerCase();
   const name = String(symbol.name ?? '').toLowerCase();
@@ -343,18 +154,25 @@ function countdownTo(value: unknown): string | null {
 function beginnerRiskReason(value: string): string {
   const map: Record<string, string> = {
     SAFETY_SWITCH_ON: 'Demo safety switch is on, so new trades are blocked.',
+    RISK_LIMIT: 'Demo safety switch is on, so new trades are blocked.',
     MARKET_CLOSED: 'The market is closed now.',
     STALE_DATA: 'The latest price is too old.',
     STALE_QUOTE: 'MT5 quote is stale.',
     NO_EXECUTABLE_DECISION: 'AI says wait, so there is no entry.',
     STOP_LOSS_REQUIRED: 'Stop Loss is missing.',
     TAKE_PROFIT_REQUIRED: 'Take Profit is missing.',
+    INVALID_SL: 'The Stop Loss is not valid for this entry.',
+    INVALID_TP: 'The Take Profit is not valid for this entry.',
     RISK_REWARD_TOO_LOW: 'The planned reward is too small compared with the risk.',
     MAX_SIMULTANEOUS_POSITIONS: 'Too many demo trades are already open.',
     MAX_TRADES_PER_DAY: 'Daily demo trade limit has been reached.',
     MARGIN_INSUFFICIENT: 'Not enough free demo margin.',
     POSITION_SIZE_INVALID: 'The calculated lot size is not valid.',
     SPREAD_TOO_HIGH: 'The spread is too expensive right now.',
+    POSITION_EXISTS: 'A demo position for this symbol is already open.',
+    PENDING_ORDER: 'A pending demo order for this symbol already exists.',
+    COOLDOWN: 'This symbol is in a cooldown period after its last demo trade.',
+    DEMO_VERIFICATION_FAILED: 'MT5 demo account could not be verified.',
   };
   return map[value] ?? value.replaceAll('_', ' ').toLowerCase();
 }
@@ -517,6 +335,7 @@ export async function scannerSnapshot(pool: Pool, actor: Mt5Actor, persist = fal
   return {
     status,
     autoDemoEnabled: cfg.mt5_auto_demo_enabled === true,
+    watcher: getEntryPlanWatcherStatus(),
     scanner: rows,
     watchlistMarketSummary: {
       open: openMarkets,
@@ -613,7 +432,7 @@ export async function runAssistedAnalysis(pool: Pool, symbol: string, actor: Mt5
     afterData: { ...decision },
     requestId: actor.requestId ?? null,
   });
-  return { decision: saved, entryPlan: savedPlan };
+  return { decision: saved, entryPlan: { ...planDto(entryPlan), ...savedPlan } };
 }
 
 export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt5Actor, persist = false) {
@@ -654,7 +473,7 @@ export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt
   if (persist) {
     const persistedDecision = await persistDecision(pool, decision, String(assetClassValue));
     savedDecision = persistedDecision;
-    savedPlan = await persistEntryPlan(pool, String(persistedDecision.id), entryPlanInput, rawEntryStatus);
+    savedPlan = await persistEntryPlan(pool, String(persistedDecision.id), entryPlanInput, rawEntryStatus as EntryStatus);
     await createAuditLog(pool, {
       eventType: 'MT5_AI_DECISION_RECORDED',
       actorId: actor.actorId,
@@ -690,6 +509,8 @@ export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt
     generatedAt: new Date().toISOString(),
     timezone: THAILAND_TIME_ZONE,
     status,
+    autoDemoEnabled: cfg.mt5_auto_demo_enabled === true,
+    watcher: getEntryPlanWatcherStatus(),
     symbol,
     assetClass: assetClassValue,
     market: {
@@ -751,266 +572,62 @@ export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt
   };
 }
 
-type DemoExecutionMode = 'AUTO_DEMO' | 'ASSISTED_DEMO';
-
-async function executeDemoTrade(pool: Pool, symbol: string, actor: Mt5Actor, mode: DemoExecutionMode) {
-  const cfg = await settings(pool);
-  if (mode === 'AUTO_DEMO' && cfg.mt5_auto_demo_enabled !== true) throw new Error('AUTO-DEMO is disabled');
-  const status = await getMt5Status(actor.requestId ?? undefined);
-  if (!status.demo_verified) throw new Error(status.blocked_reason ?? 'MT5 DEMO is not verified');
-  const analysis = await runAssistedAnalysis(pool, symbol, actor);
-  const decision = analysis.decision;
-  const entryPlanStatus = String(analysis.entryPlan.status ?? 'BLOCKED') as EntryStatus;
-  if (!['READY', 'TRIGGERED'].includes(entryPlanStatus)) {
-    return {
-      executed: false,
-      decision,
-      entryPlan: analysis.entryPlan,
-      reason: `Entry plan is ${entryPlanStatus}; execution is not allowed yet.`,
-    };
-  }
-  const market = await getMt5MarketStatus(symbol, actor.requestId ?? undefined);
-  const mt5Positions = await listMt5Positions(actor.requestId ?? undefined).catch(() => []);
-  const openPositions = mt5Positions.length;
-  const tradesToday = Number((await pool.query("SELECT count(*)::int AS c FROM trade_outcomes WHERE opened_at >= date_trunc('day', now())")).rows[0]?.c ?? 0);
-  const risk = evaluateMt5Risk({
-    decision: decision.decision,
-    referenceEntry: decision.reference_entry,
-    stopLoss: decision.stop_loss,
-    takeProfit: decision.take_profit,
-    riskReward: decision.risk_reward,
-    confidence: Number(decision.confidence),
-    account: status.account,
-    terminal: status.terminal,
-    settings: cfg,
-    openPositions,
-    tradesToday,
-    quoteAgeSeconds: typeof market.quote_age_seconds === 'number' ? market.quote_age_seconds : undefined,
-    marketStatus: market.market_status as 'OPEN' | 'CLOSED' | 'QUOTE_ONLY' | 'TRADE_DISABLED' | 'UNKNOWN' | undefined,
-    dataStatus: market.data_status as 'LIVE' | 'STALE' | 'DISCONNECTED' | undefined,
-  });
-  const riskRow = await pool.query(
-    'INSERT INTO risk_evaluations(ai_decision_id, symbol, result, failed_rules, reason, snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',
-    [decision.id, symbol, risk.result, JSON.stringify(risk.failedRules), risk.reason, risk.snapshot],
-  );
-  if (risk.result !== 'PASS') {
-    await pool.query('UPDATE mt5_entry_plans SET status = $1, updated_at = now() WHERE ai_decision_id = $2', ['BLOCKED', decision.id]);
-    return { executed: false, decision, entryPlan: analysis.entryPlan, risk: riskRow.rows[0] };
-  }
-  const request = {
-    idempotency_key: `mt5:${decision.id}`,
-    symbol,
-    side: decision.decision as 'BUY' | 'SELL',
-    volume: Number(risk.recommendedVolume),
-    stop_loss: Number(decision.stop_loss),
-    take_profit: Number(decision.take_profit),
-    deviation: Number(cfg.mt5_allowed_deviation_points ?? 20),
-    comment: `MT5_DEMO_${decision.id}`,
-  };
-  const check = await checkMt5Order(request, actor.requestId ?? undefined);
-  const result = await sendMt5Order(request, actor.requestId ?? undefined);
-  await pool.query(
-    `INSERT INTO trade_outcomes(symbol, ai_decision_id, order_ticket, side, volume, expected_entry,
-      stop_loss, take_profit, risk_amount, risk_reward, opened_at)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,
-    [
-      symbol,
-      decision.id,
-      String(result.order ?? result.deal ?? result.request_id ?? decision.id),
-      decision.decision,
-      risk.recommendedVolume,
-      decision.reference_entry,
-      decision.stop_loss,
-      decision.take_profit,
-      risk.riskAmount,
-      decision.risk_reward,
-    ],
-  );
-  await pool.query('UPDATE mt5_entry_plans SET status = $1, executed_at = now(), updated_at = now() WHERE ai_decision_id = $2', ['EXECUTED', decision.id]);
-  await createAuditLog(pool, {
-    eventType: mode === 'AUTO_DEMO' ? 'MT5_AUTO_DEMO_ORDER_SENT' : 'MT5_ASSISTED_DEMO_ORDER_SENT',
-    actorId: actor.actorId,
-    actorEmail: actor.actorEmail,
-    entityType: 'ai_decision',
-    entityId: decision.id,
-    action: mode === 'AUTO_DEMO' ? 'AUTO_DEMO_EXECUTE' : 'ASSISTED_DEMO_EXECUTE',
-    afterData: { check, result },
-    requestId: actor.requestId ?? null,
-  });
-  return { executed: true, decision, entryPlan: { ...analysis.entryPlan, status: 'EXECUTED' }, risk: riskRow.rows[0], check, result };
-}
-
 export async function executeAssistedDemo(pool: Pool, symbol: string, actor: Mt5Actor) {
-  return executeDemoTrade(pool, symbol, actor, 'ASSISTED_DEMO');
+  return executeDemoTradeForSymbol(pool, symbol, actor, 'ASSISTED_DEMO', runAssistedAnalysis);
 }
 
 export async function executeAutoDemo(pool: Pool, symbol: string, actor: Mt5Actor) {
-  return executeDemoTrade(pool, symbol, actor, 'AUTO_DEMO');
+  return executeDemoTradeForSymbol(pool, symbol, actor, 'AUTO_DEMO', runAssistedAnalysis);
 }
 
-function dbPlanToInput(row: Record<string, unknown>, tick: Record<string, unknown>, market: Record<string, unknown>): EntryPlanInput {
-  const side = String(row.side) === 'BUY' || String(row.side) === 'SELL' ? String(row.side) as 'BUY' | 'SELL' : 'NONE';
-  return {
-    decisionId: String(row.ai_decision_id),
-    symbol: String(row.symbol),
-    side,
-    entryStrategy: String(row.entry_strategy) as EntryStrategy,
-    currentBid: tick.bid !== undefined ? String(tick.bid) : row.current_bid ? String(row.current_bid) : null,
-    currentAsk: tick.ask !== undefined ? String(tick.ask) : row.current_ask ? String(row.current_ask) : null,
-    currentPrice: row.current_price ? String(row.current_price) : null,
-    entryZoneLow: row.entry_zone_low ? String(row.entry_zone_low) : null,
-    entryZoneHigh: row.entry_zone_high ? String(row.entry_zone_high) : null,
-    triggerPrice: row.trigger_price ? String(row.trigger_price) : null,
-    referenceEntry: row.reference_entry ? String(row.reference_entry) : null,
-    stopLoss: row.stop_loss ? String(row.stop_loss) : null,
-    takeProfit: row.take_profit ? String(row.take_profit) : null,
-    riskReward: row.risk_reward ? String(row.risk_reward) : null,
-    recommendedVolume: row.recommended_volume ? String(row.recommended_volume) : null,
-    maxPlannedLoss: row.max_planned_loss ? String(row.max_planned_loss) : null,
-    confidence: Number(row.confidence ?? 0),
-    opportunityScore: Number(row.opportunity_score ?? 0),
-    entryReason: row.entry_reason ? String(row.entry_reason) : null,
-    signalCandleTimestamp: new Date(String(row.signal_candle_timestamp)).toISOString(),
-    validUntil: new Date(String(row.valid_until)).toISOString(),
-    marketStatus: String(market.market_status ?? 'UNKNOWN'),
-    dataStatus: String(market.data_status ?? 'DISCONNECTED'),
-  };
-}
-
-async function refreshStoredEntryPlan(pool: Pool, row: Record<string, unknown>, actor: Mt5Actor) {
-  const [tick, market] = await Promise.all([
-    getMt5Tick(String(row.symbol), actor.requestId ?? undefined).catch(() => ({})),
-    getMt5MarketStatus(String(row.symbol), actor.requestId ?? undefined).catch(() => ({})),
-  ]);
-  const plan = dbPlanToInput(row, tick, market);
-  const current = currentPriceForSide(plan);
-  const updated = current === null ? plan : { ...plan, currentPrice: String(current) };
-  const status = computeEntryStatus(updated);
-  const saved = await persistEntryPlan(pool, String(row.ai_decision_id), updated, status);
-  return { plan: saved, status };
-}
-
-export async function listActiveEntryPlans(pool: Pool, actor: Mt5Actor) {
-  const result = await pool.query(
-    `SELECT * FROM mt5_entry_plans
-     WHERE status IN ('WAITING','READY','TRIGGERED','BLOCKED')
-       AND valid_until >= now() - interval '1 hour'
-     ORDER BY created_at DESC
-     LIMIT 100`,
+export async function getMt5OpenPositions(pool: Pool, actor: Mt5Actor) {
+  const positions = await listMt5Positions(actor.requestId ?? undefined);
+  if (!positions.length) return { positions: [] };
+  const outcomes = await pool.query(
+    `SELECT t.*, d.model_version, p.entry_strategy AS entry_type
+     FROM trade_outcomes t
+     LEFT JOIN ai_decisions d ON d.id = t.ai_decision_id
+     LEFT JOIN mt5_entry_plans p ON p.id = t.entry_plan_id
+     WHERE t.closed_at IS NULL
+     ORDER BY t.opened_at DESC`,
   );
-  const plans = [];
-  for (const row of result.rows) {
-    plans.push((await refreshStoredEntryPlan(pool, row, actor)).plan);
+  const bySymbol = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of outcomes.rows) {
+    const list = bySymbol.get(String(row.symbol)) ?? [];
+    list.push(row);
+    bySymbol.set(String(row.symbol), list);
   }
-  return { plans };
-}
-
-async function executeTriggeredPlan(pool: Pool, planRow: Record<string, unknown>, actor: Mt5Actor) {
-  const cfg = await settings(pool);
-  const status = await getMt5Status(actor.requestId ?? undefined);
-  if (!status.demo_verified) throw new Error(status.blocked_reason ?? 'MT5 DEMO is not verified');
-  const decisionResult = await pool.query('SELECT * FROM ai_decisions WHERE id = $1', [planRow.ai_decision_id]);
-  const decision = decisionResult.rows[0];
-  if (!decision) return { executed: false, reason: 'AI decision not found', entryPlan: planRow };
-  const market = await getMt5MarketStatus(String(planRow.symbol), actor.requestId ?? undefined);
-  const mt5Positions = await listMt5Positions(actor.requestId ?? undefined).catch(() => []);
-  const tradesToday = Number((await pool.query("SELECT count(*)::int AS c FROM trade_outcomes WHERE opened_at >= date_trunc('day', now())")).rows[0]?.c ?? 0);
-  const risk = evaluateMt5Risk({
-    decision: decision.decision,
-    referenceEntry: String(decision.reference_entry),
-    stopLoss: decision.stop_loss ? String(decision.stop_loss) : null,
-    takeProfit: decision.take_profit ? String(decision.take_profit) : null,
-    riskReward: decision.risk_reward ? String(decision.risk_reward) : null,
-    confidence: Number(decision.confidence),
-    account: status.account,
-    terminal: status.terminal,
-    settings: cfg,
-    openPositions: mt5Positions.length,
-    tradesToday,
-    quoteAgeSeconds: typeof market.quote_age_seconds === 'number' ? market.quote_age_seconds : undefined,
-    marketStatus: market.market_status as 'OPEN' | 'CLOSED' | 'QUOTE_ONLY' | 'TRADE_DISABLED' | 'UNKNOWN' | undefined,
-    dataStatus: market.data_status as 'LIVE' | 'STALE' | 'DISCONNECTED' | undefined,
+  const enriched = positions.map((position) => {
+    const candidates = bySymbol.get(String(position.symbol)) ?? [];
+    const ticketIndex = candidates.findIndex((row) => row.order_ticket && String(row.order_ticket) === String(position.ticket));
+    const index = ticketIndex >= 0 ? ticketIndex : candidates.length ? 0 : -1;
+    const matched = index >= 0 ? candidates[index] : null;
+    if (index >= 0) candidates.splice(index, 1);
+    return {
+      ...position,
+      entry_plan_id: matched?.entry_plan_id ?? null,
+      model_version: matched?.model_version ?? null,
+      entry_type: matched?.entry_type ?? null,
+      planned_entry: matched?.expected_entry ?? null,
+      actual_entry: matched?.actual_entry ?? position.price_open ?? null,
+      max_planned_loss: matched?.risk_amount ?? null,
+    };
   });
-  const riskRow = await pool.query(
-    'INSERT INTO risk_evaluations(ai_decision_id, symbol, result, failed_rules, reason, snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',
-    [decision.id, planRow.symbol, risk.result, JSON.stringify(risk.failedRules), risk.reason, risk.snapshot],
-  );
-  if (risk.result !== 'PASS') {
-    await pool.query('UPDATE mt5_entry_plans SET status = $1, updated_at = now() WHERE id = $2', ['BLOCKED', planRow.id]);
-    return { executed: false, entryPlan: planRow, risk: riskRow.rows[0] };
-  }
-  const request = {
-    idempotency_key: `mt5-entry-plan:${planRow.id}`,
-    symbol: String(planRow.symbol),
-    side: decision.decision as 'BUY' | 'SELL',
-    volume: Number(risk.recommendedVolume),
-    stop_loss: Number(decision.stop_loss),
-    take_profit: Number(decision.take_profit),
-    deviation: Number(cfg.mt5_allowed_deviation_points ?? 20),
-    comment: `MT5_PLAN_${planRow.id}`,
-  };
-  const check = await checkMt5Order(request, actor.requestId ?? undefined);
-  const result = await sendMt5Order(request, actor.requestId ?? undefined);
-  await pool.query(
-    `INSERT INTO trade_outcomes(symbol, ai_decision_id, order_ticket, side, volume, expected_entry,
-      stop_loss, take_profit, risk_amount, risk_reward, opened_at)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,
-    [
-      planRow.symbol,
-      decision.id,
-      String(result.order ?? result.deal ?? result.request_id ?? planRow.id),
-      decision.decision,
-      risk.recommendedVolume,
-      decision.reference_entry,
-      decision.stop_loss,
-      decision.take_profit,
-      risk.riskAmount,
-      decision.risk_reward,
-    ],
-  );
-  await pool.query('UPDATE mt5_entry_plans SET status = $1, executed_at = now(), updated_at = now() WHERE id = $2', ['EXECUTED', planRow.id]);
-  await createAuditLog(pool, {
-    eventType: 'MT5_ENTRY_PLAN_EXECUTED',
-    actorId: actor.actorId,
-    actorEmail: actor.actorEmail,
-    entityType: 'mt5_entry_plan',
-    entityId: String(planRow.id),
-    action: 'ENTRY_PLAN_EXECUTE',
-    afterData: { check, result },
-    requestId: actor.requestId ?? null,
-  });
-  return { executed: true, entryPlan: { ...planRow, status: 'EXECUTED' }, risk: riskRow.rows[0], check, result };
-}
-
-export async function processMt5EntryPlans(pool: Pool, actor: Mt5Actor, autoDemoEnabled: boolean) {
-  const result = await pool.query(
-    `SELECT * FROM mt5_entry_plans
-     WHERE status IN ('WAITING','READY','TRIGGERED')
-     ORDER BY created_at ASC
-     LIMIT 50`,
-  );
-  const outcomes = [];
-  for (const row of result.rows) {
-    const refreshed = await refreshStoredEntryPlan(pool, row, actor);
-    if (refreshed.status === 'TRIGGERED' && autoDemoEnabled) {
-      outcomes.push(await executeTriggeredPlan(pool, refreshed.plan, actor));
-    } else {
-      outcomes.push({ executed: false, entryPlan: refreshed.plan });
-    }
-  }
-  return { processed: outcomes.length, outcomes };
+  return { positions: enriched };
 }
 
 export async function listMt5TradeHistory(pool: Pool) {
   const result = await pool.query(
-    `SELECT t.id, t.symbol, i.asset_class, t.order_ticket, t.side, t.volume, t.expected_entry,
-        t.actual_entry, t.stop_loss, t.take_profit, t.risk_amount, t.risk_reward,
+    `SELECT t.id, t.symbol, i.asset_class, t.order_ticket, t.deal_ticket, t.retcode, t.side, t.volume,
+        t.expected_entry, t.actual_entry, t.stop_loss, t.take_profit, t.risk_amount, t.risk_reward,
         t.spread, t.slippage, t.exit_reason, t.realized_pnl, t.fees, t.mfe, t.mae,
-        t.opened_at, t.closed_at,
-        d.decision, d.confidence, d.opportunity_score, d.model_version, d.reasons
+        t.opened_at, t.closed_at, t.entry_plan_id,
+        d.decision, d.confidence, d.opportunity_score, d.model_version, d.reasons,
+        p.entry_strategy AS entry_type, p.time_to_trigger_seconds, p.reached_trigger
      FROM trade_outcomes t
      LEFT JOIN ai_decisions d ON d.id = t.ai_decision_id
      LEFT JOIN instruments i ON i.symbol = t.symbol
+     LEFT JOIN mt5_entry_plans p ON p.id = t.entry_plan_id
      ORDER BY COALESCE(t.closed_at, t.opened_at) DESC
      LIMIT 100`,
   );

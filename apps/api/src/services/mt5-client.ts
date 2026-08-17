@@ -131,6 +131,14 @@ export async function listMt5Positions(requestId?: string): Promise<Record<strin
   return engineFetch('/mt5/positions', requestId) as Promise<Record<string, unknown>[]>;
 }
 
+export async function listMt5PendingOrders(requestId?: string): Promise<Record<string, unknown>[]> {
+  return engineFetch('/mt5/orders', requestId) as Promise<Record<string, unknown>[]>;
+}
+
+export async function getMt5SymbolInfo(symbol: string, requestId?: string): Promise<Record<string, unknown>> {
+  return engineFetch(`/mt5/symbol-info/${encodeURIComponent(symbol)}`, requestId) as Promise<Record<string, unknown>>;
+}
+
 export async function checkMt5Order(request: Mt5OrderRequestDTO, requestId?: string): Promise<Record<string, unknown>> {
   return engineFetch('/mt5/order-check', requestId, { method: 'POST', body: JSON.stringify(request) }) as Promise<Record<string, unknown>>;
 }

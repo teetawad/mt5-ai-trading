@@ -60,6 +60,7 @@
             <StatusPill :label="`AI ${plan.decision.action}`" />
             <StatusPill :label="plan.entryPlan.beginner_label" />
             <StatusPill :label="riskStatus" />
+            <StatusPill :label="`AUTO-DEMO ${plan.autoDemoEnabled ? 'ON' : 'OFF'}`" />
           </div>
         </div>
         <div class="text-left lg:text-right">
@@ -104,15 +105,38 @@
         <h3 class="text-sm font-bold uppercase tracking-widest text-slate-400">When to Enter</h3>
         <p class="mt-2 text-2xl font-semibold" :class="entryTone">{{ plan.entryPlan.beginner_label }}</p>
         <p class="mt-2 text-sm leading-6 text-slate-300">{{ entryExplanation }}</p>
+        <p v-if="watcherMessage" class="mt-3 rounded-lg border border-sky-400/30 bg-sky-400/10 p-3 text-sm leading-6 text-sky-100">{{ watcherMessage }}</p>
         <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <InfoTile label="Entry Type" :value="plan.entryPlan.entry_strategy" />
-          <InfoTile label="Entry Status" :value="plan.entryPlan.status_label" />
+          <InfoTile label="Entry Status" :value="plan.entryPlan.status_label" help="STATUS: WAITING FOR PRICE means AI is monitoring live price in the background." />
           <InfoTile label="Entry / Reference" :value="priceText(plan.entryPlan.reference_entry)" />
           <InfoTile label="Current Price" :value="priceText(plan.entryPlan.current_price ?? plan.quote.currentPrice)" />
           <InfoTile label="Entry Zone" :value="entryZoneText" />
           <InfoTile label="Trigger Price" :value="priceText(plan.entryPlan.trigger_price)" />
           <InfoTile label="Created At" :value="dateText(plan.generatedAt)" />
           <InfoTile label="Expires At" :value="dateText(plan.entryPlan.valid_until)" />
+        </div>
+
+        <div v-if="progressAxis" class="mt-6 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+          <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Live Entry Progress</p>
+          <div class="relative mt-8 mb-8 h-2 rounded-full bg-slate-800">
+            <div
+              v-if="progressAxis.zoneLow !== null && progressAxis.zoneHigh !== null"
+              class="absolute inset-y-0 rounded-full bg-sky-500/40"
+              :style="{ left: `${Math.min(progressAxis.zoneLow, progressAxis.zoneHigh)}%`, width: `${Math.max(1, Math.abs(progressAxis.zoneHigh - progressAxis.zoneLow))}%` }"
+            />
+            <div class="absolute inset-y-0 left-0 right-0 rounded-full bg-gradient-to-r from-rose-500/50 via-slate-700/40 to-emerald-500/50" style="z-index:-1" />
+
+            <template v-for="marker in progressMarkers" :key="marker.key">
+              <div class="absolute top-1/2 h-3 w-0.5 -translate-y-1/2" :class="marker.lineClass" :style="{ left: `${marker.pct}%` }" />
+              <div class="absolute -top-7 -translate-x-1/2 whitespace-nowrap text-center text-[10px] font-semibold" :class="marker.textClass" :style="{ left: `${marker.pct}%` }">
+                {{ marker.label }}<br>{{ priceText(marker.value) }}
+              </div>
+              <div v-if="marker.key === 'current' && plan.entryPlan.current_entry_status === 'WAITING'" class="absolute -bottom-7 -translate-x-1/2 whitespace-nowrap text-center text-[10px] font-bold text-sky-300" :style="{ left: `${marker.pct}%` }">
+                AI IS WAITING HERE &uarr;
+              </div>
+            </template>
+          </div>
         </div>
       </section>
 
@@ -233,6 +257,8 @@ type AnalysisPlan = {
   timezone: string;
   symbol: string;
   assetClass: string;
+  autoDemoEnabled: boolean;
+  watcher?: { started: boolean; intervalMs: number; lastTickAt: string | null };
   market: Record<string, any>;
   quote: Record<string, any>;
   decision: Record<string, any>;
@@ -312,6 +338,61 @@ const holdingText = computed(() => {
   if (!Number.isFinite(hours) || hours <= 0) return '-';
   return hours <= 4 ? '1-4 hours' : `${hours} hours`;
 });
+const watcherMessage = computed(() => {
+  if (!plan.value) return '';
+  const strategy = plan.value.entryPlan.entry_strategy;
+  const status = plan.value.entryPlan.current_entry_status;
+  if ((strategy === 'PULLBACK' || strategy === 'BREAKOUT') && (status === 'WAITING' || status === 'TRIGGERED')) {
+    return `AI is monitoring ${plan.value.symbol}. If price reaches the planned entry zone before expiry, the system will check risk again and may enter the DEMO trade automatically.`;
+  }
+  if (status === 'BLOCKED') return plan.value.entryPlan.status_message ?? 'Entry condition was reached but the trade was blocked.';
+  if (status === 'EXPIRED') return 'PLAN EXPIRED. No trade was entered.';
+  return '';
+});
+
+type ProgressMarker = { key: string; label: string; value: unknown; pct: number; lineClass: string; textClass: string };
+
+const progressAxis = computed(() => {
+  if (!plan.value) return null;
+  const strategy = plan.value.entryPlan.entry_strategy;
+  if (strategy === 'MARKET_NOW' || strategy === 'NO_ENTRY') return null;
+  const sl = Number(plan.value.entryPlan.stop_loss ?? plan.value.protection.stopLoss);
+  const tp = Number(plan.value.entryPlan.take_profit ?? plan.value.protection.takeProfit);
+  const current = Number(plan.value.entryPlan.current_price ?? plan.value.quote.currentPrice);
+  const zoneLow = Number(plan.value.entryPlan.entry_zone_low);
+  const zoneHigh = Number(plan.value.entryPlan.entry_zone_high);
+  const trigger = Number(plan.value.entryPlan.trigger_price);
+  const points = [sl, tp, current, zoneLow, zoneHigh, trigger].filter((value) => Number.isFinite(value));
+  if (points.length < 2) return null;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const pct = (value: number) => Number.isFinite(value) ? ((value - min) / span) * 100 : null;
+  return {
+    sl: Number.isFinite(sl) ? pct(sl) : null,
+    tp: Number.isFinite(tp) ? pct(tp) : null,
+    current: Number.isFinite(current) ? pct(current) : null,
+    zoneLow: Number.isFinite(zoneLow) ? pct(zoneLow) : null,
+    zoneHigh: Number.isFinite(zoneHigh) ? pct(zoneHigh) : null,
+    trigger: Number.isFinite(trigger) ? pct(trigger) : null,
+    rawSl: sl,
+    rawTp: tp,
+    rawCurrent: current,
+    rawTrigger: trigger,
+  };
+});
+
+const progressMarkers = computed<ProgressMarker[]>(() => {
+  const axis = progressAxis.value;
+  if (!axis) return [];
+  const markers: ProgressMarker[] = [];
+  if (axis.sl !== null) markers.push({ key: 'sl', label: 'SL', value: axis.rawSl, pct: axis.sl, lineClass: 'bg-rose-400', textClass: 'text-rose-300' });
+  if (axis.trigger !== null) markers.push({ key: 'trigger', label: 'TRIGGER', value: axis.rawTrigger, pct: axis.trigger, lineClass: 'bg-sky-400', textClass: 'text-sky-300' });
+  if (axis.current !== null) markers.push({ key: 'current', label: 'CURRENT', value: axis.rawCurrent, pct: axis.current, lineClass: 'bg-white', textClass: 'text-white' });
+  if (axis.tp !== null) markers.push({ key: 'tp', label: 'TP', value: plan.value?.entryPlan.take_profit ?? plan.value?.protection.takeProfit, pct: axis.tp, lineClass: 'bg-emerald-400', textClass: 'text-emerald-300' });
+  return markers.sort((a, b) => a.pct - b.pct);
+});
+
 const tradeButtonHelp = computed(() => {
   if (!plan.value) return '';
   if (plan.value.tradeButton.enabled) return 'Demo trade is available. Final server-side checks still run before order submission.';

@@ -28,6 +28,9 @@ async function main() {
   await syncMt5RiskSettingsToDatabase(getPoolForScheduler());
   const { startMt5HourlyScheduler } = await import('./services/mt5-hourly-scheduler');
   startMt5HourlyScheduler(getPoolForScheduler());
+  const { startMt5EntryPlanWatcher } = await import('./services/mt5-entry-plan-watcher');
+  startMt5EntryPlanWatcher(getPoolForScheduler());
+  console.log('[api] EntryPlanWatcher started — WAITING/READY/TRIGGERED plans are monitored independently of the browser');
 }
 
 main().catch((error) => {

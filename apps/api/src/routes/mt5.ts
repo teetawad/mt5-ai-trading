@@ -8,14 +8,15 @@ import {
   getMt5AnalysisDetail,
   getMt5Dashboard,
   getMt5MarketHours,
-  listActiveEntryPlans,
+  getMt5OpenPositions,
   listMt5TradeHistory,
   listMt5Instruments,
   scannerSnapshot,
   setMt5WatchlistSymbols,
   syncMt5Instruments,
 } from '../services/mt5-demo-lab-service';
-import { getMt5Status, listMt5Positions } from '../services/mt5-client';
+import { executeEntryPlanById, getEntryPlanWatcherStatus, listActiveEntryPlans } from '../services/mt5-entry-plan-watcher';
+import { getMt5Status } from '../services/mt5-client';
 import { loadMt5RiskSettings, mt5RiskSettingsRows } from '../config/mt5-risk-settings';
 
 export const mt5Router = Router();
@@ -152,7 +153,7 @@ mt5Router.post('/auto-demo/:symbol', requireOwner, async (req: Request, res: Res
 
 mt5Router.get('/positions', requireOwner, async (req: Request, res: Response) => {
   try {
-    res.json({ positions: await listMt5Positions(req.header('X-Request-ID') ?? undefined) });
+    res.json(await getMt5OpenPositions(getPool(), actor(req)));
   } catch (err) {
     mt5Error(res, err);
   }
@@ -171,6 +172,18 @@ mt5Router.get('/entry-plans', requireOwner, async (req: Request, res: Response) 
     res.json(await listActiveEntryPlans(getPool(), actor(req)));
   } catch (err) {
     mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/entry-watcher/status', requireOwner, async (_req: Request, res: Response) => {
+  res.json(getEntryPlanWatcherStatus());
+});
+
+mt5Router.post('/entry-plans/:id/execute', requireOwner, async (req: Request, res: Response) => {
+  try {
+    res.status(201).json(await executeEntryPlanById(getPool(), req.params.id, actor(req)));
+  } catch (err) {
+    res.status(422).json({ error: (err as Error).message });
   }
 });
 

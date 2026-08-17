@@ -155,6 +155,28 @@ async def positions(_: None = Depends(verify_internal_token)) -> list[dict[str, 
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/orders")
+async def pending_orders(_: None = Depends(verify_internal_token)) -> list[dict[str, Any]]:
+    try:
+        _adapter.ensure_connected()
+        return [_obj(order) for order in _adapter.orders_get()]
+    except MT5UnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/symbol-info/{symbol}")
+async def symbol_info(symbol: str, _: None = Depends(verify_internal_token)) -> dict[str, Any]:
+    try:
+        _adapter.ensure_connected()
+        _adapter.symbol_select(symbol, True)
+        info = _obj(_adapter.symbol_info(symbol))
+        if not info:
+            raise HTTPException(status_code=404, detail="Symbol info unavailable")
+        return info
+    except MT5UnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.post("/analyze/{symbol}")
 async def analyze(symbol: str, _: None = Depends(verify_internal_token)) -> dict[str, Any]:
     try:

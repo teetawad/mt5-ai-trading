@@ -1,0 +1,933 @@
+import Decimal from 'decimal.js';
+import { Pool } from 'pg';
+import { createAuditLog } from '../db/repositories/audit-logs';
+import {
+  checkMt5Order,
+  getMt5MarketStatus,
+  getMt5Status,
+  getMt5SymbolInfo,
+  getMt5Tick,
+  listMt5PendingOrders,
+  listMt5Positions,
+  sendMt5Order,
+  Mt5DecisionDTO,
+  Mt5OrderRequestDTO,
+} from './mt5-client';
+import { evaluateMt5Risk, normalizeVolume } from './mt5-risk-engine';
+import { loadMt5RiskSettings } from '../config/mt5-risk-settings';
+
+// ---------------------------------------------------------------------------
+// This module is the single EntryPlanWatcher. It is the ONLY place in the
+// Node API that transitions an mt5_entry_plans row toward execution and the
+// ONLY caller of checkMt5Order/sendMt5Order (which themselves call the Python
+// DemoExecutionGateway — the only order_send() caller in the whole codebase).
+//
+// It is deliberately separate from the H1 AI strategy scheduler
+// (mt5-hourly-scheduler.ts): the H1 scheduler creates/refreshes AI decisions
+// and entry plans from completed candles; this watcher only ever monitors an
+// already-created plan against live price and decides WAITING -> TRIGGERED ->
+// EXECUTING -> EXECUTED, independent of whether an H1 candle just closed.
+// ---------------------------------------------------------------------------
+
+export type EntryStrategy = 'MARKET_NOW' | 'PULLBACK' | 'BREAKOUT' | 'NO_ENTRY';
+export type EntryStatus =
+  | 'WAITING'
+  | 'READY'
+  | 'TRIGGERED'
+  | 'EXECUTING'
+  | 'EXECUTED'
+  | 'EXPIRED'
+  | 'CANCELLED'
+  | 'BLOCKED';
+
+export interface Mt5Actor {
+  actorId: string | null;
+  actorEmail: string;
+  requestId?: string | null;
+}
+
+// Strict entry-plan state machine. A transition is legal only if the target
+// status appears in the source status's list. EXECUTED/EXPIRED/CANCELLED are
+// terminal — nothing (including EXECUTING) may leave them.
+const VALID_TRANSITIONS: Record<EntryStatus, EntryStatus[]> = {
+  WAITING: ['READY', 'TRIGGERED', 'EXPIRED', 'CANCELLED', 'BLOCKED'],
+  READY: ['TRIGGERED', 'EXECUTING', 'EXPIRED', 'CANCELLED', 'BLOCKED', 'WAITING'],
+  TRIGGERED: ['EXECUTING', 'EXPIRED', 'CANCELLED', 'BLOCKED'],
+  EXECUTING: ['EXECUTED', 'BLOCKED', 'TRIGGERED'], // TRIGGERED only via crash reconciliation release
+  EXECUTED: [],
+  EXPIRED: [],
+  CANCELLED: [],
+  BLOCKED: [],
+};
+
+export function canTransition(from: EntryStatus, to: EntryStatus): boolean {
+  if (from === to) return true;
+  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+export type EntryPlanInput = {
+  decisionId?: string;
+  symbol: string;
+  side: 'BUY' | 'SELL' | 'NONE';
+  entryStrategy: EntryStrategy;
+  currentBid?: string | null;
+  currentAsk?: string | null;
+  currentPrice?: string | null;
+  entryZoneLow?: string | null;
+  entryZoneHigh?: string | null;
+  triggerPrice?: string | null;
+  referenceEntry?: string | null;
+  stopLoss?: string | null;
+  takeProfit?: string | null;
+  riskReward?: string | null;
+  recommendedVolume?: string | null;
+  maxPlannedLoss?: string | null;
+  targetProfit?: string | null;
+  modelVersion?: string | null;
+  confidence: number;
+  opportunityScore: number;
+  entryReason?: string | null;
+  signalCandleTimestamp: string;
+  validUntil: string;
+  marketStatus?: string;
+  dataStatus?: string;
+};
+
+function numberOrNull(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function isoValidUntil(signalCandleTimestamp: string, cfg: Record<string, unknown>, fallback?: string | null): string {
+  const hours = Number(cfg.mt5_entry_plan_valid_hours ?? 2);
+  const signalTime = new Date(signalCandleTimestamp);
+  if (Number.isFinite(signalTime.getTime()) && Number.isFinite(hours) && hours > 0) {
+    return new Date(signalTime.getTime() + hours * 60 * 60 * 1000).toISOString();
+  }
+  return fallback && Number.isFinite(new Date(fallback).getTime()) ? new Date(fallback).toISOString() : new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+}
+
+/** BUY must consider the executable ask price; SELL must consider the executable bid price. */
+export function currentPriceForSide(input: { side: string; currentBid?: string | null; currentAsk?: string | null; currentPrice?: string | null }) {
+  if (input.side === 'BUY') return numberOrNull(input.currentAsk ?? input.currentPrice);
+  if (input.side === 'SELL') return numberOrNull(input.currentBid ?? input.currentPrice);
+  return numberOrNull(input.currentPrice);
+}
+
+function computeRawEntryStatus(input: EntryPlanInput, now = new Date()): EntryStatus {
+  if (input.entryStrategy === 'NO_ENTRY' || input.side === 'NONE') return 'BLOCKED';
+  if (new Date(input.validUntil).getTime() <= now.getTime()) return 'EXPIRED';
+  if (input.marketStatus && input.marketStatus !== 'OPEN') return 'BLOCKED';
+  if (input.dataStatus && input.dataStatus !== 'LIVE') return 'BLOCKED';
+  const current = currentPriceForSide(input);
+  if (current === null) return 'BLOCKED';
+  if (input.entryStrategy === 'MARKET_NOW') return 'READY';
+  if (input.entryStrategy === 'PULLBACK') {
+    const low = numberOrNull(input.entryZoneLow);
+    const high = numberOrNull(input.entryZoneHigh);
+    if (low === null || high === null) return 'BLOCKED';
+    return current >= Math.min(low, high) && current <= Math.max(low, high) ? 'TRIGGERED' : 'WAITING';
+  }
+  const trigger = numberOrNull(input.triggerPrice);
+  if (trigger === null) return 'BLOCKED';
+  if (input.side === 'BUY') return current >= trigger ? 'TRIGGERED' : 'WAITING';
+  return current <= trigger ? 'TRIGGERED' : 'WAITING';
+}
+
+/**
+ * Computes the entry status for a fresh plan build. Unlike refreshPlanStatus,
+ * this has no prior persisted status to stay "sticky" against, so it is only
+ * used when a plan is first created/rebuilt from a new AI decision.
+ */
+export function computeEntryStatus(input: EntryPlanInput, now = new Date()): EntryStatus {
+  return computeRawEntryStatus(input, now);
+}
+
+/**
+ * Refreshes an already-persisted plan's status against a live tick. Once a
+ * plan has reached TRIGGERED it stays TRIGGERED even if price oscillates back
+ * out of the zone/trigger — the plan already committed to a claim+execute
+ * attempt (or a BLOCKED/EXPIRED outcome), so flipping it back to WAITING
+ * would let the same setup "re-trigger" every time price crosses the
+ * boundary. Safety re-checks (market closed, stale data, expiry) still apply.
+ */
+export function refreshPlanStatus(priorStatus: EntryStatus, input: EntryPlanInput, now = new Date()): EntryStatus {
+  const computed = computeRawEntryStatus(input, now);
+  if (priorStatus === 'TRIGGERED' && (computed === 'WAITING' || computed === 'READY')) return 'TRIGGERED';
+  return computed;
+}
+
+export function buildEntryPlan(decision: Mt5DecisionDTO, risk: { recommendedVolume?: string; riskAmount?: string }, cfg: Record<string, unknown>): EntryPlanInput {
+  const side = decision.decision === 'BUY' || decision.decision === 'SELL' ? decision.decision : 'NONE';
+  const strategy = decision.entry_strategy ?? (side === 'NONE' ? 'NO_ENTRY' : 'MARKET_NOW');
+  const validUntil = isoValidUntil(decision.signal_candle_timestamp, cfg, decision.valid_until);
+  const rr = numberOrNull(decision.risk_reward);
+  const riskAmount = numberOrNull(risk.riskAmount);
+  const plan: EntryPlanInput = {
+    symbol: decision.symbol,
+    side,
+    entryStrategy: strategy,
+    currentBid: decision.bid ?? null,
+    currentAsk: decision.ask ?? null,
+    currentPrice: decision.current_price ?? (side === 'BUY' ? decision.ask : decision.bid) ?? decision.reference_entry,
+    entryZoneLow: decision.entry_zone_low ?? null,
+    entryZoneHigh: decision.entry_zone_high ?? null,
+    triggerPrice: decision.trigger_price ?? null,
+    referenceEntry: decision.reference_entry,
+    stopLoss: decision.stop_loss,
+    takeProfit: decision.take_profit,
+    riskReward: decision.risk_reward,
+    recommendedVolume: risk.recommendedVolume ?? null,
+    maxPlannedLoss: risk.riskAmount ?? null,
+    targetProfit: riskAmount !== null && rr !== null ? (riskAmount * rr).toFixed(8) : null,
+    modelVersion: decision.model_version ?? null,
+    confidence: decision.confidence,
+    opportunityScore: decision.opportunity_score,
+    entryReason: decision.entry_reason ?? null,
+    signalCandleTimestamp: decision.signal_candle_timestamp,
+    validUntil,
+    marketStatus: decision.market_status,
+    dataStatus: decision.data_status,
+  };
+  return plan;
+}
+
+export function entryStatusMessage(status: string, blockReason?: string | null): string {
+  const messages: Record<string, string> = {
+    WAITING: 'Waiting for price to reach the AI entry zone.',
+    READY: 'AI considers the current price acceptable to enter now.',
+    TRIGGERED: 'Entry condition reached. Safety checks are running.',
+    EXECUTING: 'Sending DEMO order to MT5.',
+    EXECUTED: 'DEMO trade opened successfully.',
+    EXPIRED: 'The entry price was not reached before the plan expired.',
+    CANCELLED: 'This entry plan was cancelled.',
+    BLOCKED: 'Entry condition was reached but the trade was blocked.',
+  };
+  const base = messages[status] ?? status;
+  if (status === 'BLOCKED' && blockReason) return `${base} Reason: ${blockReason}.`;
+  return base;
+}
+
+export function planDto(plan: EntryPlanInput, status?: EntryStatus) {
+  const currentStatus = status ?? computeEntryStatus(plan);
+  return {
+    side: plan.side,
+    entry_strategy: plan.entryStrategy,
+    current_bid: plan.currentBid ?? null,
+    current_ask: plan.currentAsk ?? null,
+    current_price: plan.currentPrice ?? null,
+    entry_zone_low: plan.entryZoneLow ?? null,
+    entry_zone_high: plan.entryZoneHigh ?? null,
+    trigger_price: plan.triggerPrice ?? null,
+    reference_entry: plan.referenceEntry ?? null,
+    stop_loss: plan.stopLoss ?? null,
+    take_profit: plan.takeProfit ?? null,
+    risk_reward: plan.riskReward ?? null,
+    recommended_volume: plan.recommendedVolume ?? null,
+    max_planned_loss: plan.maxPlannedLoss ?? null,
+    target_profit: plan.targetProfit ?? null,
+    model_version: plan.modelVersion ?? null,
+    confidence: plan.confidence,
+    opportunity_score: plan.opportunityScore,
+    entry_reason: plan.entryReason ?? null,
+    signal_candle_timestamp: plan.signalCandleTimestamp,
+    valid_until: plan.validUntil,
+    current_entry_status: currentStatus,
+    status_message: entryStatusMessage(currentStatus),
+  };
+}
+
+export async function persistEntryPlan(pool: Pool, decisionId: string, plan: EntryPlanInput, status: EntryStatus = computeEntryStatus(plan)) {
+  const result = await pool.query(
+    `INSERT INTO mt5_entry_plans(ai_decision_id, symbol, side, entry_strategy, status,
+        current_bid, current_ask, current_price, entry_zone_low, entry_zone_high,
+        trigger_price, reference_entry, stop_loss, take_profit, risk_reward,
+        recommended_volume, max_planned_loss, target_profit, model_version,
+        confidence, opportunity_score,
+        entry_reason, signal_candle_timestamp, valid_until,
+        triggered_at, expired_at, reached_trigger, time_to_trigger_seconds)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
+        CASE WHEN $5 = 'TRIGGERED' THEN now() ELSE NULL END,
+        CASE WHEN $5 = 'EXPIRED' THEN now() ELSE NULL END,
+        CASE WHEN $5 = 'TRIGGERED' THEN true ELSE false END,
+        CASE WHEN $5 = 'TRIGGERED' THEN GREATEST(0, EXTRACT(EPOCH FROM (now() - $23::timestamptz)))::int ELSE NULL END)
+     ON CONFLICT(ai_decision_id) DO UPDATE SET
+        -- Never let a refresh clobber a plan that has already moved past the
+        -- point this caller knows about (e.g. the watcher already claimed it
+        -- for execution between this row being read and this write landing).
+        status=CASE
+          WHEN mt5_entry_plans.status IN ('EXECUTING','EXECUTED','EXPIRED','CANCELLED') THEN mt5_entry_plans.status
+          ELSE EXCLUDED.status
+        END,
+        current_bid=EXCLUDED.current_bid,
+        current_ask=EXCLUDED.current_ask,
+        current_price=EXCLUDED.current_price,
+        entry_zone_low=EXCLUDED.entry_zone_low,
+        entry_zone_high=EXCLUDED.entry_zone_high,
+        trigger_price=EXCLUDED.trigger_price,
+        reference_entry=EXCLUDED.reference_entry,
+        stop_loss=EXCLUDED.stop_loss,
+        take_profit=EXCLUDED.take_profit,
+        risk_reward=EXCLUDED.risk_reward,
+        recommended_volume=EXCLUDED.recommended_volume,
+        max_planned_loss=EXCLUDED.max_planned_loss,
+        target_profit=EXCLUDED.target_profit,
+        model_version=EXCLUDED.model_version,
+        confidence=EXCLUDED.confidence,
+        opportunity_score=EXCLUDED.opportunity_score,
+        entry_reason=EXCLUDED.entry_reason,
+        valid_until=EXCLUDED.valid_until,
+        triggered_at=COALESCE(mt5_entry_plans.triggered_at, EXCLUDED.triggered_at),
+        expired_at=COALESCE(mt5_entry_plans.expired_at, EXCLUDED.expired_at),
+        reached_trigger=mt5_entry_plans.reached_trigger OR EXCLUDED.reached_trigger,
+        time_to_trigger_seconds=COALESCE(mt5_entry_plans.time_to_trigger_seconds, EXCLUDED.time_to_trigger_seconds),
+        updated_at=now()
+     RETURNING *`,
+    [
+      decisionId,
+      plan.symbol,
+      plan.side,
+      plan.entryStrategy,
+      status,
+      plan.currentBid ?? null,
+      plan.currentAsk ?? null,
+      plan.currentPrice ?? null,
+      plan.entryZoneLow ?? null,
+      plan.entryZoneHigh ?? null,
+      plan.triggerPrice ?? null,
+      plan.referenceEntry ?? null,
+      plan.stopLoss ?? null,
+      plan.takeProfit ?? null,
+      plan.riskReward ?? null,
+      plan.recommendedVolume ?? null,
+      plan.maxPlannedLoss ?? null,
+      plan.targetProfit ?? null,
+      plan.modelVersion ?? null,
+      plan.confidence,
+      plan.opportunityScore,
+      plan.entryReason ?? null,
+      plan.signalCandleTimestamp,
+      plan.validUntil,
+    ],
+  );
+  return result.rows[0];
+}
+
+function dbPlanToInput(row: Record<string, unknown>, tick: Record<string, unknown>, market: Record<string, unknown>): EntryPlanInput {
+  const side = String(row.side) === 'BUY' || String(row.side) === 'SELL' ? (String(row.side) as 'BUY' | 'SELL') : 'NONE';
+  return {
+    decisionId: String(row.ai_decision_id),
+    symbol: String(row.symbol),
+    side,
+    entryStrategy: String(row.entry_strategy) as EntryStrategy,
+    currentBid: tick.bid !== undefined ? String(tick.bid) : row.current_bid ? String(row.current_bid) : null,
+    currentAsk: tick.ask !== undefined ? String(tick.ask) : row.current_ask ? String(row.current_ask) : null,
+    currentPrice: row.current_price ? String(row.current_price) : null,
+    entryZoneLow: row.entry_zone_low ? String(row.entry_zone_low) : null,
+    entryZoneHigh: row.entry_zone_high ? String(row.entry_zone_high) : null,
+    triggerPrice: row.trigger_price ? String(row.trigger_price) : null,
+    referenceEntry: row.reference_entry ? String(row.reference_entry) : null,
+    stopLoss: row.stop_loss ? String(row.stop_loss) : null,
+    takeProfit: row.take_profit ? String(row.take_profit) : null,
+    riskReward: row.risk_reward ? String(row.risk_reward) : null,
+    recommendedVolume: row.recommended_volume ? String(row.recommended_volume) : null,
+    maxPlannedLoss: row.max_planned_loss ? String(row.max_planned_loss) : null,
+    targetProfit: row.target_profit ? String(row.target_profit) : null,
+    modelVersion: row.model_version ? String(row.model_version) : null,
+    confidence: Number(row.confidence ?? 0),
+    opportunityScore: Number(row.opportunity_score ?? 0),
+    entryReason: row.entry_reason ? String(row.entry_reason) : null,
+    signalCandleTimestamp: new Date(String(row.signal_candle_timestamp)).toISOString(),
+    validUntil: new Date(String(row.valid_until)).toISOString(),
+    marketStatus: String(market.market_status ?? 'UNKNOWN'),
+    dataStatus: String(market.data_status ?? 'DISCONNECTED'),
+  };
+}
+
+async function refreshStoredEntryPlan(pool: Pool, row: Record<string, unknown>, actor: Mt5Actor) {
+  const [tick, market] = await Promise.all([
+    getMt5Tick(String(row.symbol), actor.requestId ?? undefined).catch(() => ({})),
+    getMt5MarketStatus(String(row.symbol), actor.requestId ?? undefined).catch(() => ({})),
+  ]);
+  const plan = dbPlanToInput(row, tick, market);
+  const current = currentPriceForSide(plan);
+  const updated = current === null ? plan : { ...plan, currentPrice: String(current) };
+  const status = refreshPlanStatus(String(row.status) as EntryStatus, updated);
+  const saved = await persistEntryPlan(pool, String(row.ai_decision_id), updated, status);
+  return { plan: saved, status: String(saved.status) as EntryStatus };
+}
+
+export async function listActiveEntryPlans(pool: Pool, actor: Mt5Actor) {
+  const result = await pool.query(
+    `SELECT * FROM mt5_entry_plans
+     WHERE status IN ('WAITING','READY','TRIGGERED','EXECUTING','BLOCKED')
+       AND valid_until >= now() - interval '1 hour'
+     ORDER BY created_at DESC
+     LIMIT 100`,
+  );
+  const plans = [];
+  for (const row of result.rows) {
+    if (row.status === 'EXECUTING') {
+      plans.push(row);
+      continue;
+    }
+    plans.push((await refreshStoredEntryPlan(pool, row, actor)).plan);
+  }
+  return { plans };
+}
+
+// ---------------------------------------------------------------------------
+// Execution engine
+// ---------------------------------------------------------------------------
+
+interface ExecutionOutcome {
+  executed: boolean;
+  entryPlan: Record<string, unknown>;
+  reason?: string;
+  risk?: Record<string, unknown>;
+  check?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+}
+
+const RETCODE_REASON: Record<number, string> = {
+  10004: 'REQUOTE',
+  10006: 'ORDER_REJECTED',
+  10013: 'INVALID_REQUEST',
+  10014: 'INVALID_VOLUME',
+  10015: 'INVALID_PRICE',
+  10016: 'INVALID_STOPS',
+  10017: 'TRADE_DISABLED',
+  10018: 'MARKET_CLOSED',
+  10019: 'MARGIN_INSUFFICIENT',
+  10020: 'PRICE_CHANGED',
+  10021: 'NO_QUOTES',
+  10024: 'TOO_MANY_REQUESTS',
+  10027: 'AUTOTRADING_DISABLED',
+  10031: 'NO_CONNECTION',
+};
+
+function retcodeReason(code: number): string {
+  return RETCODE_REASON[code] ?? `MT5_RETCODE_${code}`;
+}
+
+/**
+ * Atomically claims a WAITING/READY/TRIGGERED plan for execution. The
+ * conditional UPDATE (single-row, single-statement) is what makes this safe
+ * under concurrent watcher ticks, a manual "Trade in Demo" click racing the
+ * watcher, or an API/worker restart: only one caller's UPDATE can match the
+ * WHERE clause before the row's status/execution_key change, so every other
+ * caller gets 0 rows back and backs off instead of double-executing.
+ */
+async function claimPlanForExecution(pool: Pool, planId: string): Promise<Record<string, unknown> | null> {
+  const key = `entry-plan:${planId}:${Date.now()}`;
+  const result = await pool.query(
+    `UPDATE mt5_entry_plans
+     SET status='EXECUTING', executing_at=now(), execution_key=$2, updated_at=now()
+     WHERE id=$1 AND status IN ('TRIGGERED','READY') AND execution_key IS NULL
+     RETURNING *`,
+    [planId, key],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function blockPlan(pool: Pool, plan: Record<string, unknown>, reason: string, message?: string): Promise<ExecutionOutcome> {
+  await pool.query(
+    `UPDATE mt5_entry_plans SET status='BLOCKED', blocked_at=now(), block_reason=$2, updated_at=now()
+     WHERE id=$1 AND status NOT IN ('EXECUTED','EXPIRED','CANCELLED')`,
+    [plan.id, reason],
+  );
+  return { executed: false, entryPlan: { ...plan, status: 'BLOCKED', block_reason: reason }, reason: message ?? reason };
+}
+
+async function expirePlanRow(pool: Pool, plan: Record<string, unknown>): Promise<ExecutionOutcome> {
+  await pool.query(
+    `UPDATE mt5_entry_plans SET status='EXPIRED', expired_at=now(), updated_at=now()
+     WHERE id=$1 AND status NOT IN ('EXECUTED','EXPIRED','CANCELLED')`,
+    [plan.id],
+  );
+  return { executed: false, entryPlan: { ...plan, status: 'EXPIRED' }, reason: 'PLAN_EXPIRED' };
+}
+
+function instrumentBounds(info: Record<string, unknown> | null) {
+  const min = numberOrNull(info?.volume_min) ?? 0.01;
+  const max = numberOrNull(info?.volume_max) ?? 100;
+  const step = numberOrNull(info?.volume_step) ?? 0.01;
+  return { min: new Decimal(min), max: new Decimal(max), step: new Decimal(step) };
+}
+
+function computeSpreadPoints(tick: Record<string, unknown> | null, info: Record<string, unknown> | null): number | undefined {
+  const bid = numberOrNull(tick?.bid);
+  const ask = numberOrNull(tick?.ask);
+  const point = numberOrNull(info?.point);
+  if (bid === null || ask === null || !point) return undefined;
+  return Math.round((ask - bid) / point);
+}
+
+function validateStopsAndTargets(
+  side: 'BUY' | 'SELL',
+  actualEntry: number,
+  sl: number,
+  tp: number,
+  info: Record<string, unknown> | null,
+): { ok: true } | { ok: false; reason: 'INVALID_SL' | 'INVALID_TP'; message: string } {
+  if (!Number.isFinite(sl)) return { ok: false, reason: 'INVALID_SL', message: 'Stop Loss is missing or not a number' };
+  if (!Number.isFinite(tp)) return { ok: false, reason: 'INVALID_TP', message: 'Take Profit is missing or not a number' };
+  const point = numberOrNull(info?.point) ?? numberOrNull(info?.trade_tick_size) ?? 0;
+  const stopsLevelPoints = Number(info?.trade_stops_level ?? 0);
+  const freezeLevelPoints = Number(info?.trade_freeze_level ?? 0);
+  const minDistance = point > 0 ? Math.max(stopsLevelPoints, freezeLevelPoints) * point : 0;
+  if (side === 'BUY') {
+    if (!(sl < actualEntry)) return { ok: false, reason: 'INVALID_SL', message: 'Stop Loss must be below the actual entry price for BUY' };
+    if (!(tp > actualEntry)) return { ok: false, reason: 'INVALID_TP', message: 'Take Profit must be above the actual entry price for BUY' };
+    if (minDistance > 0 && actualEntry - sl < minDistance) return { ok: false, reason: 'INVALID_SL', message: 'Stop Loss is inside the broker minimum stops/freeze level' };
+    if (minDistance > 0 && tp - actualEntry < minDistance) return { ok: false, reason: 'INVALID_TP', message: 'Take Profit is inside the broker minimum stops/freeze level' };
+  } else {
+    if (!(sl > actualEntry)) return { ok: false, reason: 'INVALID_SL', message: 'Stop Loss must be above the actual entry price for SELL' };
+    if (!(tp < actualEntry)) return { ok: false, reason: 'INVALID_TP', message: 'Take Profit must be below the actual entry price for SELL' };
+    if (minDistance > 0 && sl - actualEntry < minDistance) return { ok: false, reason: 'INVALID_SL', message: 'Stop Loss is inside the broker minimum stops/freeze level' };
+    if (minDistance > 0 && actualEntry - tp < minDistance) return { ok: false, reason: 'INVALID_TP', message: 'Take Profit is inside the broker minimum stops/freeze level' };
+  }
+  return { ok: true };
+}
+
+async function countTradesToday(pool: Pool): Promise<number> {
+  const result = await pool.query("SELECT count(*)::int AS c FROM trade_outcomes WHERE opened_at >= date_trunc('day', now())");
+  return Number(result.rows[0]?.c ?? 0);
+}
+
+/**
+ * Executes a plan that has already been atomically claimed (status is
+ * EXECUTING and belongs to this call). This is the mandatory "re-check
+ * everything" step: it reloads MT5 connection/account/terminal state, the
+ * latest tick and market session, live positions and pending orders, then
+ * re-runs the full Risk Engine, recomputes position size against the actual
+ * instrument's volume bounds, and validates SL/TP against the actual entry
+ * and broker stops/freeze level, before ever calling order_check/order_send.
+ */
+export async function executeClaimedPlan(pool: Pool, claimedPlan: Record<string, unknown>, actor: Mt5Actor): Promise<ExecutionOutcome> {
+  const plan = claimedPlan;
+  try {
+    const cfg = loadMt5RiskSettings() as unknown as Record<string, unknown>;
+
+    if (new Date(String(plan.valid_until)).getTime() <= Date.now()) {
+      return await expirePlanRow(pool, plan);
+    }
+    if (cfg.mt5_kill_switch_enabled === true) {
+      return await blockPlan(pool, plan, 'RISK_LIMIT', 'The demo safety switch (kill switch) is ON');
+    }
+
+    const status = await getMt5Status(actor.requestId ?? undefined).catch(() => null);
+    if (!status || !status.demo_verified) {
+      return await blockPlan(pool, plan, 'DEMO_VERIFICATION_FAILED', status?.blocked_reason ?? 'MT5 DEMO verification failed');
+    }
+
+    const symbol = String(plan.symbol);
+    const side = String(plan.side) as 'BUY' | 'SELL';
+    const [tick, market, symbolInfo, positions, pendingOrders] = await Promise.all([
+      getMt5Tick(symbol, actor.requestId ?? undefined).catch(() => null),
+      getMt5MarketStatus(symbol, actor.requestId ?? undefined).catch(() => null),
+      getMt5SymbolInfo(symbol, actor.requestId ?? undefined).catch(() => null),
+      listMt5Positions(actor.requestId ?? undefined).catch(() => []),
+      listMt5PendingOrders(actor.requestId ?? undefined).catch(() => []),
+    ]);
+    if (!tick || !market) return await blockPlan(pool, plan, 'STALE_DATA', 'Could not read a fresh MT5 quote or market status');
+    if (market.market_status !== 'OPEN') return await blockPlan(pool, plan, 'MARKET_CLOSED', `Broker market status is ${String(market.market_status)}`);
+    if (market.data_status !== 'LIVE') return await blockPlan(pool, plan, 'STALE_DATA', `Broker data status is ${String(market.data_status)}`);
+
+    const actualEntry = side === 'BUY' ? numberOrNull(tick.ask) : numberOrNull(tick.bid);
+    if (actualEntry === null || actualEntry <= 0) return await blockPlan(pool, plan, 'STALE_DATA', 'Invalid executable bid/ask price');
+
+    if (positions.some((position) => String(position.symbol) === symbol)) {
+      return await blockPlan(pool, plan, 'POSITION_EXISTS', `An open position already exists for ${symbol}`);
+    }
+    if (pendingOrders.some((order) => String(order.symbol) === symbol)) {
+      return await blockPlan(pool, plan, 'PENDING_ORDER', `A pending order already exists for ${symbol}`);
+    }
+
+    const cooldownMinutes = Number(cfg.mt5_cooldown_minutes ?? 60);
+    if (cooldownMinutes > 0) {
+      const lastTrade = await pool.query('SELECT opened_at FROM trade_outcomes WHERE symbol=$1 ORDER BY opened_at DESC LIMIT 1', [symbol]);
+      const lastOpenedAt = lastTrade.rows[0]?.opened_at;
+      if (lastOpenedAt) {
+        const minutesSince = (Date.now() - new Date(lastOpenedAt).getTime()) / 60000;
+        if (minutesSince < cooldownMinutes) {
+          return await blockPlan(pool, plan, 'COOLDOWN', `${symbol} is in a ${cooldownMinutes}-minute cooldown after the last demo trade`);
+        }
+      }
+    }
+
+    const tradesToday = await countTradesToday(pool);
+    const risk = evaluateMt5Risk({
+      decision: side,
+      referenceEntry: String(actualEntry),
+      stopLoss: plan.stop_loss ? String(plan.stop_loss) : null,
+      takeProfit: plan.take_profit ? String(plan.take_profit) : null,
+      riskReward: plan.risk_reward ? String(plan.risk_reward) : null,
+      confidence: Number(plan.confidence ?? 0),
+      account: status.account,
+      terminal: status.terminal,
+      settings: cfg,
+      openPositions: positions.length,
+      tradesToday,
+      quoteAgeSeconds: typeof market.quote_age_seconds === 'number' ? market.quote_age_seconds : undefined,
+      spreadPoints: computeSpreadPoints(tick, symbolInfo),
+      marketStatus: market.market_status as 'OPEN' | 'CLOSED' | 'QUOTE_ONLY' | 'TRADE_DISABLED' | 'UNKNOWN',
+      dataStatus: market.data_status as 'LIVE' | 'STALE' | 'DISCONNECTED',
+    });
+
+    const riskRow = await pool.query(
+      'INSERT INTO risk_evaluations(ai_decision_id, symbol, result, failed_rules, reason, snapshot) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',
+      [plan.ai_decision_id, symbol, risk.result, JSON.stringify(risk.failedRules), risk.reason, risk.snapshot],
+    );
+
+    const bounds = instrumentBounds(symbolInfo);
+    const finalVolume = normalizeVolume(new Decimal(risk.recommendedVolume), bounds.min, bounds.max, bounds.step);
+
+    if (risk.result !== 'PASS') {
+      return await blockPlan(pool, plan, risk.failedRules[0] ?? 'RISK_LIMIT', risk.reason ?? 'Risk Engine rejected this trade');
+    }
+    if (finalVolume.lte(0)) {
+      return await blockPlan(pool, plan, 'POSITION_SIZE_INVALID', 'Recalculated lot size is below the symbol minimum volume');
+    }
+
+    const slTp = validateStopsAndTargets(side, actualEntry, Number(plan.stop_loss), Number(plan.take_profit), symbolInfo);
+    if (!slTp.ok) return await blockPlan(pool, plan, slTp.reason, slTp.message);
+
+    await pool.query(
+      `UPDATE mt5_entry_plans SET final_volume=$2, actual_entry=$3, updated_at=now() WHERE id=$1 AND status='EXECUTING'`,
+      [plan.id, finalVolume.toFixed(8), actualEntry],
+    );
+
+    const executionKey = String(plan.execution_key ?? `entry-plan:${plan.id}`);
+    const request: Mt5OrderRequestDTO = {
+      idempotency_key: executionKey,
+      symbol,
+      side,
+      volume: Number(finalVolume),
+      stop_loss: Number(plan.stop_loss),
+      take_profit: Number(plan.take_profit),
+      deviation: Number(cfg.mt5_allowed_deviation_points ?? 20),
+      comment: `MT5_PLAN_${plan.id}`,
+    };
+
+    let check: Record<string, unknown>;
+    try {
+      check = await checkMt5Order(request, actor.requestId ?? undefined);
+    } catch (err) {
+      return await blockPlan(pool, plan, 'DEMO_VERIFICATION_FAILED', (err as Error).message);
+    }
+    const checkRetcode = Number(check.retcode ?? 0);
+    if (![0, 10008, 10009].includes(checkRetcode)) {
+      return await blockPlan(pool, plan, retcodeReason(checkRetcode), `order_check rejected the request: retcode ${checkRetcode}`);
+    }
+
+    let result: Record<string, unknown>;
+    try {
+      result = await sendMt5Order(request, actor.requestId ?? undefined);
+    } catch (err) {
+      // Ambiguous outcome: the order may or may not have reached MT5. Do NOT
+      // guess and do NOT retry from here — leave the plan in EXECUTING
+      // exactly as claimed. reconcileStuckExecutions (run at the top of
+      // every watcher tick and on startup) is the single place that decides
+      // this plan's fate once the grace period elapses: it checks
+      // trade_outcomes and live MT5 positions by comment before ever
+      // releasing the plan back to TRIGGERED for a fresh, fully re-checked
+      // retry, so a slow-but-successful order_send can never be duplicated.
+      return { executed: false, entryPlan: { ...plan, status: 'EXECUTING' }, reason: `order_send did not return a confirmed result: ${(err as Error).message}` };
+    }
+
+    const retcode = Number(result.retcode ?? 0);
+    if (![0, 10008, 10009].includes(retcode)) {
+      return await blockPlan(pool, plan, retcodeReason(retcode), `MT5 order_send rejected the order: retcode ${retcode}`);
+    }
+
+    const orderTicket = String(result.order ?? result.deal ?? executionKey);
+    const dealTicket = result.deal !== undefined ? String(result.deal) : null;
+    const slippage = new Decimal(actualEntry).minus(new Decimal(String(plan.reference_entry ?? actualEntry))).toFixed(8);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO trade_outcomes(symbol, ai_decision_id, entry_plan_id, order_ticket, deal_ticket, retcode, side,
+            volume, expected_entry, actual_entry, stop_loss, take_profit, risk_amount, risk_reward, slippage, opened_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+         ON CONFLICT (entry_plan_id) WHERE entry_plan_id IS NOT NULL DO NOTHING`,
+        [
+          symbol,
+          plan.ai_decision_id,
+          plan.id,
+          orderTicket,
+          dealTicket,
+          retcode,
+          side,
+          finalVolume.toFixed(8),
+          plan.reference_entry,
+          actualEntry,
+          plan.stop_loss,
+          plan.take_profit,
+          risk.riskAmount,
+          plan.risk_reward,
+          slippage,
+        ],
+      );
+      await client.query(
+        `UPDATE mt5_entry_plans SET status='EXECUTED', executed_at=now(), actual_entry=$2, final_volume=$3,
+            order_ticket=$4, deal_ticket=$5, retcode=$6, updated_at=now()
+         WHERE id=$1 AND status='EXECUTING'`,
+        [plan.id, actualEntry, finalVolume.toFixed(8), orderTicket, dealTicket, retcode],
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    await createAuditLog(pool, {
+      eventType: 'MT5_ENTRY_PLAN_EXECUTED',
+      actorId: actor.actorId,
+      actorEmail: actor.actorEmail,
+      entityType: 'mt5_entry_plan',
+      entityId: String(plan.id),
+      action: 'ENTRY_PLAN_EXECUTE',
+      afterData: { check, result },
+      requestId: actor.requestId ?? null,
+    });
+
+    return {
+      executed: true,
+      entryPlan: { ...plan, status: 'EXECUTED', actual_entry: actualEntry, final_volume: finalVolume.toFixed(8), order_ticket: orderTicket },
+      risk: riskRow.rows[0],
+      check,
+      result,
+    };
+  } catch (err) {
+    await pool.query(
+      `UPDATE mt5_entry_plans SET status='BLOCKED', blocked_at=now(), block_reason=$2, updated_at=now() WHERE id=$1 AND status='EXECUTING'`,
+      [plan.id, 'UNEXPECTED_ERROR'],
+    );
+    throw err;
+  }
+}
+
+/**
+ * Reconciles plans stuck in EXECUTING past a grace period (worker crash,
+ * API restart, or an order_send call that never returned). It never
+ * assumes an order was NOT placed: it first checks the local trade_outcomes
+ * record, then live MT5 positions by comment, and only releases the plan
+ * back to TRIGGERED for a safe retry when neither shows evidence of an
+ * actual MT5 order.
+ */
+export async function reconcileStuckExecutions(pool: Pool, actor: Mt5Actor, graceSeconds = 120): Promise<void> {
+  const stuck = await pool.query(
+    `SELECT * FROM mt5_entry_plans WHERE status='EXECUTING' AND executing_at <= now() - ($1 || ' seconds')::interval`,
+    [graceSeconds],
+  );
+  if (!stuck.rows.length) return;
+
+  const positions = await listMt5Positions(actor.requestId ?? undefined).catch(() => []);
+
+  for (const row of stuck.rows) {
+    const outcome = await pool.query('SELECT * FROM trade_outcomes WHERE entry_plan_id = $1', [row.id]);
+    if (outcome.rows[0]) {
+      const o = outcome.rows[0];
+      await pool.query(
+        `UPDATE mt5_entry_plans SET status='EXECUTED', executed_at=COALESCE(executed_at, now()),
+            actual_entry=COALESCE(actual_entry, $2), final_volume=COALESCE(final_volume, $3),
+            order_ticket=COALESCE(order_ticket, $4), updated_at=now()
+         WHERE id=$1 AND status='EXECUTING'`,
+        [row.id, o.actual_entry, o.volume, o.order_ticket],
+      );
+      continue;
+    }
+
+    const matched = positions.find((position) => String(position.comment ?? '').includes(String(row.id)));
+    if (matched) {
+      const actualEntry = numberOrNull(matched.price_open) ?? row.reference_entry;
+      await pool.query(
+        `INSERT INTO trade_outcomes(symbol, ai_decision_id, entry_plan_id, order_ticket, side, volume,
+            expected_entry, actual_entry, stop_loss, take_profit, risk_amount, risk_reward, opened_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+         ON CONFLICT (entry_plan_id) WHERE entry_plan_id IS NOT NULL DO NOTHING`,
+        [
+          row.symbol,
+          row.ai_decision_id,
+          row.id,
+          String(matched.ticket ?? ''),
+          row.side,
+          matched.volume ?? row.recommended_volume,
+          row.reference_entry,
+          actualEntry,
+          row.stop_loss,
+          row.take_profit,
+          row.max_planned_loss,
+          row.risk_reward,
+        ],
+      );
+      await pool.query(
+        `UPDATE mt5_entry_plans SET status='EXECUTED', executed_at=now(), actual_entry=$2, order_ticket=$3, updated_at=now()
+         WHERE id=$1 AND status='EXECUTING'`,
+        [row.id, actualEntry, String(matched.ticket ?? '')],
+      );
+      continue;
+    }
+
+    // No local record and no live MT5 position with this plan's comment —
+    // safe to release for a fresh, fully re-checked retry.
+    await pool.query(
+      `UPDATE mt5_entry_plans SET status='TRIGGERED', executing_at=NULL, execution_key=NULL, updated_at=now()
+       WHERE id=$1 AND status='EXECUTING'`,
+      [row.id],
+    );
+  }
+}
+
+async function expireStalePlans(pool: Pool): Promise<void> {
+  await pool.query(
+    `UPDATE mt5_entry_plans SET status='EXPIRED', expired_at=now(), updated_at=now()
+     WHERE status IN ('WAITING','READY','TRIGGERED') AND valid_until <= now()`,
+  );
+}
+
+/**
+ * Runs one watcher pass over active plans (WAITING/READY/TRIGGERED). NO_ENTRY
+ * plans are never persisted with these statuses (buildEntryPlan marks them
+ * BLOCKED immediately), so this query structurally never sees them.
+ */
+export async function runEntryPlanWatcherTick(pool: Pool, actor: Mt5Actor, autoDemoEnabled: boolean) {
+  await reconcileStuckExecutions(pool, actor).catch((err) => {
+    console.warn('[mt5-entry-plan-watcher] reconciliation failed:', (err as Error).message);
+  });
+  await expireStalePlans(pool).catch(() => undefined);
+
+  const result = await pool.query(
+    `SELECT * FROM mt5_entry_plans WHERE status IN ('WAITING','READY','TRIGGERED') ORDER BY created_at ASC LIMIT 50`,
+  );
+  const outcomes: ExecutionOutcome[] = [];
+  for (const row of result.rows) {
+    if (new Date(String(row.valid_until)).getTime() <= Date.now()) {
+      outcomes.push(await expirePlanRow(pool, row));
+      continue;
+    }
+    const refreshed = await refreshStoredEntryPlan(pool, row, actor);
+    if ((refreshed.status === 'TRIGGERED' || refreshed.status === 'READY') && autoDemoEnabled) {
+      const claimed = await claimPlanForExecution(pool, String(refreshed.plan.id));
+      if (!claimed) {
+        outcomes.push({ executed: false, entryPlan: refreshed.plan, reason: 'Plan is already being processed' });
+        continue;
+      }
+      outcomes.push(await executeClaimedPlan(pool, claimed, actor));
+    } else {
+      outcomes.push({ executed: false, entryPlan: refreshed.plan });
+    }
+  }
+  return { processed: outcomes.length, outcomes };
+}
+
+// ---------------------------------------------------------------------------
+// Manual / immediate execution paths (owner "Trade in Demo" button, and the
+// H1 scheduler's optional immediate MARKET_NOW execution). Both share the
+// exact same claim+execute engine as the watcher so duplicate protection is
+// consistent no matter what triggered the attempt.
+// ---------------------------------------------------------------------------
+
+type DemoExecutionMode = 'AUTO_DEMO' | 'ASSISTED_DEMO';
+
+export async function executeEntryPlanById(pool: Pool, planId: string, actor: Mt5Actor): Promise<ExecutionOutcome> {
+  const claimed = await claimPlanForExecution(pool, planId);
+  if (!claimed) {
+    const current = await pool.query('SELECT * FROM mt5_entry_plans WHERE id=$1', [planId]);
+    return { executed: false, entryPlan: current.rows[0] ?? { id: planId }, reason: 'Entry plan is not eligible for execution right now (already processed or not triggered/ready).' };
+  }
+  return executeClaimedPlan(pool, claimed, actor);
+}
+
+async function executeDemoTradeForSymbol(
+  pool: Pool,
+  symbol: string,
+  actor: Mt5Actor,
+  mode: DemoExecutionMode,
+  runAssistedAnalysis: (pool: Pool, symbol: string, actor: Mt5Actor) => Promise<{ decision: Record<string, unknown>; entryPlan: Record<string, unknown> }>,
+) {
+  const cfg = loadMt5RiskSettings();
+  if (mode === 'AUTO_DEMO' && cfg.mt5_auto_demo_enabled !== true) throw new Error('AUTO-DEMO is disabled');
+  const status = await getMt5Status(actor.requestId ?? undefined);
+  if (!status.demo_verified) throw new Error(status.blocked_reason ?? 'MT5 DEMO is not verified');
+
+  const analysis = await runAssistedAnalysis(pool, symbol, actor);
+  const entryPlanStatus = String(analysis.entryPlan.current_entry_status ?? analysis.entryPlan.status ?? 'BLOCKED');
+  if (!['READY', 'TRIGGERED'].includes(entryPlanStatus)) {
+    return {
+      executed: false,
+      decision: analysis.decision,
+      entryPlan: analysis.entryPlan,
+      reason: `Entry plan is ${entryPlanStatus}; execution is not allowed yet.`,
+    };
+  }
+
+  const outcome = await executeEntryPlanById(pool, String(analysis.entryPlan.id), actor);
+  await createAuditLog(pool, {
+    eventType: mode === 'AUTO_DEMO' ? 'MT5_AUTO_DEMO_ORDER_SENT' : 'MT5_ASSISTED_DEMO_ORDER_SENT',
+    actorId: actor.actorId,
+    actorEmail: actor.actorEmail,
+    entityType: 'ai_decision',
+    entityId: String(analysis.decision.id ?? ''),
+    action: mode === 'AUTO_DEMO' ? 'AUTO_DEMO_EXECUTE' : 'ASSISTED_DEMO_EXECUTE',
+    afterData: { check: outcome.check ?? null, result: outcome.result ?? null, reason: outcome.reason ?? null },
+    requestId: actor.requestId ?? null,
+  });
+  return { ...outcome, decision: analysis.decision };
+}
+
+// ---------------------------------------------------------------------------
+// Watcher lifecycle
+// ---------------------------------------------------------------------------
+
+const SYSTEM_ACTOR: Mt5Actor = {
+  actorId: null,
+  actorEmail: 'mt5-entry-plan-watcher@internal',
+  requestId: 'mt5-entry-plan-watcher',
+};
+
+let lastTickAt: string | null = null;
+let lastTickProcessed = 0;
+let lastTickError: string | null = null;
+let watcherStarted = false;
+let watcherIntervalMs = 15_000;
+
+export function getEntryPlanWatcherStatus() {
+  return {
+    started: watcherStarted,
+    intervalMs: watcherIntervalMs,
+    autoDemoEnabled: loadMt5RiskSettings().mt5_auto_demo_enabled === true,
+    lastTickAt,
+    lastTickProcessed,
+    lastTickError,
+  };
+}
+
+export function startMt5EntryPlanWatcher(pool: Pool) {
+  watcherIntervalMs = Number(process.env.MT5_ENTRY_WATCHER_INTERVAL_MS ?? 15_000);
+  const tick = async () => {
+    try {
+      const enabled = loadMt5RiskSettings().mt5_auto_demo_enabled;
+      const { processed } = await runEntryPlanWatcherTick(pool, SYSTEM_ACTOR, enabled);
+      lastTickAt = new Date().toISOString();
+      lastTickProcessed = processed;
+      lastTickError = null;
+    } catch (err) {
+      lastTickError = (err as Error).message;
+      console.error('[mt5-entry-plan-watcher] tick failed:', err);
+    }
+  };
+  watcherStarted = true;
+  // Run once shortly after startup so a restart recovers WAITING plans and
+  // reconciles any EXECUTING plans left behind by a crash, without waiting
+  // a full interval.
+  setTimeout(tick, 2_000);
+  setInterval(tick, watcherIntervalMs);
+}
+
+export { executeDemoTradeForSymbol };
