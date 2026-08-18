@@ -35,13 +35,36 @@
   new PID but the wrapper is still alive" case, e.g. a --reload restart
   triggered by a code edit).
 
-  Safety: a PID is only ever killed if it is EITHER the exact PID this
-  project itself observed binding that port, OR a live descendant of a
-  wrapper PID whose command line was verified to reference this project's
-  own generated `<service>.cmd` launcher file. There is no executable-name
-  or command-line-substring matching against arbitrary processes anywhere
-  in this script. If a port is occupied by anything that fails both checks,
-  it is reported (PID, process name, command line) and left untouched.
+  Safety: a PID is only ever killed if it is confidently identified as
+  belonging to THIS project by one of:
+    1. The exact PID this project itself observed binding that port
+       (recorded in a `.workerpid` file moments after this launcher started
+       it) - ground truth from a prior run of this launcher.
+    2. A live descendant of a wrapper PID whose command line was verified to
+       reference this project's own generated `<service>.cmd` launcher file
+       (`.pid` file) - covers a --reload/watch worker restart that changed
+       the worker PID but the wrapper window is still alive.
+    3. The port-owning process itself, or one of its live ancestors, has a
+       command line that contains this project's own root folder path
+       (normalized - see Test-CommandLineReferencesProject below) - the
+       actual root-cause fix. PID-file tracking (1 and 2) only ever covers
+       processes THIS launcher itself started; any process started any other
+       way (manually via `npm run dev`/`uvicorn` in a terminal, from an IDE,
+       or left over from a launcher version predating PID tracking) has no
+       PID file at all, so 1 and 2 always fail for it even though its own
+       command line plainly shows it belongs to this project. Empirically
+       confirmed against real dev processes: the API's tsx-loaded node.exe
+       command line embeds the project's node_modules path both with
+       backslashes AND, in its `--import file:///C:/Users/.../node_modules/
+       tsx/dist/loader.mjs` argument, with forward slashes in the SAME
+       command line - normalization must handle both forms, not just one.
+  Path matching (3) is always a substring match against this project's own
+  root folder path specifically (e.g. `c:\users\teetawad\desktop\trade`),
+  never a bare executable-name or generic keyword match - a Node or Python
+  process for a completely different project never contains this project's
+  own folder path in its command line, so it can never match. If a port is
+  occupied by a process that fails all three checks, it is reported (PID,
+  process name, command line) and left completely untouched.
 
 .PARAMETER Action
   PreStartCleanup - stop any stale, verified-ours process per service and
@@ -68,6 +91,73 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-NormalizedProjectPath {
+    # Case-insensitive, slash-style-insensitive normalization so a command
+    # line can be reliably matched against this project's own root folder
+    # regardless of quoting or how the path was spelled (backslashes,
+    # forward slashes, or - as seen in real tsx/node `--import file:///...`
+    # arguments - a mix of both within the SAME string).
+    param([string]$Path)
+    if (-not $Path) { return '' }
+    $normalized = $Path.Trim().Trim('"').Trim("'").Replace('/', '\')
+    while ($normalized.Contains('\\')) { $normalized = $normalized.Replace('\\', '\') }
+    return $normalized.ToLowerInvariant().TrimEnd('\')
+}
+
+function Test-CommandLineReferencesProject {
+    # Confidence check: does this single command line string plainly
+    # reference this project's own root folder? Always a substring match
+    # against the project's OWN full path (e.g.
+    # `c:\users\teetawad\desktop\trade`) - never a bare executable name
+    # (node.exe/python.exe) or generic keyword. A process for an unrelated
+    # project can never contain this exact path, so this can't false-match
+    # "any Node/Python process" the way a name-only check would.
+    param([string]$CommandLine, [string]$NormalizedRoot)
+    if (-not $CommandLine -or -not $NormalizedRoot) { return $false }
+    # Guard against a degenerate/near-empty root (e.g. "C:\" or "C:")
+    # matching almost anything - the project root is always a real,
+    # specific, multi-segment folder path.
+    if ($NormalizedRoot.Length -le 3) { return $false }
+    $normalizedCmd = $CommandLine.Trim().Replace('/', '\')
+    while ($normalizedCmd.Contains('\\')) { $normalizedCmd = $normalizedCmd.Replace('\\', '\') }
+    return $normalizedCmd.ToLowerInvariant().Contains($NormalizedRoot)
+}
+
+function Test-TradeProjectOwnedProcess {
+    # Root-cause fix for "processes could not be verified as belonging to
+    # this project": PID-file tracking (see Stop-TradeServiceByName) only
+    # ever recognizes processes THIS launcher itself started. A process
+    # started any other way - manually via `npm run dev`/`uvicorn` in a
+    # terminal, from an IDE, or left over from before PID tracking existed -
+    # has no PID file, even though its own command line plainly shows it
+    # belongs to this project. This checks the port-owning process itself,
+    # then walks LIVE ancestors upward (bounded depth, cycle-safe), matching
+    # each one's command line against the project root. Node/tsx/Nuxt and
+    # Python/uvicorn wrapper layers are covered generically - by path
+    # content, not by recognizing specific tool names - because the
+    # intermediate `npm`/`tsx`/`uvicorn --reload` supervisor hops that sit
+    # above the actual socket-owning worker are exactly the "different
+    # command-line text at each hop" case documented at the top of this
+    # file, and one of those hops (or the worker itself) reliably contains
+    # the project path in every case observed against real dev processes.
+    param([int]$ProcessId, [int]$MaxAncestorHops = 10)
+    $normalizedRoot = Get-NormalizedProjectPath -Path $ProjectRoot
+    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+    $currentId = $ProcessId
+    $hops = 0
+    while ($currentId -and $currentId -ne 0 -and -not $seen.Contains($currentId) -and $hops -le $MaxAncestorHops) {
+        [void]$seen.Add($currentId)
+        $hops++
+        $info = Get-ProcessInfo -ProcessId $currentId
+        if (-not $info) { return $false }
+        if (Test-CommandLineReferencesProject -CommandLine $info.CommandLine -NormalizedRoot $normalizedRoot) {
+            return $true
+        }
+        $currentId = [int]$info.ParentProcessId
+    }
+    return $false
+}
 
 function Get-TradeServices {
     param([string]$Root)
@@ -206,6 +296,14 @@ function Stop-TradeServiceByName {
         # (covers a --reload worker restart that changed the worker PID).
         $descendants = Get-ProcessDescendantIds -RootProcessId $recordedWrapper
         if ($descendants.Contains($currentOwner)) { $verified = $true }
+    } elseif (Test-TradeProjectOwnedProcess -ProcessId $currentOwner) {
+        # Root-cause fallback: no PID file exists for this process at all
+        # (it wasn't started by this launcher - e.g. a manual `npm run dev`/
+        # `uvicorn` in a terminal, an IDE run, or a leftover from before PID
+        # tracking existed), but its own command line - or a live ancestor's -
+        # plainly references this project's own root folder path. Confidently
+        # ours; safe to stop.
+        $verified = $true
     }
 
     if (-not $verified) {
@@ -387,6 +485,33 @@ switch ($Action) {
         }
         if ($anyCleaned) { Write-Host 'OK: Stale Trade Platform processes were stopped.' }
         else { Write-Host 'OK: No stale Trade Platform processes found.' }
+
+        # Explicit final confirmation that cleanup actually freed every port,
+        # independent of Stop-TradeServiceByName's own internal bookkeeping -
+        # startup must never proceed against a port that looks free by
+        # coincidence of timing but isn't.
+        Write-Host 'Verifying ports 3000/4000/8000 are free before starting...'
+        $stillOccupied = @()
+        foreach ($service in $services) {
+            if (Wait-TradePortFree -Port $service.Port -TimeoutSeconds 5) {
+                Write-Host ("  OK: port $($service.Port) ($($service.Name)) is free.")
+            } else {
+                $stillOccupied += $service
+            }
+        }
+        if ($stillOccupied.Count -gt 0) {
+            Write-Host ''
+            Write-Host 'ERROR: The following ports are still occupied after cleanup:'
+            foreach ($service in $stillOccupied) {
+                $owner = Get-PortOwner -Port $service.Port
+                $info = if ($owner) { Get-ProcessInfo -ProcessId $owner } else { $null }
+                $name = if ($info) { $info.Name } else { '(unknown)' }
+                $cmd = if ($info) { $info.CommandLine } else { '(unavailable)' }
+                Write-Host ("  Port $($service.Port) ($($service.Name)): PID $owner, process '$name'")
+                Write-Host ("    Command line: $cmd")
+            }
+            exit 1
+        }
         exit 0
     }
 

@@ -3,15 +3,17 @@ import { createAuditLog } from '../db/repositories/audit-logs';
 import {
   analyzeMt5Symbol,
   getMt5Status,
+  getMt5SymbolInfo,
   listMt5Positions,
   listMt5Symbols,
   Mt5DecisionDTO,
 } from './mt5-client';
-import { evaluateMt5Risk } from './mt5-risk-engine';
+import { evaluateMt5Risk, toRiskSymbolInfo } from './mt5-risk-engine';
 import { loadMt5RiskSettings } from '../config/mt5-risk-settings';
 import {
   buildEntryPlan,
   computeEntryStatus,
+  countTradesToday,
   executeDemoTradeForSymbol,
   getEntryPlanWatcherStatus,
   persistEntryPlan,
@@ -105,6 +107,73 @@ function tradeButtonDiagnostics(input: {
   };
 }
 
+type EntryStatusName = 'WAITING' | 'READY' | 'TRIGGERED' | 'EXECUTING' | 'EXECUTED' | 'BLOCKED' | 'EXPIRED' | 'CANCELLED';
+
+export interface ExecutionEligibility {
+  canExecute: boolean;
+  entryStatus: EntryStatusName | null;
+  blockCode: string | null;
+  blockMessage: string | null;
+}
+
+/**
+ * Single source of truth for "Trade in Demo" eligibility, grounded in the
+ * REAL persisted plan row (status + execution_key) rather than only AI/risk/
+ * market conditions — tradeButtonDiagnostics alone cannot see whether this
+ * plan is already EXECUTING/EXECUTED/EXPIRED/CANCELLED or still holding a
+ * stale claim lock, all of which claimPlanForExecution() actually enforces.
+ * The frontend must use canExecute/entryStatus/blockCode/blockMessage
+ * directly and never re-derive eligibility itself.
+ */
+export function describeExecutionEligibility(
+  row: Record<string, unknown> | undefined,
+  tradeButton: { enabled: boolean; disabledReasons: Array<{ rule: string; explanation: string }> },
+): ExecutionEligibility {
+  const status = (row?.status as EntryStatusName | undefined) ?? null;
+  // No persisted row yet for this symbol at all — there is nothing to claim
+  // yet, but "Trade in Demo" still works (the click itself creates/refreshes
+  // the plan before executing), so eligibility falls back to the live AI/
+  // risk/market read.
+  if (!status) {
+    const first = tradeButton.disabledReasons[0];
+    return {
+      canExecute: tradeButton.enabled,
+      entryStatus: null,
+      blockCode: tradeButton.enabled ? null : (first?.rule ?? null),
+      blockMessage: tradeButton.enabled ? null : (first?.explanation ?? null),
+    };
+  }
+  const hasStaleLock = Boolean(row?.execution_key);
+  const claimable = (status === 'READY' || status === 'TRIGGERED') && !hasStaleLock;
+  if (claimable && tradeButton.enabled) return { canExecute: true, entryStatus: status, blockCode: null, blockMessage: null };
+  switch (status) {
+    case 'EXECUTING':
+      return { canExecute: false, entryStatus: status, blockCode: 'EXECUTION_IN_PROGRESS', blockMessage: 'This entry plan is already being executed.' };
+    case 'EXECUTED':
+      return { canExecute: false, entryStatus: status, blockCode: 'ALREADY_EXECUTED', blockMessage: 'This entry plan already executed in MT5.' };
+    case 'EXPIRED':
+      return { canExecute: false, entryStatus: status, blockCode: 'PLAN_EXPIRED', blockMessage: 'This entry plan expired before it could be executed.' };
+    case 'CANCELLED':
+      return { canExecute: false, entryStatus: status, blockCode: 'PLAN_CANCELLED', blockMessage: 'This entry plan was cancelled.' };
+    case 'BLOCKED':
+      return { canExecute: false, entryStatus: status, blockCode: String(row?.block_reason ?? 'BLOCKED'), blockMessage: beginnerRiskReason(String(row?.block_reason ?? 'BLOCKED')) };
+    case 'WAITING':
+      return { canExecute: false, entryStatus: status, blockCode: 'WAITING_ENTRY', blockMessage: 'AI is still waiting for price to reach the entry condition.' };
+    default: {
+      // status is READY/TRIGGERED but not currently claimable — either a
+      // stale/active lock, or AI/risk/market conditions moved since the
+      // plan's status was last computed.
+      const first = tradeButton.disabledReasons[0];
+      return {
+        canExecute: false,
+        entryStatus: status,
+        blockCode: hasStaleLock ? 'EXECUTION_IN_PROGRESS' : (first?.rule ?? 'BLOCKED'),
+        blockMessage: hasStaleLock ? 'This entry plan is already being executed.' : (first?.explanation ?? 'Demo trade is not currently available.'),
+      };
+    }
+  }
+}
+
 function assetClass(symbol: Record<string, unknown>): string {
   const path = String(symbol.path ?? symbol.description ?? '').toLowerCase();
   const name = String(symbol.name ?? '').toLowerCase();
@@ -122,12 +191,18 @@ function money(value: unknown): number {
   return Number.isFinite(number) ? number : 0;
 }
 
-function resultType(value: unknown): 'WIN' | 'LOSS' | 'BREAKEVEN' | 'OPEN' {
+// Sub-cent tolerance around zero: realized_pnl is summed from raw MT5 deal
+// profits in floating point (see closeTradeOutcomeFromHistory) before being
+// persisted, so a genuine breakeven close can land a hair off exact zero.
+const BREAKEVEN_TOLERANCE = 0.005;
+
+function resultType(value: unknown, exitReason?: unknown): 'WIN' | 'LOSS' | 'BREAKEVEN' | 'OPEN' | 'EXECUTION_FAILED' {
+  if (exitReason === 'RECONCILIATION_FAILED') return 'EXECUTION_FAILED';
   if (value === null || value === undefined) return 'OPEN';
   const pnl = Number(value);
+  if (Math.abs(pnl) < BREAKEVEN_TOLERANCE) return 'BREAKEVEN';
   if (pnl > 0) return 'WIN';
-  if (pnl < 0) return 'LOSS';
-  return 'BREAKEVEN';
+  return 'LOSS';
 }
 
 function formatThaiTime(value: unknown): string | null {
@@ -151,7 +226,21 @@ function countdownTo(value: unknown): string | null {
   return hours > 0 ? `${hours}h ${rest}m` : `${rest}m`;
 }
 
-function beginnerRiskReason(value: string): string {
+function beginnerRiskReason(value: string, snapshot?: Record<string, unknown> | null): string {
+  if (value === 'MAX_TRADES_PER_DAY' && snapshot) {
+    const used = snapshot.dailyConfirmedTrades ?? '?';
+    const limit = snapshot.dailyTradeLimit ?? '?';
+    return `Daily demo trade limit reached: ${used}/${limit} confirmed trades today.`;
+  }
+  if (value === 'MINIMUM_VOLUME_EXCEEDS_RISK' && snapshot) {
+    const loss = snapshot.lossPerLot;
+    return `Even the broker's minimum lot size for this symbol would lose more than your configured risk${Number.isFinite(Number(loss)) ? ` (~$${Number(loss).toFixed(2)} per 0.01 lot)` : ''}.`;
+  }
+  if (value === 'INSUFFICIENT_MARGIN' && snapshot) {
+    const required = snapshot.marginRequired;
+    const free = snapshot.freeMargin;
+    return `Required margin${Number.isFinite(Number(required)) ? ` ($${Number(required).toFixed(2)})` : ''} is too high for your free margin${Number.isFinite(Number(free)) ? ` ($${Number(free).toFixed(2)})` : ''}.`;
+  }
   const map: Record<string, string> = {
     SAFETY_SWITCH_ON: 'Demo safety switch is on, so new trades are blocked.',
     RISK_LIMIT: 'Demo safety switch is on, so new trades are blocked.',
@@ -163,16 +252,28 @@ function beginnerRiskReason(value: string): string {
     TAKE_PROFIT_REQUIRED: 'Take Profit is missing.',
     INVALID_SL: 'The Stop Loss is not valid for this entry.',
     INVALID_TP: 'The Take Profit is not valid for this entry.',
+    INVALID_STOP_DISTANCE: 'The Stop Loss distance from entry is not valid.',
     RISK_REWARD_TOO_LOW: 'The planned reward is too small compared with the risk.',
     MAX_SIMULTANEOUS_POSITIONS: 'Too many demo trades are already open.',
     MAX_TRADES_PER_DAY: 'Daily demo trade limit has been reached.',
     MARGIN_INSUFFICIENT: 'Not enough free demo margin.',
     POSITION_SIZE_INVALID: 'The calculated lot size is not valid.',
+    SYMBOL_INFO_UNAVAILABLE: 'This symbol\'s broker contract details are unavailable, so a safe lot size cannot be calculated.',
+    MINIMUM_VOLUME_EXCEEDS_RISK: 'Even the broker\'s minimum lot size for this symbol exceeds your configured risk.',
+    INSUFFICIENT_MARGIN: 'The required margin for this trade is too high for your free margin.',
+    MARGIN_UNVERIFIABLE: 'Required margin could not be verified for this account/symbol.',
     SPREAD_TOO_HIGH: 'The spread is too expensive right now.',
     POSITION_EXISTS: 'A demo position for this symbol is already open.',
     PENDING_ORDER: 'A pending demo order for this symbol already exists.',
     COOLDOWN: 'This symbol is in a cooldown period after its last demo trade.',
     DEMO_VERIFICATION_FAILED: 'MT5 demo account could not be verified.',
+    KILL_SWITCH: 'Demo safety switch is on, so new trades are blocked.',
+    ORDER_CHECK_FAILED: 'MT5 rejected the order request before it could be sent.',
+    EXECUTION_UNCONFIRMED: 'MT5 did not confirm the order — nothing was opened.',
+    INVALID_FILLING_MODE: 'This broker/symbol does not support the requested order filling mode.',
+    ALREADY_PROCESSING: 'This entry plan is already being executed.',
+    AUTO_DEMO_DISABLED: 'AUTO-DEMO automatic execution is turned off.',
+    PLAN_EXPIRED: 'The entry plan expired before it could be executed.',
   };
   return map[value] ?? value.replaceAll('_', ' ').toLowerCase();
 }
@@ -294,9 +395,12 @@ export async function scannerSnapshot(pool: Pool, actor: Mt5Actor, persist = fal
   const rows = [];
   const mt5Positions = await listMt5Positions(actor.requestId ?? undefined).catch(() => []);
   for (const row of watchlist.rows) {
-    const decision = await analyzeMt5Symbol(row.symbol, actor.requestId ?? undefined);
+    const [decision, symbolInfoRaw] = await Promise.all([
+      analyzeMt5Symbol(row.symbol, actor.requestId ?? undefined),
+      getMt5SymbolInfo(row.symbol, actor.requestId ?? undefined).catch(() => null),
+    ]);
     const openPositions = mt5Positions.length;
-    const tradesToday = Number((await pool.query("SELECT count(*)::int AS c FROM trade_outcomes WHERE opened_at >= date_trunc('day', now())")).rows[0]?.c ?? 0);
+    const tradesToday = await countTradesToday(pool);
     const risk = evaluateMt5Risk({
       decision: decision.decision,
       referenceEntry: decision.reference_entry,
@@ -312,6 +416,8 @@ export async function scannerSnapshot(pool: Pool, actor: Mt5Actor, persist = fal
       quoteAgeSeconds: decision.quote_age_seconds ?? undefined,
       marketStatus: decision.market_status,
       dataStatus: decision.data_status,
+      symbol: toRiskSymbolInfo(symbolInfoRaw),
+      leverage: Number(status.account?.leverage) || null,
     });
     const entryPlan = buildEntryPlan(decision, risk, cfg);
     const entryStatus = computeEntryStatus(entryPlan);
@@ -402,8 +508,11 @@ export async function runAssistedAnalysis(pool: Pool, symbol: string, actor: Mt5
   const instrument = await pool.query('SELECT asset_class FROM instruments WHERE symbol = $1', [symbol]);
   const decision = await analyzeMt5Symbol(symbol, actor.requestId ?? undefined);
   const saved = await persistDecision(pool, decision, instrument.rows[0]?.asset_class ?? 'OTHER');
-  const mt5Positions = await listMt5Positions(actor.requestId ?? undefined).catch(() => []);
-  const tradesToday = Number((await pool.query("SELECT count(*)::int AS c FROM trade_outcomes WHERE opened_at >= date_trunc('day', now())")).rows[0]?.c ?? 0);
+  const [mt5Positions, symbolInfoRaw] = await Promise.all([
+    listMt5Positions(actor.requestId ?? undefined).catch(() => []),
+    getMt5SymbolInfo(symbol, actor.requestId ?? undefined).catch(() => null),
+  ]);
+  const tradesToday = await countTradesToday(pool);
   const risk = evaluateMt5Risk({
     decision: decision.decision,
     referenceEntry: decision.reference_entry,
@@ -419,6 +528,8 @@ export async function runAssistedAnalysis(pool: Pool, symbol: string, actor: Mt5
     quoteAgeSeconds: decision.quote_age_seconds ?? undefined,
     marketStatus: decision.market_status,
     dataStatus: decision.data_status,
+    symbol: toRiskSymbolInfo(symbolInfoRaw),
+    leverage: Number(status.account?.leverage) || null,
   });
   const entryPlan = buildEntryPlan(decision, risk, cfg);
   const savedPlan = await persistEntryPlan(pool, saved.id, entryPlan);
@@ -437,14 +548,15 @@ export async function runAssistedAnalysis(pool: Pool, symbol: string, actor: Mt5
 
 export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt5Actor, persist = false) {
   const cfg = await settings(pool);
-  const [status, instrumentResult, mt5Positions] = await Promise.all([
+  const [status, instrumentResult, mt5Positions, symbolInfoRaw] = await Promise.all([
     getMt5Status(actor.requestId ?? undefined),
     pool.query('SELECT asset_class, description FROM instruments WHERE symbol = $1', [symbol]),
     listMt5Positions(actor.requestId ?? undefined).catch(() => []),
+    getMt5SymbolInfo(symbol, actor.requestId ?? undefined).catch(() => null),
   ]);
   const decision = await analyzeMt5Symbol(symbol, actor.requestId ?? undefined);
   const assetClassValue = instrumentResult.rows[0]?.asset_class ?? decision.market?.asset_class ?? 'OTHER';
-  const tradesToday = Number((await pool.query("SELECT count(*)::int AS c FROM trade_outcomes WHERE opened_at >= date_trunc('day', now())")).rows[0]?.c ?? 0);
+  const tradesToday = await countTradesToday(pool);
   const marketStatus = decision.market_status ?? 'UNKNOWN';
   const dataStatus = decision.data_status ?? 'DISCONNECTED';
   const risk = evaluateMt5Risk({
@@ -463,6 +575,8 @@ export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt
     spreadPoints: Number.isFinite(Number(decision.spread)) ? Number(decision.spread) : undefined,
     marketStatus: marketStatus as 'OPEN' | 'CLOSED' | 'QUOTE_ONLY' | 'TRADE_DISABLED' | 'UNKNOWN',
     dataStatus: dataStatus as 'LIVE' | 'STALE' | 'DISCONNECTED',
+    symbol: toRiskSymbolInfo(symbolInfoRaw),
+    leverage: Number(status.account?.leverage) || null,
   });
   const entryPlanInput = buildEntryPlan(decision, risk, cfg);
   const rawEntryStatus = computeEntryStatus(entryPlanInput);
@@ -487,15 +601,41 @@ export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt
   }
   const currentPrice = currentPriceFromDecision(decision);
   const riskAmount = risk.riskAmount;
+  const snap = risk.snapshot as Record<string, unknown> | undefined;
   const sizing = {
     recommendedLotSize: risk.recommendedVolume,
     approximateNotional: notionalSize(currentPrice, risk.recommendedVolume),
     maximumPlannedLoss: riskAmount,
     targetProfit: targetProfit(riskAmount, decision.risk_reward),
     riskPerAccountPct: riskPerAccount(riskAmount, status.account),
+    // Sourced directly from the risk engine's own broker-native
+    // calculation (never re-derived here) so the UI can never drift from
+    // what actually gated the trade.
+    expectedLossAtSl: snap?.expectedLossAtSl ?? null,
+    marginRequired: snap?.marginRequired ?? null,
+    freeMargin: snap?.freeMargin ?? null,
+    freeMarginAfterEntry: snap?.freeMarginAfterEntry ?? null,
+    riskPctOfEquity: snap?.riskPctOfEquity ?? null,
+    dailyConfirmedTrades: snap?.dailyConfirmedTrades ?? null,
+    dailyTradeLimit: snap?.dailyTradeLimit ?? null,
+    dailyTradesRemaining: snap?.dailyTradesRemaining ?? null,
     source: 'SERVER_SIDE_RISK_ENGINE',
   };
   const tradeButton = tradeButtonDiagnostics({ status, decision, risk, entryPlan, marketStatus, dataStatus });
+  // Single source of truth for whether the "Trade in Demo" button should
+  // actually be clickable: tradeButtonDiagnostics only knows about AI/risk/
+  // market conditions, computed fresh and never persisted on a read-only
+  // (persist=false) call - it has no way to know this symbol's real,
+  // currently-persisted claim state (execution_key/status), which is what
+  // claimPlanForExecution() actually gates on. Reading the real row here
+  // (there is at most one live plan per symbol in practice) is what lets
+  // the frontend trust canExecute instead of independently guessing
+  // eligibility from AI BUY/RISK PASS/MARKET OPEN alone.
+  const persistedRow = savedPlan ?? (await pool.query(
+    'SELECT * FROM mt5_entry_plans WHERE symbol=$1 ORDER BY created_at DESC LIMIT 1',
+    [symbol],
+  )).rows[0] as Record<string, unknown> | undefined;
+  const execution = describeExecutionEligibility(persistedRow, tradeButton);
   const explanation = {
     title: decision.decision === 'BUY' || decision.decision === 'SELL'
       ? `AI recommends ${decision.decision}`
@@ -565,10 +705,11 @@ export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt
     risk: {
       ...risk,
       label: risk.result === 'PASS' ? 'RISK CHECK: PASS' : 'TRADE BLOCKED',
-      diagnostics: (risk.failedRules ?? []).map((rule) => ({ rule, explanation: beginnerRiskReason(rule) })),
+      diagnostics: (risk.failedRules ?? []).map((rule) => ({ rule, explanation: beginnerRiskReason(rule, snap) })),
     },
     explanation,
     tradeButton,
+    execution,
   };
 }
 
@@ -621,30 +762,62 @@ export async function listMt5TradeHistory(pool: Pool) {
     `SELECT t.id, t.symbol, i.asset_class, t.order_ticket, t.deal_ticket, t.retcode, t.side, t.volume,
         t.expected_entry, t.actual_entry, t.stop_loss, t.take_profit, t.risk_amount, t.risk_reward,
         t.spread, t.slippage, t.exit_reason, t.realized_pnl, t.fees, t.mfe, t.mae,
-        t.opened_at, t.closed_at, t.entry_plan_id,
-        d.decision, d.confidence, d.opportunity_score, d.model_version, d.reasons,
-        p.entry_strategy AS entry_type, p.time_to_trigger_seconds, p.reached_trigger
+        t.opened_at, t.closed_at, t.entry_plan_id, t.ai_trade_plan_id, t.account_equity_at_entry,
+        COALESCE(d.decision, ap.decision) AS decision,
+        -- ai_decisions.confidence (BASELINE_MT5_H1_V1) is stored 0-1; ai_trade_plans.confidence_pct
+        -- (Trading AI V3) is stored as a canonical 0-100 integer percent — normalized to the same
+        -- 0-1 scale here so every consumer of this unified query can keep using one convention.
+        COALESCE(d.confidence, ap.confidence_pct / 100.0) AS confidence,
+        d.opportunity_score, d.reasons,
+        COALESCE(d.model_version, ap.ai_model) AS model_version,
+        COALESCE(p.entry_strategy, ap.entry_type) AS entry_type,
+        p.time_to_trigger_seconds, p.reached_trigger,
+        ap.ai_provider, ap.ai_prompt_version, ap.pending_order_type,
+        ap.trade_score, ap.trade_rating, ap.score_breakdown,
+        ap.tradeability_pct, ap.tradeability_rating
      FROM trade_outcomes t
      LEFT JOIN ai_decisions d ON d.id = t.ai_decision_id
      LEFT JOIN instruments i ON i.symbol = t.symbol
      LEFT JOIN mt5_entry_plans p ON p.id = t.entry_plan_id
+     LEFT JOIN ai_trade_plans ap ON ap.id = t.ai_trade_plan_id
      ORDER BY COALESCE(t.closed_at, t.opened_at) DESC
      LIMIT 100`,
   );
-  const trades = result.rows.map((trade) => ({
-    ...trade,
-    result_type: resultType(trade.realized_pnl),
-    beginner_note: trade.closed_at
-      ? `${trade.symbol} closed as ${resultType(trade.realized_pnl).toLowerCase()}${trade.exit_reason ? ` by ${String(trade.exit_reason).replaceAll('_', ' ').toLowerCase()}` : ''}.`
-      : `${trade.symbol} is still open or not reconciled yet.`,
-  }));
+  const trades = result.rows.map((trade) => {
+    const type = resultType(trade.realized_pnl, trade.exit_reason);
+    // Only compute a % account return when we actually stored the equity
+    // basis at entry for this trade (older rows predate that column) — never
+    // derive it from current/unrelated equity, which would misrepresent it.
+    const equityAtEntry = trade.account_equity_at_entry === null || trade.account_equity_at_entry === undefined
+      ? null : Number(trade.account_equity_at_entry);
+    const realizedPnl = trade.realized_pnl === null || trade.realized_pnl === undefined ? null : Number(trade.realized_pnl);
+    const accountReturnPct = equityAtEntry && equityAtEntry > 0 && realizedPnl !== null && Number.isFinite(realizedPnl)
+      ? (realizedPnl / equityAtEntry) * 100
+      : null;
+    return {
+      ...trade,
+      result_type: type,
+      account_return_pct: accountReturnPct,
+      beginner_note: type === 'EXECUTION_FAILED'
+        ? `${trade.symbol}: MT5 never confirmed a real position for this trade — it was not actually opened.`
+        : trade.closed_at
+          ? `${trade.symbol} closed as ${type.toLowerCase()}${trade.exit_reason ? ` by ${String(trade.exit_reason).replaceAll('_', ' ').toLowerCase()}` : ''}.`
+          : `${trade.symbol} is open (MT5 confirmed).`,
+    };
+  });
   return { trades, statistics: summarizeTrades(trades) };
 }
 
 function summarizeTrades(trades: Array<Record<string, unknown>>) {
-  const closed = trades.filter((trade) => trade.closed_at);
-  const wins = closed.filter((trade) => money(trade.realized_pnl) > 0);
-  const losses = closed.filter((trade) => money(trade.realized_pnl) < 0);
+  // A trade that MT5 never confirmed (result_type === 'EXECUTION_FAILED',
+  // e.g. exit_reason RECONCILIATION_FAILED) is a diagnostic record, not a
+  // closed trading result — it must never count toward closed trades,
+  // win rate, P&L, or the exit-reason breakdown.
+  const executionFailed = trades.filter((trade) => trade.result_type === 'EXECUTION_FAILED');
+  const closed = trades.filter((trade) => trade.closed_at && trade.result_type !== 'EXECUTION_FAILED');
+  const wins = closed.filter((trade) => trade.result_type === 'WIN');
+  const losses = closed.filter((trade) => trade.result_type === 'LOSS');
+  const breakeven = closed.filter((trade) => trade.result_type === 'BREAKEVEN');
   const totalPnl = closed.reduce((sum, trade) => sum + money(trade.realized_pnl), 0);
   const avg = (rows: Array<Record<string, unknown>>) => rows.length
     ? rows.reduce((sum, trade) => sum + money(trade.realized_pnl), 0) / rows.length
@@ -659,14 +832,34 @@ function summarizeTrades(trades: Array<Record<string, unknown>>) {
   }
   const sortedSymbols = [...bySymbol.entries()].sort((a, b) => b[1] - a[1]);
   const sortedTrades = [...closed].sort((a, b) => money(b.realized_pnl) - money(a.realized_pnl));
+  const grossProfit = wins.reduce((sum, trade) => sum + money(trade.realized_pnl), 0);
+  const grossLoss = Math.abs(losses.reduce((sum, trade) => sum + money(trade.realized_pnl), 0));
+  // Undefined (not 0 or Infinity) when there's no loss to divide by yet —
+  // an empty/all-winning sample isn't a real profit factor, it's no data.
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : null;
+  const holdingMinutes = closed
+    .map((trade) => {
+      const opened = new Date(String(trade.opened_at)).getTime();
+      const closedAt = new Date(String(trade.closed_at)).getTime();
+      return Number.isFinite(opened) && Number.isFinite(closedAt) ? (closedAt - opened) / 60000 : null;
+    })
+    .filter((minutes): minutes is number => minutes !== null);
+  const averageHoldingMinutes = holdingMinutes.length
+    ? holdingMinutes.reduce((sum, minutes) => sum + minutes, 0) / holdingMinutes.length
+    : null;
   return {
     totalClosedTrades: closed.length,
     wins: wins.length,
     losses: losses.length,
-    winRate: closed.length ? wins.length / closed.length : 0,
+    breakeven: breakeven.length,
+    // wins / (wins + losses) — breakeven and execution failures are excluded
+    // from both the numerator and denominator so they can't dilute the rate.
+    winRate: wins.length + losses.length ? wins.length / (wins.length + losses.length) : 0,
     totalPnl,
     averageWin: avg(wins),
     averageLoss: avg(losses),
+    profitFactor,
+    averageHoldingMinutes,
     bestTrade: sortedTrades[0] ?? null,
     worstTrade: sortedTrades.at(-1) ?? null,
     bestPerformingSymbol: sortedSymbols[0]?.[0] ?? null,
@@ -674,6 +867,8 @@ function summarizeTrades(trades: Array<Record<string, unknown>>) {
     pnlBySymbol: sortedSymbols.map(([label, value]) => ({ label, value })),
     pnlByAssetClass: [...byAssetClass.entries()].map(([label, value]) => ({ label, value })),
     exitReasons: [...exits.entries()].map(([label, value]) => ({ label, value })),
+    // System-level diagnostic count, kept separate from trading performance.
+    executionFailures: executionFailed.length,
     equityCurve: closed
       .slice()
       .reverse()
@@ -692,9 +887,12 @@ export async function getMt5Dashboard(pool: Pool, actor: Mt5Actor) {
     listMt5TradeHistory(pool),
     scannerSnapshot(pool, actor).catch(() => null),
   ]);
-  const closedTrades = history.trades.filter((trade) => trade.closed_at);
-  const wins = closedTrades.filter((trade) => money(trade.realized_pnl) > 0);
-  const losses = closedTrades.filter((trade) => money(trade.realized_pnl) < 0);
+  // Same exclusion as summarizeTrades(): EXECUTION_FAILED/RECONCILIATION_FAILED
+  // rows are not closed trading results and must not count as one here either,
+  // so Dashboard and History always agree on the same numbers.
+  const closedTrades = history.trades.filter((trade) => trade.closed_at && trade.result_type !== 'EXECUTION_FAILED');
+  const wins = closedTrades.filter((trade) => trade.result_type === 'WIN');
+  const losses = closedTrades.filter((trade) => trade.result_type === 'LOSS');
   const todayKey = new Date().toISOString().slice(0, 10);
   const todayPnl = closedTrades
     .filter((trade) => String(trade.closed_at).slice(0, 10) === todayKey)
@@ -727,10 +925,11 @@ export async function getMt5Dashboard(pool: Pool, actor: Mt5Actor) {
     },
     statistics: {
       openTrades: mt5Positions.length,
-      winRate: closedTrades.length ? wins.length / closedTrades.length : 0,
+      winRate: wins.length + losses.length ? wins.length / (wins.length + losses.length) : 0,
       totalClosedTrades: closedTrades.length,
       totalWins: wins.length,
       totalLosses: losses.length,
+      executionFailures: history.statistics.executionFailures,
     },
     portfolioBySymbol: [...portfolioBySymbol.values()],
     charts: history.statistics,

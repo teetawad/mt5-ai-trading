@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { createAuditLog } from '../db/repositories/audit-logs';
 import {
   checkMt5Order,
+  getMt5HistoryDeals,
   getMt5MarketStatus,
   getMt5Status,
   getMt5SymbolInfo,
@@ -13,7 +14,7 @@ import {
   Mt5DecisionDTO,
   Mt5OrderRequestDTO,
 } from './mt5-client';
-import { evaluateMt5Risk, normalizeVolume } from './mt5-risk-engine';
+import { evaluateMt5Risk, normalizeVolume, toRiskSymbolInfo } from './mt5-risk-engine';
 import { loadMt5RiskSettings } from '../config/mt5-risk-settings';
 
 // ---------------------------------------------------------------------------
@@ -38,7 +39,8 @@ export type EntryStatus =
   | 'EXECUTED'
   | 'EXPIRED'
   | 'CANCELLED'
-  | 'BLOCKED';
+  | 'BLOCKED'
+  | 'RECONCILIATION_FAILED';
 
 export interface Mt5Actor {
   actorId: string | null;
@@ -54,10 +56,13 @@ const VALID_TRANSITIONS: Record<EntryStatus, EntryStatus[]> = {
   READY: ['TRIGGERED', 'EXECUTING', 'EXPIRED', 'CANCELLED', 'BLOCKED', 'WAITING'],
   TRIGGERED: ['EXECUTING', 'EXPIRED', 'CANCELLED', 'BLOCKED'],
   EXECUTING: ['EXECUTED', 'BLOCKED', 'TRIGGERED'], // TRIGGERED only via crash reconciliation release
-  EXECUTED: [],
+  // A plan that looked EXECUTED can still be found to have no real MT5
+  // position behind it by ongoing reconciliation (see reconcileOpenTradeOutcomes).
+  EXECUTED: ['RECONCILIATION_FAILED'],
   EXPIRED: [],
   CANCELLED: [],
   BLOCKED: [],
+  RECONCILIATION_FAILED: [],
 };
 
 export function canTransition(from: EntryStatus, to: EntryStatus): boolean {
@@ -202,6 +207,7 @@ export function entryStatusMessage(status: string, blockReason?: string | null):
     EXPIRED: 'The entry price was not reached before the plan expired.',
     CANCELLED: 'This entry plan was cancelled.',
     BLOCKED: 'Entry condition was reached but the trade was blocked.',
+    RECONCILIATION_FAILED: 'MT5 never confirmed this trade; it was not actually opened.',
   };
   const base = messages[status] ?? status;
   if (status === 'BLOCKED' && blockReason) return `${base} Reason: ${blockReason}.`;
@@ -258,6 +264,38 @@ export async function persistEntryPlan(pool: Pool, decisionId: string, plan: Ent
         status=CASE
           WHEN mt5_entry_plans.status IN ('EXECUTING','EXECUTED','EXPIRED','CANCELLED') THEN mt5_entry_plans.status
           ELSE EXCLUDED.status
+        END,
+        -- Root cause of "ALREADY_PROCESSING" on a plan the UI shows as
+        -- READY: claimPlanForExecution() only claims when execution_key IS
+        -- NULL, but a BLOCKED attempt (blockPlan()) sets execution_key once
+        -- and this UPSERT never cleared it back out — so once a plan had
+        -- been claimed even a single time (e.g. blocked by COOLDOWN), it
+        -- could never be claimed again even after re-analysis correctly
+        -- brought its status back to READY/TRIGGERED. The lock, block
+        -- timestamp, and block reason are all stale metadata from that
+        -- earlier attempt the instant the plan becomes re-eligible again,
+        -- and must be cleared together with it — but only when this refresh
+        -- isn't itself being discarded by the guard above (an EXECUTING/
+        -- EXECUTED/EXPIRED/CANCELLED plan's lock must never be touched).
+        execution_key=CASE
+          WHEN mt5_entry_plans.status IN ('EXECUTING','EXECUTED','EXPIRED','CANCELLED') THEN mt5_entry_plans.execution_key
+          WHEN EXCLUDED.status IN ('WAITING','READY','TRIGGERED') THEN NULL
+          ELSE mt5_entry_plans.execution_key
+        END,
+        executing_at=CASE
+          WHEN mt5_entry_plans.status IN ('EXECUTING','EXECUTED','EXPIRED','CANCELLED') THEN mt5_entry_plans.executing_at
+          WHEN EXCLUDED.status IN ('WAITING','READY','TRIGGERED') THEN NULL
+          ELSE mt5_entry_plans.executing_at
+        END,
+        blocked_at=CASE
+          WHEN mt5_entry_plans.status IN ('EXECUTING','EXECUTED','EXPIRED','CANCELLED') THEN mt5_entry_plans.blocked_at
+          WHEN EXCLUDED.status IN ('WAITING','READY','TRIGGERED') THEN NULL
+          ELSE mt5_entry_plans.blocked_at
+        END,
+        block_reason=CASE
+          WHEN mt5_entry_plans.status IN ('EXECUTING','EXECUTED','EXPIRED','CANCELLED') THEN mt5_entry_plans.block_reason
+          WHEN EXCLUDED.status IN ('WAITING','READY','TRIGGERED') THEN NULL
+          ELSE mt5_entry_plans.block_reason
         END,
         current_bid=EXCLUDED.current_bid,
         current_ask=EXCLUDED.current_ask,
@@ -382,7 +420,15 @@ export async function listActiveEntryPlans(pool: Pool, actor: Mt5Actor) {
 
 interface ExecutionOutcome {
   executed: boolean;
-  entryPlan: Record<string, unknown>;
+  // `allowed` mirrors `executed` for the terminal happy-path outcome, but
+  // exists as its own field so callers/UI never have to infer a block from
+  // the absence of a flag: every outcome — success, block, or expiry —
+  // explicitly says whether the trade was allowed.
+  allowed: boolean;
+  // Machine-readable rejection code (e.g. SPREAD_TOO_HIGH, DEMO_VERIFICATION_FAILED,
+  // MARKET_CLOSED). Null only when allowed=true.
+  code: string | null;
+  entryPlan: Record<string, unknown> | null;
   reason?: string;
   risk?: Record<string, unknown>;
   check?: Record<string, unknown>;
@@ -403,8 +449,21 @@ const RETCODE_REASON: Record<number, string> = {
   10021: 'NO_QUOTES',
   10024: 'TOO_MANY_REQUESTS',
   10027: 'AUTOTRADING_DISABLED',
+  10030: 'INVALID_FILLING_MODE',
   10031: 'NO_CONNECTION',
 };
+
+// This broker's terminal hard-rejects any order comment over ~28 characters
+// with order_check/order_send returning None and last_error() (-2, 'Invalid
+// "comment" argument') — confirmed empirically against the live connected
+// DEMO terminal. `MT5_PLAN_<uuid>` (45 chars) exceeded this on every single
+// execution attempt, which was the actual root cause of every "Trade in
+// Demo" rejection. Comments must stay short; reconciliation only needs
+// enough of the plan id back to disambiguate concurrently open positions,
+// not the full UUID.
+function planCommentRef(planId: unknown): string {
+  return String(planId).replace(/-/g, '').slice(0, 16);
+}
 
 function retcodeReason(code: number): string {
   return RETCODE_REASON[code] ?? `MT5_RETCODE_${code}`;
@@ -436,7 +495,7 @@ async function blockPlan(pool: Pool, plan: Record<string, unknown>, reason: stri
      WHERE id=$1 AND status NOT IN ('EXECUTED','EXPIRED','CANCELLED')`,
     [plan.id, reason],
   );
-  return { executed: false, entryPlan: { ...plan, status: 'BLOCKED', block_reason: reason }, reason: message ?? reason };
+  return { executed: false, allowed: false, code: reason, entryPlan: { ...plan, status: 'BLOCKED', block_reason: reason }, reason: message ?? reason };
 }
 
 async function expirePlanRow(pool: Pool, plan: Record<string, unknown>): Promise<ExecutionOutcome> {
@@ -445,7 +504,7 @@ async function expirePlanRow(pool: Pool, plan: Record<string, unknown>): Promise
      WHERE id=$1 AND status NOT IN ('EXECUTED','EXPIRED','CANCELLED')`,
     [plan.id],
   );
-  return { executed: false, entryPlan: { ...plan, status: 'EXPIRED' }, reason: 'PLAN_EXPIRED' };
+  return { executed: false, allowed: false, code: 'PLAN_EXPIRED', entryPlan: { ...plan, status: 'EXPIRED' }, reason: 'The entry plan expired before it could be executed' };
 }
 
 function instrumentBounds(info: Record<string, unknown> | null) {
@@ -490,8 +549,36 @@ function validateStopsAndTargets(
   return { ok: true };
 }
 
-async function countTradesToday(pool: Pool): Promise<number> {
-  const result = await pool.query("SELECT count(*)::int AS c FROM trade_outcomes WHERE opened_at >= date_trunc('day', now())");
+// Authoritative trading-day timezone: Asia/Bangkok (Thailand time), matching
+// every other Thailand-time boundary already shown throughout this app
+// (THAILAND_TIME_ZONE in mt5-demo-lab-service.ts). Deliberately NOT the
+// database server's own `now()`/`date_trunc` timezone (which may be UTC or
+// server-local and would roll the "day" over at the wrong wall-clock hour
+// for a Thailand-based owner) and NOT the broker's own server clock either
+// (empirically confirmed elsewhere in this codebase to run hours ahead of
+// real UTC on this broker - an unreliable, non-fixed offset unsuitable as an
+// authoritative boundary).
+//
+// Only counts a row that is a REAL MT5-confirmed entry:
+//   - order_ticket is a genuine numeric MT5 ticket (never the historical
+//     "entry-plan:<uuid>:<ms>" idempotency-key fallback a pre-fix bug once
+//     wrote in its place - the same numeric check migration 0029 uses to
+//     repair old bad rows).
+//   - exit_reason is not RECONCILIATION_FAILED (a trade the app can no
+//     longer verify against MT5 must never count toward "today's trades",
+//     confirmed or not).
+// This is a query-side fix: no data migration is needed, since it excludes
+// bad historical rows automatically rather than requiring them to be
+// mutated.
+export async function countTradesToday(pool: Pool): Promise<number> {
+  const result = await pool.query(
+    `SELECT count(*)::int AS c
+       FROM trade_outcomes
+      WHERE order_ticket ~ '^[0-9]+$'
+        AND (exit_reason IS NULL OR exit_reason <> 'RECONCILIATION_FAILED')
+        AND opened_at >= (date_trunc('day', now() AT TIME ZONE 'Asia/Bangkok') AT TIME ZONE 'Asia/Bangkok')
+        AND opened_at <  (date_trunc('day', now() AT TIME ZONE 'Asia/Bangkok') AT TIME ZONE 'Asia/Bangkok' + interval '1 day')`,
+  );
   return Number(result.rows[0]?.c ?? 0);
 }
 
@@ -513,7 +600,7 @@ export async function executeClaimedPlan(pool: Pool, claimedPlan: Record<string,
       return await expirePlanRow(pool, plan);
     }
     if (cfg.mt5_kill_switch_enabled === true) {
-      return await blockPlan(pool, plan, 'RISK_LIMIT', 'The demo safety switch (kill switch) is ON');
+      return await blockPlan(pool, plan, 'KILL_SWITCH', 'The demo safety switch (kill switch) is ON');
     }
 
     const status = await getMt5Status(actor.requestId ?? undefined).catch(() => null);
@@ -573,6 +660,8 @@ export async function executeClaimedPlan(pool: Pool, claimedPlan: Record<string,
       spreadPoints: computeSpreadPoints(tick, symbolInfo),
       marketStatus: market.market_status as 'OPEN' | 'CLOSED' | 'QUOTE_ONLY' | 'TRADE_DISABLED' | 'UNKNOWN',
       dataStatus: market.data_status as 'LIVE' | 'STALE' | 'DISCONNECTED',
+      symbol: toRiskSymbolInfo(symbolInfo),
+      leverage: Number(status.account?.leverage) || null,
     });
 
     const riskRow = await pool.query(
@@ -607,16 +696,29 @@ export async function executeClaimedPlan(pool: Pool, claimedPlan: Record<string,
       stop_loss: Number(plan.stop_loss),
       take_profit: Number(plan.take_profit),
       deviation: Number(cfg.mt5_allowed_deviation_points ?? 20),
-      comment: `MT5_PLAN_${plan.id}`,
+      comment: `P${planCommentRef(plan.id)}`,
     };
 
     let check: Record<string, unknown>;
     try {
       check = await checkMt5Order(request, actor.requestId ?? undefined);
     } catch (err) {
-      return await blockPlan(pool, plan, 'DEMO_VERIFICATION_FAILED', (err as Error).message);
+      // The Python DemoExecutionGateway already rejects None/bad-retcode
+      // order_check results itself (see mt5/adapter.py) — this catch is a
+      // second line of defense, not the primary check. This is genuinely an
+      // order_check-level rejection (bad request shape/comment/volume/etc),
+      // not a DEMO-verification problem — status/login/server were already
+      // confirmed above before this ever runs.
+      return await blockPlan(pool, plan, 'ORDER_CHECK_FAILED', (err as Error).message);
     }
-    const checkRetcode = Number(check.retcode ?? 0);
+    // NOTE: unlike order_send (whose only success codes are the documented
+    // TRADE_RETCODE_DONE/DONE_PARTIAL), order_check() empirically returns
+    // retcode=0 with comment="Done" for a request that would succeed on this
+    // broker — confirmed against the live connected MT5 DEMO terminal. A
+    // missing/None order_check result is already rejected as an exception by
+    // the Gateway before this ever runs (see mt5/adapter.py), so a genuine 0
+    // here reflects a real OrderCheckResult, not a missing one.
+    const checkRetcode = Number(check.retcode ?? -1);
     if (![0, 10008, 10009].includes(checkRetcode)) {
       return await blockPlan(pool, plan, retcodeReason(checkRetcode), `order_check rejected the request: retcode ${checkRetcode}`);
     }
@@ -625,33 +727,69 @@ export async function executeClaimedPlan(pool: Pool, claimedPlan: Record<string,
     try {
       result = await sendMt5Order(request, actor.requestId ?? undefined);
     } catch (err) {
-      // Ambiguous outcome: the order may or may not have reached MT5. Do NOT
-      // guess and do NOT retry from here — leave the plan in EXECUTING
-      // exactly as claimed. reconcileStuckExecutions (run at the top of
-      // every watcher tick and on startup) is the single place that decides
-      // this plan's fate once the grace period elapses: it checks
-      // trade_outcomes and live MT5 positions by comment before ever
-      // releasing the plan back to TRIGGERED for a fresh, fully re-checked
-      // retry, so a slow-but-successful order_send can never be duplicated.
-      return { executed: false, entryPlan: { ...plan, status: 'EXECUTING' }, reason: `order_send did not return a confirmed result: ${(err as Error).message}` };
+      // The Gateway itself already validates retcode, requires a real
+      // order/deal ticket, and confirms the position via positions_get()
+      // before returning success — so any exception here (rejected retcode,
+      // missing ticket, or "succeeded but no position found") means MT5
+      // never confirmed a real position. Do NOT guess and do NOT retry from
+      // here — leave the plan in EXECUTING exactly as claimed.
+      // reconcileStuckExecutions (run at the top of every watcher tick and
+      // on startup) is the single place that decides this plan's fate once
+      // the grace period elapses: it checks trade_outcomes and live MT5
+      // positions by comment before ever releasing the plan back to
+      // TRIGGERED for a fresh, fully re-checked retry, so a slow-but-
+      // successful order_send can never be duplicated and a genuinely
+      // rejected order can never be mistaken for an open position.
+      return {
+        executed: false,
+        allowed: false,
+        code: 'EXECUTION_UNCONFIRMED',
+        entryPlan: { ...plan, status: 'EXECUTING' },
+        reason: `order_send was not confirmed by MT5: ${(err as Error).message}`,
+      };
     }
 
-    const retcode = Number(result.retcode ?? 0);
-    if (![0, 10008, 10009].includes(retcode)) {
+    // 0 is accepted alongside DONE/DONE_PARTIAL: this broker's trade server
+    // empirically reports retcode=0 for a genuinely successful order_send
+    // (see mt5/adapter.py for the confirmed evidence). Safety does not rest
+    // on this value — the ticket presence check and confirmed_position below
+    // are what actually gate whether this is ever recorded as executed; the
+    // Python Gateway has already independently validated all of this and
+    // would have thrown before returning here if it could not confirm a
+    // real position, so this is a second line of defense, not the primary one.
+    const retcode = Number(result.retcode ?? -1);
+    if (![0, 10009, 10010].includes(retcode)) {
       return await blockPlan(pool, plan, retcodeReason(retcode), `MT5 order_send rejected the order: retcode ${retcode}`);
     }
 
-    const orderTicket = String(result.order ?? result.deal ?? executionKey);
-    const dealTicket = result.deal !== undefined ? String(result.deal) : null;
-    const slippage = new Decimal(actualEntry).minus(new Decimal(String(plan.reference_entry ?? actualEntry))).toFixed(8);
+    const orderTicket = result.order !== undefined && result.order !== null ? String(result.order) : null;
+    const dealTicket = result.deal !== undefined && result.deal !== null ? String(result.deal) : null;
+    if (!orderTicket && !dealTicket) {
+      // Should be unreachable — the Gateway itself refuses to return success
+      // without a real ticket — but never fabricate one from the execution
+      // key if it somehow happens; that fabrication was the exact root
+      // cause of trades showing OPEN in the app with no real MT5 position.
+      return await blockPlan(pool, plan, 'RECONCILIATION_FAILED', 'MT5 order_send reported success but returned no order/deal ticket');
+    }
+
+    // The confirmed live position (attached by the Gateway after
+    // positions_get() verification) is the most authoritative source for
+    // what actually happened — prefer it over the pre-trade tick estimate.
+    const confirmedPosition = (result.confirmed_position ?? null) as Record<string, unknown> | null;
+    const confirmedEntry = numberOrNull(confirmedPosition?.price_open) ?? actualEntry;
+    const confirmedVolume = numberOrNull(confirmedPosition?.volume);
+    const persistedVolume = confirmedVolume !== null ? confirmedVolume.toFixed(8) : finalVolume.toFixed(8);
+    const slippage = new Decimal(confirmedEntry).minus(new Decimal(String(plan.reference_entry ?? confirmedEntry))).toFixed(8);
+    const openedAt = new Date().toISOString();
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query(
         `INSERT INTO trade_outcomes(symbol, ai_decision_id, entry_plan_id, order_ticket, deal_ticket, retcode, side,
-            volume, expected_entry, actual_entry, stop_loss, take_profit, risk_amount, risk_reward, slippage, opened_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+            volume, expected_entry, actual_entry, stop_loss, take_profit, risk_amount, risk_reward, slippage,
+            account_equity_at_entry, opened_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
          ON CONFLICT (entry_plan_id) WHERE entry_plan_id IS NOT NULL DO NOTHING`,
         [
           symbol,
@@ -661,21 +799,22 @@ export async function executeClaimedPlan(pool: Pool, claimedPlan: Record<string,
           dealTicket,
           retcode,
           side,
-          finalVolume.toFixed(8),
+          persistedVolume,
           plan.reference_entry,
-          actualEntry,
+          confirmedEntry,
           plan.stop_loss,
           plan.take_profit,
           risk.riskAmount,
           plan.risk_reward,
           slippage,
+          numberOrNull(status.account?.equity),
         ],
       );
       await client.query(
         `UPDATE mt5_entry_plans SET status='EXECUTED', executed_at=now(), actual_entry=$2, final_volume=$3,
             order_ticket=$4, deal_ticket=$5, retcode=$6, updated_at=now()
          WHERE id=$1 AND status='EXECUTING'`,
-        [plan.id, actualEntry, finalVolume.toFixed(8), orderTicket, dealTicket, retcode],
+        [plan.id, confirmedEntry, persistedVolume, orderTicket, dealTicket, retcode],
       );
       await client.query('COMMIT');
     } catch (err) {
@@ -698,7 +837,17 @@ export async function executeClaimedPlan(pool: Pool, claimedPlan: Record<string,
 
     return {
       executed: true,
-      entryPlan: { ...plan, status: 'EXECUTED', actual_entry: actualEntry, final_volume: finalVolume.toFixed(8), order_ticket: orderTicket },
+      allowed: true,
+      code: null,
+      entryPlan: {
+        ...plan,
+        status: 'EXECUTED',
+        actual_entry: confirmedEntry,
+        final_volume: persistedVolume,
+        order_ticket: orderTicket,
+        deal_ticket: dealTicket,
+        opened_at: openedAt,
+      },
       risk: riskRow.rows[0],
       check,
       result,
@@ -743,7 +892,7 @@ export async function reconcileStuckExecutions(pool: Pool, actor: Mt5Actor, grac
       continue;
     }
 
-    const matched = positions.find((position) => String(position.comment ?? '').includes(String(row.id)));
+    const matched = positions.find((position) => String(position.comment ?? '').includes(planCommentRef(row.id)));
     if (matched) {
       const actualEntry = numberOrNull(matched.price_open) ?? row.reference_entry;
       await pool.query(
@@ -784,6 +933,96 @@ export async function reconcileStuckExecutions(pool: Pool, actor: Mt5Actor, grac
   }
 }
 
+const NUMERIC_TICKET = /^\d+$/;
+
+// MT5 DEAL_ENTRY_* / DEAL_REASON_* — see MetaTrader5/__init__.py.
+const DEAL_ENTRY_OUT = 1;
+const DEAL_REASON_EXIT_LABEL: Record<number, 'STOP_LOSS' | 'TAKE_PROFIT' | 'RISK_EXIT' | 'MANUAL_CLOSE' | 'BROKER_CLOSE' | 'OTHER'> = {
+  0: 'MANUAL_CLOSE', // DEAL_REASON_CLIENT
+  1: 'MANUAL_CLOSE', // DEAL_REASON_MOBILE
+  2: 'MANUAL_CLOSE', // DEAL_REASON_WEB
+  3: 'OTHER', // DEAL_REASON_EXPERT
+  4: 'STOP_LOSS', // DEAL_REASON_SL
+  5: 'TAKE_PROFIT', // DEAL_REASON_TP
+  6: 'RISK_EXIT', // DEAL_REASON_SO (stop out)
+  7: 'BROKER_CLOSE', // DEAL_REASON_ROLLOVER
+  8: 'BROKER_CLOSE', // DEAL_REASON_VMARGIN
+  9: 'BROKER_CLOSE', // DEAL_REASON_SPLIT
+};
+
+async function markTradeOutcomeReconciliationFailed(pool: Pool, row: Record<string, unknown>, reason: string): Promise<void> {
+  await pool.query(
+    `UPDATE trade_outcomes SET closed_at=now(), exit_reason='RECONCILIATION_FAILED' WHERE id=$1 AND closed_at IS NULL`,
+    [row.id],
+  );
+  if (row.entry_plan_id) {
+    await pool.query(
+      `UPDATE mt5_entry_plans SET status='RECONCILIATION_FAILED', blocked_at=now(), block_reason=$2, updated_at=now()
+       WHERE id=$1 AND status NOT IN ('EXPIRED','CANCELLED','RECONCILIATION_FAILED')`,
+      [row.entry_plan_id, reason],
+    );
+  }
+}
+
+/** Looks up the closing deal(s) for a position ticket via MT5 deal history and closes the trade_outcomes row with the real exit reason and realized P&L. Returns false if no closing deal could be found (caller then marks the row as a reconciliation failure rather than leaving it ambiguously "open"). */
+async function closeTradeOutcomeFromHistory(pool: Pool, row: Record<string, unknown>, actor: Mt5Actor): Promise<boolean> {
+  const openedAt = new Date(String(row.opened_at));
+  const hoursSinceOpen = Number.isFinite(openedAt.getTime()) ? Math.ceil((Date.now() - openedAt.getTime()) / 3_600_000) + 1 : 24;
+  const hours = Math.min(Math.max(hoursSinceOpen, 1), 24 * 90);
+  const deals = await getMt5HistoryDeals(String(row.symbol), hours, actor.requestId ?? undefined).catch(() => null);
+  if (!deals) return false;
+
+  const positionId = String(row.order_ticket);
+  const closingDeals = deals.filter((deal) => String(deal.position_id ?? '') === positionId && Number(deal.entry) === DEAL_ENTRY_OUT);
+  if (!closingDeals.length) return false;
+
+  const realizedPnl = closingDeals.reduce((sum, deal) => sum + (numberOrNull(deal.profit) ?? 0), 0);
+  const fees = closingDeals.reduce((sum, deal) => sum + Math.abs(numberOrNull(deal.commission) ?? 0) + Math.abs(numberOrNull(deal.swap) ?? 0), 0);
+  const last = closingDeals[closingDeals.length - 1];
+  const exitReason = DEAL_REASON_EXIT_LABEL[Number(last.reason ?? -1)] ?? 'OTHER';
+  const closedAtSeconds = numberOrNull(last.time);
+  const closedAt = closedAtSeconds !== null ? new Date(closedAtSeconds * 1000) : new Date();
+
+  await pool.query(
+    `UPDATE trade_outcomes SET closed_at=$2, exit_reason=$3, realized_pnl=$4, fees=$5 WHERE id=$1 AND closed_at IS NULL`,
+    [row.id, closedAt.toISOString(), exitReason, realizedPnl.toFixed(8), fees.toFixed(8)],
+  );
+  return true;
+}
+
+/**
+ * Open Trades/History must reflect MT5 reality, not just DB intent. This
+ * verifies every trade_outcomes row still marked open (closed_at IS NULL)
+ * against live positions_get(): a non-numeric order_ticket proves the
+ * original order_send was never actually confirmed (the exact shape of the
+ * bug that let ETHUSD show as open with no real MT5 position); a numeric
+ * ticket no longer present in positions_get() means the position closed
+ * (externally, by SL/TP, or by another process) and is reconciled against
+ * MT5 deal history for the real exit reason and P&L.
+ */
+export async function reconcileOpenTradeOutcomes(pool: Pool, actor: Mt5Actor): Promise<void> {
+  const openRows = await pool.query('SELECT * FROM trade_outcomes WHERE closed_at IS NULL ORDER BY opened_at ASC LIMIT 100');
+  if (!openRows.rows.length) return;
+
+  const positions = await listMt5Positions(actor.requestId ?? undefined).catch(() => null);
+  if (positions === null) return; // MT5 unreachable this tick — never guess, just retry next tick.
+  const openTickets = new Set(positions.map((position) => String(position.ticket ?? '')));
+
+  for (const row of openRows.rows) {
+    const orderTicket = row.order_ticket ? String(row.order_ticket) : '';
+    if (!NUMERIC_TICKET.test(orderTicket)) {
+      await markTradeOutcomeReconciliationFailed(pool, row, 'Order ticket is not a real MT5 ticket; order_send was never confirmed');
+      continue;
+    }
+    if (openTickets.has(orderTicket)) continue; // MT5-confirmed: genuinely still open.
+
+    const closed = await closeTradeOutcomeFromHistory(pool, row, actor);
+    if (!closed) {
+      await markTradeOutcomeReconciliationFailed(pool, row, 'Position is no longer open in MT5 and no closing deal history was found');
+    }
+  }
+}
+
 async function expireStalePlans(pool: Pool): Promise<void> {
   await pool.query(
     `UPDATE mt5_entry_plans SET status='EXPIRED', expired_at=now(), updated_at=now()
@@ -798,7 +1037,10 @@ async function expireStalePlans(pool: Pool): Promise<void> {
  */
 export async function runEntryPlanWatcherTick(pool: Pool, actor: Mt5Actor, autoDemoEnabled: boolean) {
   await reconcileStuckExecutions(pool, actor).catch((err) => {
-    console.warn('[mt5-entry-plan-watcher] reconciliation failed:', (err as Error).message);
+    console.warn('[mt5-entry-plan-watcher] execution reconciliation failed:', (err as Error).message);
+  });
+  await reconcileOpenTradeOutcomes(pool, actor).catch((err) => {
+    console.warn('[mt5-entry-plan-watcher] open trade reconciliation failed:', (err as Error).message);
   });
   await expireStalePlans(pool).catch(() => undefined);
 
@@ -815,12 +1057,12 @@ export async function runEntryPlanWatcherTick(pool: Pool, actor: Mt5Actor, autoD
     if ((refreshed.status === 'TRIGGERED' || refreshed.status === 'READY') && autoDemoEnabled) {
       const claimed = await claimPlanForExecution(pool, String(refreshed.plan.id));
       if (!claimed) {
-        outcomes.push({ executed: false, entryPlan: refreshed.plan, reason: 'Plan is already being processed' });
+        outcomes.push({ executed: false, allowed: false, code: 'ALREADY_PROCESSING', entryPlan: refreshed.plan, reason: 'Plan is already being processed' });
         continue;
       }
       outcomes.push(await executeClaimedPlan(pool, claimed, actor));
     } else {
-      outcomes.push({ executed: false, entryPlan: refreshed.plan });
+      outcomes.push({ executed: false, allowed: false, code: null, entryPlan: refreshed.plan });
     }
   }
   return { processed: outcomes.length, outcomes };
@@ -835,11 +1077,51 @@ export async function runEntryPlanWatcherTick(pool: Pool, actor: Mt5Actor, autoD
 
 type DemoExecutionMode = 'AUTO_DEMO' | 'ASSISTED_DEMO';
 
+// Idempotency contract: a second/duplicate request for a plan that is
+// already mid-flight or already resolved must never surface a generic
+// "ALREADY_PROCESSING" — the exact reason is always knowable from the row's
+// own status, so return it. EXECUTING in particular must say so plainly
+// (EXECUTION_IN_PROGRESS) rather than implying the plan was simply never
+// eligible, and an already-EXECUTED plan must hand back the real MT5 ticket
+// so a double-click can never look like a silent failure.
+export function describeUnclaimablePlan(row: Record<string, unknown> | undefined): { code: string; reason: string } {
+  const status = String(row?.status ?? '');
+  switch (status) {
+    case 'EXECUTING':
+      return { code: 'EXECUTION_IN_PROGRESS', reason: 'This entry plan is already being executed. Wait for it to finish before trying again.' };
+    case 'EXECUTED': {
+      const ticket = row?.order_ticket ?? row?.deal_ticket;
+      return { code: 'ALREADY_EXECUTED', reason: ticket ? `This entry plan already executed in MT5 (ticket ${ticket}).` : 'This entry plan already executed in MT5.' };
+    }
+    case 'EXPIRED':
+      return { code: 'PLAN_EXPIRED', reason: 'This entry plan expired before it could be executed.' };
+    case 'CANCELLED':
+      return { code: 'PLAN_CANCELLED', reason: 'This entry plan was cancelled.' };
+    case 'BLOCKED':
+      return { code: String(row?.block_reason ?? 'BLOCKED'), reason: 'This entry plan is currently blocked and cannot be executed.' };
+    case 'WAITING':
+      return { code: 'WAITING_ENTRY', reason: 'AI is still waiting for price to reach the entry condition.' };
+    default:
+      // Row not found, or a genuine claim race with another concurrent
+      // request that landed between our SELECT and UPDATE — the row itself
+      // could not tell us anything more specific than "try again".
+      return { code: 'ALREADY_PROCESSING', reason: 'This entry plan could not be claimed for execution right now. Try again in a moment.' };
+  }
+}
+
 export async function executeEntryPlanById(pool: Pool, planId: string, actor: Mt5Actor): Promise<ExecutionOutcome> {
   const claimed = await claimPlanForExecution(pool, planId);
   if (!claimed) {
     const current = await pool.query('SELECT * FROM mt5_entry_plans WHERE id=$1', [planId]);
-    return { executed: false, entryPlan: current.rows[0] ?? { id: planId }, reason: 'Entry plan is not eligible for execution right now (already processed or not triggered/ready).' };
+    const row = current.rows[0] as Record<string, unknown> | undefined;
+    const { code, reason } = describeUnclaimablePlan(row);
+    return {
+      executed: false,
+      allowed: false,
+      code,
+      entryPlan: row ?? { id: planId },
+      reason,
+    };
   }
   return executeClaimedPlan(pool, claimed, actor);
 }
@@ -852,15 +1134,35 @@ async function executeDemoTradeForSymbol(
   runAssistedAnalysis: (pool: Pool, symbol: string, actor: Mt5Actor) => Promise<{ decision: Record<string, unknown>; entryPlan: Record<string, unknown> }>,
 ) {
   const cfg = loadMt5RiskSettings();
-  if (mode === 'AUTO_DEMO' && cfg.mt5_auto_demo_enabled !== true) throw new Error('AUTO-DEMO is disabled');
+  // AUTO-DEMO gating only applies to the backend's own automatic execution
+  // (mode==='AUTO_DEMO', driven by the watcher/scheduler). It must never gate
+  // ASSISTED_DEMO — an owner-approved "Trade in Demo" click is a manual,
+  // in-the-moment authorization that AUTO-DEMO's off switch does not cover.
+  if (mode === 'AUTO_DEMO' && cfg.mt5_auto_demo_enabled !== true) {
+    return { executed: false, allowed: false, code: 'AUTO_DEMO_DISABLED', entryPlan: null, reason: 'AUTO-DEMO is disabled; automatic execution is not permitted.' };
+  }
   const status = await getMt5Status(actor.requestId ?? undefined);
-  if (!status.demo_verified) throw new Error(status.blocked_reason ?? 'MT5 DEMO is not verified');
+  if (!status.demo_verified) {
+    return {
+      executed: false,
+      allowed: false,
+      code: 'DEMO_VERIFICATION_FAILED',
+      entryPlan: null,
+      reason: status.blocked_reason ?? 'MT5 DEMO is not verified',
+    };
+  }
 
   const analysis = await runAssistedAnalysis(pool, symbol, actor);
   const entryPlanStatus = String(analysis.entryPlan.current_entry_status ?? analysis.entryPlan.status ?? 'BLOCKED');
   if (!['READY', 'TRIGGERED'].includes(entryPlanStatus)) {
+    // The plan's own block_reason (set by risk/analysis evaluation) is the
+    // most specific code available here — fall back to the plan status only
+    // when no rule-level reason was recorded.
+    const code = (analysis.entryPlan.block_reason as string | undefined) ?? entryPlanStatus;
     return {
       executed: false,
+      allowed: false,
+      code,
       decision: analysis.decision,
       entryPlan: analysis.entryPlan,
       reason: `Entry plan is ${entryPlanStatus}; execution is not allowed yet.`,
@@ -879,6 +1181,144 @@ async function executeDemoTradeForSymbol(
     requestId: actor.requestId ?? null,
   });
   return { ...outcome, decision: analysis.decision };
+}
+
+// ---------------------------------------------------------------------------
+// Manual DEMO test order — a developer/diagnostic action to verify the
+// execution pipe independently of the AI strategy. It is NOT gated by
+// AUTO-DEMO (it is an explicit owner-triggered action, not automatic), but
+// it goes through the exact same checkMt5Order/sendMt5Order calls — and
+// therefore the same DemoExecutionGateway — as every other execution path.
+// No second execution implementation is created here.
+// ---------------------------------------------------------------------------
+
+export interface DemoTestOrderResult {
+  executed: true;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  volume: number;
+  actualEntry: number;
+  stopLoss: number;
+  takeProfit: number;
+  orderTicket: string | null;
+  dealTicket: string | null;
+  retcode: number;
+}
+
+export async function sendMt5DemoTestOrder(pool: Pool, symbol: string, side: 'BUY' | 'SELL', actor: Mt5Actor): Promise<DemoTestOrderResult> {
+  const cfg = loadMt5RiskSettings();
+  if (cfg.mt5_kill_switch_enabled === true) {
+    throw new Error('The demo safety switch (kill switch) is ON; refusing to send a test order');
+  }
+
+  const status = await getMt5Status(actor.requestId ?? undefined);
+  if (!status.demo_verified) {
+    throw new Error(status.blocked_reason ?? 'MT5 DEMO is not verified');
+  }
+
+  const [tick, market, symbolInfo, positions, pendingOrders] = await Promise.all([
+    getMt5Tick(symbol, actor.requestId ?? undefined),
+    getMt5MarketStatus(symbol, actor.requestId ?? undefined),
+    getMt5SymbolInfo(symbol, actor.requestId ?? undefined),
+    listMt5Positions(actor.requestId ?? undefined),
+    listMt5PendingOrders(actor.requestId ?? undefined),
+  ]);
+
+  if (market.market_status !== 'OPEN') throw new Error(`Market is not open for ${symbol}: ${String(market.market_status)}`);
+  if (market.data_status !== 'LIVE') throw new Error(`Market data is not live for ${symbol}: ${String(market.data_status)}`);
+  if (positions.some((position) => String(position.symbol) === symbol)) {
+    throw new Error(`An open position already exists for ${symbol}; refusing to stack a test order`);
+  }
+  if (pendingOrders.some((order) => String(order.symbol) === symbol)) {
+    throw new Error(`A pending order already exists for ${symbol}`);
+  }
+
+  const actualEntry = side === 'BUY' ? numberOrNull(tick.ask) : numberOrNull(tick.bid);
+  if (actualEntry === null || actualEntry <= 0) throw new Error(`Invalid executable bid/ask price for ${symbol}`);
+
+  const bounds = instrumentBounds(symbolInfo);
+  const volume = bounds.min; // smallest possible lot size — the safest test.
+
+  const point = numberOrNull(symbolInfo?.point) ?? numberOrNull(symbolInfo?.trade_tick_size) ?? 0;
+  if (point <= 0) throw new Error(`Could not read a valid point size for ${symbol}`);
+  const stopsLevelPoints = Number(symbolInfo?.trade_stops_level ?? 0);
+  const freezeLevelPoints = Number(symbolInfo?.trade_freeze_level ?? 0);
+  // A generous safety margin above the broker minimum stops/freeze level so
+  // the request is never rejected purely for being too close to price.
+  const distance = Math.max(stopsLevelPoints, freezeLevelPoints, 50) * point * 3;
+
+  const stopLoss = side === 'BUY' ? actualEntry - distance : actualEntry + distance;
+  const takeProfit = side === 'BUY' ? actualEntry + distance : actualEntry - distance;
+
+  const slTp = validateStopsAndTargets(side, actualEntry, stopLoss, takeProfit, symbolInfo);
+  if (!slTp.ok) throw new Error(slTp.message);
+
+  const request: Mt5OrderRequestDTO = {
+    idempotency_key: `demo-test:${symbol}:${Date.now()}`,
+    symbol,
+    side,
+    volume: Number(volume),
+    stop_loss: Number(stopLoss.toFixed(8)),
+    take_profit: Number(takeProfit.toFixed(8)),
+    deviation: Number(cfg.mt5_allowed_deviation_points ?? 20),
+    comment: `DEVTEST${Date.now().toString(36)}`,
+  };
+
+  const check = await checkMt5Order(request, actor.requestId ?? undefined);
+  const checkRetcode = Number(check.retcode ?? -1);
+  if (![0, 10008, 10009].includes(checkRetcode)) {
+    throw new Error(`order_check rejected the test order: retcode ${checkRetcode} (${retcodeReason(checkRetcode)})`);
+  }
+
+  const result = await sendMt5Order(request, actor.requestId ?? undefined);
+  const retcode = Number(result.retcode ?? -1);
+  if (![0, 10009, 10010].includes(retcode)) {
+    throw new Error(`order_send rejected the test order: retcode ${retcode} (${retcodeReason(retcode)})`);
+  }
+
+  const orderTicket = result.order !== undefined && result.order !== null ? String(result.order) : null;
+  const dealTicket = result.deal !== undefined && result.deal !== null ? String(result.deal) : null;
+  if (!orderTicket && !dealTicket) {
+    throw new Error('MT5 order_send did not return an order/deal ticket; refusing to record a test trade');
+  }
+
+  const confirmedPosition = (result.confirmed_position ?? null) as Record<string, unknown> | null;
+  const confirmedEntry = numberOrNull(confirmedPosition?.price_open) ?? actualEntry;
+  const confirmedVolume = numberOrNull(confirmedPosition?.volume) ?? Number(volume);
+
+  await pool.query(
+    `INSERT INTO trade_outcomes(symbol, order_ticket, deal_ticket, retcode, side, volume, expected_entry,
+        actual_entry, stop_loss, take_profit, account_equity_at_entry, opened_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())`,
+    [
+      symbol, orderTicket, dealTicket, retcode, side, confirmedVolume.toFixed(8), actualEntry, confirmedEntry,
+      stopLoss.toFixed(8), takeProfit.toFixed(8), numberOrNull(status.account?.equity),
+    ],
+  );
+
+  await createAuditLog(pool, {
+    eventType: 'MT5_DEMO_TEST_ORDER_SENT',
+    actorId: actor.actorId,
+    actorEmail: actor.actorEmail,
+    entityType: 'mt5_test_order',
+    entityId: null,
+    action: 'DEMO_TEST_ORDER',
+    afterData: { request, check, result },
+    requestId: actor.requestId ?? null,
+  });
+
+  return {
+    executed: true,
+    symbol,
+    side,
+    volume: confirmedVolume,
+    actualEntry: confirmedEntry,
+    stopLoss,
+    takeProfit,
+    orderTicket,
+    dealTicket,
+    retcode,
+  };
 }
 
 // ---------------------------------------------------------------------------

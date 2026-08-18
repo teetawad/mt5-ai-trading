@@ -59,10 +59,9 @@
 <script setup lang="ts">
 const navItems = [
   { to: '/', label: 'Home' },
-  { to: '/analysis', label: 'AI Analysis' },
+  { to: '/ai-trade', label: 'AI Trade' },
   { to: '/positions', label: 'Open Trades' },
   { to: '/history', label: 'History' },
-  { to: '/market-hours', label: 'Market Hours' },
   { to: '/settings', label: 'Settings' },
 ];
 
@@ -70,6 +69,7 @@ const advancedItems = [
   { to: '/advanced/scanner', label: 'Scanner' },
   { to: '/advanced/risk', label: 'Risk Engine' },
   { to: '/advanced/diagnostics', label: 'Diagnostics' },
+  { to: '/ai-lab', label: 'AI Lab' },
 ];
 
 const { logout } = useAuth();

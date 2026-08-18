@@ -13,5 +13,5 @@
 
 <script setup lang="ts">
 const { apiFetch } = useApi();
-const { data } = await useAsyncData<Array<{ key: string; value: unknown }>>('mt5-risk-settings', () => apiFetch('/mt5/risk-settings'));
+const { data } = await useAsyncData<Array<{ key: string; value: unknown }>>('mt5-risk-settings', () => apiFetch('/mt5/risk-settings'), { lazy: true });
 </script>

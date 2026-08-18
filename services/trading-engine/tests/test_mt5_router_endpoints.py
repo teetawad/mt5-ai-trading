@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -16,6 +17,8 @@ class FakeAdapter:
 
     def __init__(self) -> None:
         self.selected: list[str] = []
+        self.last_date_from: datetime | None = None
+        self.last_date_to: datetime | None = None
 
     def ensure_connected(self) -> None:
         return None
@@ -38,6 +41,20 @@ class FakeAdapter:
 
     def orders_get(self, symbol: str | None = None) -> list[object]:
         return [SimpleNamespace(ticket=42, symbol="ETHUSD", type=2)]
+
+    def history_deals_get(
+        self, date_from: datetime, date_to: datetime, **kwargs: object
+    ) -> list[object]:
+        self.last_date_from = date_from
+        self.last_date_to = date_to
+        return []
+
+    def history_orders_get(
+        self, date_from: datetime, date_to: datetime, **kwargs: object
+    ) -> list[object]:
+        self.last_date_from = date_from
+        self.last_date_to = date_to
+        return [SimpleNamespace(ticket=555, symbol="ETHUSD", state=4)]
 
 
 def _auth(monkeypatch) -> None:
@@ -70,3 +87,50 @@ def test_pending_orders_endpoint_lists_orders_without_calling_order_send(monkeyp
     assert response.status_code == 200
     data = response.json()
     assert data == [{"ticket": 42, "symbol": "ETHUSD", "type": 2}]
+
+
+def test_history_deals_date_to_is_padded_past_real_now_for_broker_clock_skew(monkeypatch) -> None:
+    """Regression test for the actual root cause of "closed trades never
+    reconcile": this broker's terminal server clock runs hours ahead of this
+    process's real UTC clock (confirmed empirically against the live DEMO
+    terminal — deal timestamps ~3h ahead of datetime.now(UTC)).
+    history_deals_get() filters strictly by each deal's server-clock
+    timestamp, so date_to=now(UTC) silently excluded deals for positions
+    that had just closed. date_to must be padded forward of real "now" so a
+    deal timestamped in the broker's (ahead) clock is never excluded."""
+    _auth(monkeypatch)
+    fake = FakeAdapter()
+    monkeypatch.setattr(mt5_router, "_adapter", fake)
+    before = datetime.now(UTC)
+    response = client.get(
+        "/mt5/history-deals?symbol=ETHUSD&hours=2", headers={"X-Internal-Token": TOKEN}
+    )
+    after = datetime.now(UTC)
+    assert response.status_code == 200
+    assert fake.last_date_to > after
+    # A generous buffer, not an unbounded one — bounded well below a day out.
+    assert fake.last_date_to - after < timedelta(hours=24)
+    # The requested lookback depth (hours=2) must stay anchored to real
+    # "now", not shift forward by the same buffer applied to date_to.
+    assert before - fake.last_date_from < timedelta(hours=2, minutes=1)
+    assert before - fake.last_date_from > timedelta(hours=1, minutes=59)
+
+
+def test_history_orders_endpoint_returns_order_history(monkeypatch) -> None:
+    _auth(monkeypatch)
+    fake = FakeAdapter()
+    monkeypatch.setattr(mt5_router, "_adapter", fake)
+    response = client.get(
+        "/mt5/history-orders?symbol=ETHUSD&hours=2", headers={"X-Internal-Token": TOKEN}
+    )
+    assert response.status_code == 200
+    assert response.json() == [{"ticket": 555, "symbol": "ETHUSD", "state": 4}]
+
+
+def test_history_orders_date_to_is_also_padded_for_broker_clock_skew(monkeypatch) -> None:
+    _auth(monkeypatch)
+    fake = FakeAdapter()
+    monkeypatch.setattr(mt5_router, "_adapter", fake)
+    after = datetime.now(UTC)
+    client.get("/mt5/history-orders?symbol=ETHUSD&hours=2", headers={"X-Internal-Token": TOKEN})
+    assert fake.last_date_to > after

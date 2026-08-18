@@ -85,7 +85,7 @@ const message = ref('');
 const errorText = ref('');
 const showAutoConfirm = ref(false);
 
-const { data: autoDemo, refresh } = await useAsyncData<{ enabled: boolean }>('mt5-auto-demo-setting', () => apiFetch('/mt5/auto-demo'));
+const { data: autoDemo, refresh } = await useAsyncData<{ enabled: boolean }>('mt5-auto-demo-setting', () => apiFetch('/mt5/auto-demo'), { lazy: true });
 
 async function setAutoDemo(enabled: boolean) {
   busy.value = true;

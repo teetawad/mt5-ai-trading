@@ -31,6 +31,11 @@ async function main() {
   const { startMt5EntryPlanWatcher } = await import('./services/mt5-entry-plan-watcher');
   startMt5EntryPlanWatcher(getPoolForScheduler());
   console.log('[api] EntryPlanWatcher started — WAITING/READY/TRIGGERED plans are monitored independently of the browser');
+  const { startAiTradePlanWatcher } = await import('./services/trading-ai/ai-trade-plan-watcher');
+  startAiTradePlanWatcher(getPoolForScheduler());
+  const { isAiProviderConfigured } = await import('./services/trading-ai/provider');
+  console.log(`[api] AiTradePlanWatcher started — real MT5 pending orders from the Trading AI are reconciled independently of the browser`);
+  console.log(`[api] Trading AI provider: ${isAiProviderConfigured() ? `${process.env.TRADING_AI_PROVIDER}/${process.env.TRADING_AI_MODEL}` : 'AI PROVIDER NOT CONFIGURED'}`);
 }
 
 main().catch((error) => {

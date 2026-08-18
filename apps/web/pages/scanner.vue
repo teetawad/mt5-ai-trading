@@ -303,10 +303,12 @@ const scanResultsCard = ref<{ $el?: HTMLElement } | null>(null);
 const { data: instrumentData, refresh: refreshInstruments } = await useAsyncData(
   'mt5-instruments',
   () => apiFetch<{ instruments: InstrumentRow[] }>('/mt5/instruments'),
+  { lazy: true },
 );
 const { data: scanner, refresh: refreshScanner } = await useAsyncData<ScannerResponse>(
   'mt5-scanner-page',
   () => apiFetch('/mt5/scanner'),
+  { lazy: true },
 );
 
 const instruments = computed(() => instrumentData.value?.instruments ?? []);

@@ -10,7 +10,7 @@
       </div>
       <div class="flex flex-wrap gap-2">
         <button class="btn-primary" :disabled="busy" @click="refreshAll">{{ busy ? 'Refreshing...' : 'Refresh' }}</button>
-        <NuxtLink to="/analysis" class="btn-success">Run AI Analysis</NuxtLink>
+        <NuxtLink to="/ai-trade" class="btn-success">Ask AI</NuxtLink>
       </div>
     </header>
 
@@ -50,20 +50,31 @@
         </div>
       </UiCard>
 
-      <UiCard title="Top Opportunities Right Now" subtitle="Top 3 from enabled watchlist, if a scan is available.">
-        <div v-if="topOpportunities.length" class="space-y-3">
-          <div v-for="row in topOpportunities" :key="row.symbol" class="rounded-lg border border-slate-800 bg-slate-950/70 p-4">
+      <UiCard title="AI Top Opportunities" subtitle="Ranked by Trade Score — most recent AI analysis per watched symbol. Does not place any trade automatically.">
+        <div v-if="aiTopOpportunities.length" class="space-y-3">
+          <NuxtLink
+            v-for="row in aiTopOpportunities"
+            :key="row.symbol"
+            to="/ai-trade"
+            class="block rounded-lg border border-slate-800 bg-slate-950/70 p-4 transition hover:border-sky-400/60"
+          >
             <div class="flex items-start justify-between gap-3">
               <div>
                 <p class="font-semibold text-white">{{ row.symbol }}</p>
                 <p class="mt-1 text-xs text-slate-400">{{ labelAsset(row.assetClass) }}</p>
               </div>
-              <StatusPill :label="decisionLabel(row)" />
+              <div class="flex flex-col items-end gap-1">
+                <StatusPill :label="row.decision" />
+                <StatusPill v-if="row.action" :label="row.action" />
+              </div>
             </div>
-            <p class="mt-3 text-xs text-slate-400">Score {{ round(row.opportunity_score) }}/100 · {{ row.market_status ?? 'UNKNOWN' }} · {{ riskLabel(row) }}</p>
-          </div>
+            <div class="mt-3 flex items-baseline gap-2">
+              <p v-if="row.tradeabilityPct !== null" class="text-2xl font-bold" :class="scoreClass(row.tradeabilityPct)">{{ Math.round(row.tradeabilityPct) }}%</p>
+              <p v-if="row.tradeabilityRatingLabelTh" class="text-xs text-slate-400">{{ row.tradeabilityRatingLabelTh }}</p>
+            </div>
+          </NuxtLink>
         </div>
-        <EmptyState v-else title="No opportunities yet" message="Enable symbols and run AI Analysis to see ranked ideas here." />
+        <EmptyState v-else title="No AI opportunities yet" message="Run FIND BEST TRADES on the AI Trade page to see ranked ideas here." />
       </UiCard>
     </section>
 
@@ -118,7 +129,7 @@
 
 <script setup lang="ts">
 type InstrumentRow = { symbol: string; asset_class: string; description?: string | null; watchlist_enabled: boolean };
-type OpportunityRow = { symbol: string; assetClass: string; decision?: string; market_status?: string; opportunity_score?: number; risk?: { result?: string } };
+type AiOpportunityRow = { symbol: string; assetClass: string; decision: string; action: string | null; confidencePct: number | null; tradeabilityPct: number | null; tradeabilityRating: string | null; tradeabilityRatingLabelTh: string | null };
 
 const { apiFetch } = useApi();
 const busy = ref(false);
@@ -127,14 +138,15 @@ const errorText = ref('');
 const search = ref('');
 const assetFilter = ref('ALL');
 
-const { data: dashboard, refresh: refreshDashboard } = await useAsyncData<Record<string, any>>('mt5-dashboard', () => apiFetch('/mt5/dashboard'));
-const { data: instrumentData, refresh: refreshInstruments } = await useAsyncData<{ instruments: InstrumentRow[] }>('dashboard-instruments', () => apiFetch('/mt5/instruments'));
+const { data: dashboard, refresh: refreshDashboard } = await useAsyncData<Record<string, any>>('mt5-dashboard', () => apiFetch('/mt5/dashboard'), { lazy: true });
+const { data: instrumentData, refresh: refreshInstruments } = await useAsyncData<{ instruments: InstrumentRow[] }>('dashboard-instruments', () => apiFetch('/mt5/instruments'), { lazy: true });
+const { data: aiOpportunities, refresh: refreshAiOpportunities } = await useAsyncData<{ opportunities: AiOpportunityRow[] }>('dashboard-ai-opportunities', () => apiFetch('/mt5/ai-trade/top-opportunities'), { lazy: true });
 useAutoRefresh(refreshDashboard, 7000);
 
 const account = computed(() => dashboard.value?.account ?? {});
 const stats = computed(() => dashboard.value?.statistics ?? { openTrades: 0, winRate: 0, totalClosedTrades: 0, totalWins: 0, totalLosses: 0 });
 const marketSummary = computed(() => dashboard.value?.marketSummary ?? {});
-const topOpportunities = computed<OpportunityRow[]>(() => dashboard.value?.topOpportunities ?? []);
+const aiTopOpportunities = computed<AiOpportunityRow[]>(() => aiOpportunities.value?.opportunities ?? []);
 const portfolio = computed(() => dashboard.value?.portfolioBySymbol ?? []);
 const demoReady = computed(() => Boolean(dashboard.value?.status?.connected && dashboard.value?.status?.demo_verified));
 const nextMarketLabel = computed(() => marketSummary.value.nextMarketOpenSymbol ? `${marketSummary.value.nextMarketOpenSymbol} ${formatDate(marketSummary.value.nextMarketOpen)}` : 'Not available');
@@ -160,7 +172,7 @@ async function refreshAll() {
   busy.value = true;
   errorText.value = '';
   try {
-    await Promise.all([refreshDashboard(), refreshInstruments()]);
+    await Promise.all([refreshDashboard(), refreshInstruments(), refreshAiOpportunities()]);
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : 'Refresh failed';
   } finally {
@@ -230,17 +242,10 @@ function labelAsset(value: string) {
   return value.replace('_CFD', '').replace('_', ' ');
 }
 
-function decisionLabel(row: OpportunityRow) {
-  if (row.decision === 'BUY' || row.decision === 'SELL') return row.decision;
-  return 'WAIT';
-}
-
-function riskLabel(row: OpportunityRow) {
-  return row.risk?.result === 'PASS' ? 'RISK PASS' : 'RISK WAIT';
-}
-
-function round(value: unknown) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.round(number) : 0;
+function scoreClass(score: number) {
+  if (score >= 75) return 'text-emerald-300';
+  if (score >= 60) return 'text-sky-300';
+  if (score >= 40) return 'text-amber-300';
+  return 'text-rose-300';
 }
 </script>

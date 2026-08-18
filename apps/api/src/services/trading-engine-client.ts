@@ -13,6 +13,20 @@ export class TradingEngineError extends Error {
   constructor(
     message: string,
     public readonly status?: number,
+    // Machine-readable code parsed from the trading engine's structured
+    // {"detail": {"error": "...", "message": "..."}} response (see
+    // mt5-client.ts's engineFetch), when the engine sent one — e.g.
+    // PENDING_ORDER_NOT_CONFIRMED, PENDING_ORDER_CONFIRMATION_AMBIGUOUS,
+    // UNSUPPORTED_TIMEFRAME. undefined for legacy plain-string details or
+    // transport-level failures (timeout, unreachable), which callers must
+    // treat as genuinely ambiguous rather than a definite rejection.
+    public readonly code?: string,
+    // The safe request/order_check/order_send/last_error diagnostic subset
+    // the trading engine attached to its own exception (see mt5/adapter.py's
+    // MT5DemoSafetyError.diagnostics) — undefined when the engine sent none
+    // (legacy/plain-string details, or a failure mode that never reached
+    // order_send). Never contains credentials.
+    public readonly diagnostics?: Record<string, unknown> | null,
   ) {
     super(message);
     this.name = 'TradingEngineError';

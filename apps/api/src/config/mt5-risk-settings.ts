@@ -16,6 +16,7 @@ export interface Mt5RiskSettings {
   mt5_allowed_deviation_points: number;
   mt5_cooldown_minutes: number;
   mt5_entry_plan_valid_hours: number;
+  mt5_margin_safety_buffer_pct: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -59,7 +60,10 @@ const DEFINITIONS = {
   mt5_max_trades_per_day: {
     env: 'MT5_MAX_TRADES_PER_DAY',
     defaultValue: 6,
-    description: 'Max MT5 demo entries per UTC day.',
+    // Authoritative trading-day boundary is Asia/Bangkok (Thailand time),
+    // not UTC or the broker's own server clock — see countTradesToday() in
+    // mt5-entry-plan-watcher.ts for why.
+    description: 'Max MT5-confirmed demo entries per Thailand (Asia/Bangkok) trading day.',
   },
   mt5_min_risk_reward: {
     env: 'MT5_MIN_RISK_REWARD',
@@ -90,6 +94,11 @@ const DEFINITIONS = {
     env: 'MT5_ENTRY_PLAN_VALID_HOURS',
     defaultValue: 2,
     description: 'Hours before MT5 AI entry plans expire.',
+  },
+  mt5_margin_safety_buffer_pct: {
+    env: 'MT5_MARGIN_SAFETY_BUFFER_PCT',
+    defaultValue: '50.00',
+    description: 'Max % of current free margin a single new position may require.',
   },
 } as const;
 
@@ -131,6 +140,7 @@ export function loadMt5RiskSettings(env: Env = process.env): Mt5RiskSettings {
     mt5_allowed_deviation_points: parseEnvInteger(env.MT5_ALLOWED_DEVIATION_POINTS, DEFINITIONS.mt5_allowed_deviation_points.defaultValue),
     mt5_cooldown_minutes: parseEnvInteger(env.MT5_COOLDOWN_MINUTES, DEFINITIONS.mt5_cooldown_minutes.defaultValue),
     mt5_entry_plan_valid_hours: parseEnvInteger(env.MT5_ENTRY_PLAN_VALID_HOURS, DEFINITIONS.mt5_entry_plan_valid_hours.defaultValue),
+    mt5_margin_safety_buffer_pct: parseEnvDecimal(env.MT5_MARGIN_SAFETY_BUFFER_PCT, DEFINITIONS.mt5_margin_safety_buffer_pct.defaultValue),
   };
 }
 

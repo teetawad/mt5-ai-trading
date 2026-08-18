@@ -22,6 +22,17 @@
       <MetricBox label="Average Loss" :value="money(statistics.averageLoss)" class-name="text-rose-300" />
       <MetricBox label="Best Symbol" :value="statistics.bestPerformingSymbol ?? '-'" />
       <MetricBox label="Worst Symbol" :value="statistics.worstPerformingSymbol ?? '-'" />
+      <MetricBox label="Profit Factor" :value="statistics.profitFactor === null || statistics.profitFactor === undefined ? '-' : statistics.profitFactor.toFixed(2)" />
+      <MetricBox label="Average Holding Time" :value="holdingMinutesText(statistics.averageHoldingMinutes)" />
+    </section>
+
+    <!-- Diagnostic, not trading performance: never folded into the metrics
+         above so execution failures can't dilute win rate / closed-trade counts. -->
+    <section v-if="(statistics.executionFailures ?? 0) > 0" class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <MetricBox label="System · Execution Failures" :value="String(statistics.executionFailures ?? 0)" class-name="text-amber-300" />
+      <p class="col-span-full text-xs text-slate-400 md:col-span-3 md:self-center">
+        MT5 never confirmed a real position for these attempts. They are excluded from closed trades, win rate, and P&amp;L above.
+      </p>
     </section>
 
     <section class="grid gap-4 lg:grid-cols-3">
@@ -76,6 +87,12 @@
           <div class="text-left md:text-right">
             <p class="text-xs text-slate-500">Result</p>
             <p class="mt-1 text-3xl font-semibold" :class="pnlClass(trade)">{{ money(trade.realized_pnl) }}</p>
+            <p v-if="trade.account_return_pct !== null && trade.account_return_pct !== undefined" class="mt-1 text-sm" :class="pnlClass(trade)">
+              {{ signedPercent(trade.account_return_pct) }} account return
+            </p>
+            <p v-if="trade.tradeability_pct !== null && trade.tradeability_pct !== undefined" class="mt-2 text-sm font-semibold text-sky-300">
+              Tradeability {{ Math.round(Number(trade.tradeability_pct)) }}% · {{ trade.tradeability_rating }}
+            </p>
           </div>
         </div>
 
@@ -88,9 +105,12 @@
         </div>
 
         <div class="mt-5 rounded-lg border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-300">
-          <p><strong class="text-slate-100">Model:</strong> {{ trade.model_version ?? 'BASELINE_MT5_H1_V1' }}</p>
-          <p class="mt-2"><strong class="text-slate-100">AI score / confidence:</strong> {{ numberText(trade.opportunity_score) }} / {{ percent(trade.confidence) }}</p>
-          <p class="mt-2"><strong class="text-slate-100">Exit reason:</strong> {{ trade.exit_reason ?? 'Still open or not reconciled yet' }}</p>
+          <p><strong class="text-slate-100">Model:</strong> {{ trade.model_version ?? 'BASELINE_MT5_H1_V1' }}<span v-if="trade.ai_provider"> ({{ trade.ai_provider }}, {{ trade.ai_prompt_version }})</span></p>
+          <p class="mt-2"><strong class="text-slate-100">AI confidence:</strong> {{ percent(trade.confidence) }}</p>
+          <p v-if="trade.tradeability_pct !== null && trade.tradeability_pct !== undefined" class="mt-2"><strong class="text-slate-100">Tradeability at decision time:</strong> {{ Math.round(Number(trade.tradeability_pct)) }}% ({{ trade.tradeability_rating }})</p>
+          <p v-else-if="trade.trade_score !== null && trade.trade_score !== undefined" class="mt-2"><strong class="text-slate-100">Trade Score at decision time (secondary diagnostic):</strong> {{ Math.round(Number(trade.trade_score)) }}/100 ({{ trade.trade_rating }})</p>
+          <p v-else class="mt-2"><strong class="text-slate-100">Opportunity score:</strong> {{ numberText(trade.opportunity_score) }}</p>
+          <p class="mt-2"><strong class="text-slate-100">Exit reason:</strong> {{ trade.exit_reason ?? 'Still open (MT5 confirmed)' }}</p>
           <p class="mt-2"><strong class="text-slate-100">What happened:</strong> {{ trade.beginner_note ?? closeSentence(trade) }}</p>
           <p class="mt-2"><strong class="text-slate-100">Opened:</strong> {{ formatDate(trade.opened_at) }}</p>
           <p v-if="trade.closed_at" class="mt-2"><strong class="text-slate-100">Closed:</strong> {{ formatDate(trade.closed_at) }}</p>
@@ -116,12 +136,19 @@ type TradeRow = {
   model_version?: string | null;
   opportunity_score?: string | number | null;
   confidence?: string | number | null;
+  trade_score?: string | number | null;
+  trade_rating?: string | null;
+  tradeability_pct?: string | number | null;
+  tradeability_rating?: string | null;
+  ai_provider?: string | null;
+  ai_prompt_version?: string | null;
   beginner_note?: string | null;
+  account_return_pct?: number | null;
   opened_at: string;
   closed_at?: string | null;
 };
 
-const filters = ['ALL', 'WIN', 'LOSS', 'STOP LOSS', 'TAKE PROFIT', 'MANUAL'] as const;
+const filters = ['ALL', 'WIN', 'LOSS', 'OPEN', 'STOP LOSS', 'TAKE PROFIT', 'MANUAL', 'EXECUTION FAILED'] as const;
 const filter = ref<(typeof filters)[number]>('ALL');
 const search = ref('');
 const assetFilter = ref('ALL');
@@ -129,7 +156,7 @@ const busy = ref(false);
 const errorText = ref('');
 const { apiFetch } = useApi();
 
-const { data, refresh } = await useAsyncData<{ trades: TradeRow[]; statistics: Record<string, any> }>('mt5-trade-history', () => apiFetch('/mt5/history'));
+const { data, refresh } = await useAsyncData<{ trades: TradeRow[]; statistics: Record<string, any> }>('mt5-trade-history', () => apiFetch('/mt5/history'), { lazy: true });
 const trades = computed(() => data.value?.trades ?? []);
 const statistics = computed(() => data.value?.statistics ?? {});
 const assetClasses = computed(() => [...new Set(trades.value.map((trade) => trade.asset_class).filter(Boolean))] as string[]);
@@ -140,9 +167,11 @@ const filteredTrades = computed(() => trades.value.filter((trade) => {
   const matchesResult = filter.value === 'ALL'
     || (filter.value === 'WIN' && Number(trade.realized_pnl) > 0)
     || (filter.value === 'LOSS' && Number(trade.realized_pnl) < 0)
+    || (filter.value === 'OPEN' && !trade.closed_at)
     || (filter.value === 'STOP LOSS' && trade.exit_reason === 'STOP_LOSS')
     || (filter.value === 'TAKE PROFIT' && trade.exit_reason === 'TAKE_PROFIT')
-    || (filter.value === 'MANUAL' && trade.exit_reason === 'MANUAL_CLOSE');
+    || (filter.value === 'MANUAL' && trade.exit_reason === 'MANUAL_CLOSE')
+    || (filter.value === 'EXECUTION FAILED' && trade.exit_reason === 'RECONCILIATION_FAILED');
   return matchesSearch && matchesAsset && matchesResult;
 }));
 
@@ -159,7 +188,8 @@ async function refreshHistory() {
 }
 
 function resultLabel(trade: TradeRow) {
-  if (!trade.closed_at) return 'Result pending';
+  if (trade.exit_reason === 'RECONCILIATION_FAILED') return 'Execution Failed';
+  if (!trade.closed_at) return 'MT5 Confirmed - Open';
   const pnl = Number(trade.realized_pnl);
   if (pnl > 0) return 'Win';
   if (pnl < 0) return 'Loss';
@@ -167,7 +197,8 @@ function resultLabel(trade: TradeRow) {
 }
 
 function closeSentence(trade: TradeRow) {
-  if (!trade.closed_at) return 'The final result has not been reconciled yet.';
+  if (trade.exit_reason === 'RECONCILIATION_FAILED') return 'MT5 never confirmed a real position for this trade — it was not actually opened.';
+  if (!trade.closed_at) return 'This position is confirmed open in MT5 (positions_get()).';
   if (trade.exit_reason === 'TAKE_PROFIT') return `Take Profit was reached after ${holdingTime(trade)}.`;
   if (trade.exit_reason === 'STOP_LOSS') return `Stop Loss was reached after ${holdingTime(trade)}.`;
   if (trade.exit_reason === 'MANUAL_CLOSE') return `The trade was closed manually after ${holdingTime(trade)}.`;
@@ -216,6 +247,20 @@ function formatDate(value: string | null | undefined) {
 function percent(value: unknown) {
   const number = Number(value);
   return Number.isFinite(number) ? `${Math.round(number * 100)}%` : '-';
+}
+
+function signedPercent(value: unknown) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '-';
+  return `${number >= 0 ? '+' : ''}${number.toFixed(2)}%`;
+}
+
+function holdingMinutesText(value: unknown) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return '-';
+  const hours = Math.floor(minutes / 60);
+  const rest = Math.round(minutes % 60);
+  return hours ? `${hours}h ${rest}m` : `${rest}m`;
 }
 
 function labelAsset(value: string) {
