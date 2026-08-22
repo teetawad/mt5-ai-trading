@@ -45,6 +45,11 @@ postgres_data/
 build/
 *.js.map
 
+# Note: apps/web/ios/ (the Capacitor-generated Xcode project) has its own
+# .gitignore, created by `npx cap add ios`, that already excludes the
+# regenerated build/Pods/public-web-assets output - the Xcode project files
+# themselves are meant to be committed.
+
 # Secrets (never commit these)
 *.pem
 *.key

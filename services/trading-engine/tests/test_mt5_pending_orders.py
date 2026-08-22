@@ -8,6 +8,7 @@ from mt5.adapter import (
     DemoExecutionGateway,
     MT5Adapter,
     MT5DemoSafetyError,
+    MT5OrderSendReturnedNoneError,
     MT5PendingOrderCancelledError,
     MT5PendingOrderConfirmationAmbiguousError,
     MT5PendingOrderNotConfirmedError,
@@ -20,6 +21,8 @@ class FakePendingMT5:
     TRADE_RETCODE_DONE = 10009
     TRADE_RETCODE_PLACED = 10008
     TRADE_RETCODE_REJECT = 10006
+    TRADE_RETCODE_INVALID_STOPS = 10016
+    TRADE_RETCODE_INVALID_FILL = 10030
     TRADE_ACTION_PENDING = 5
     TRADE_ACTION_REMOVE = 8
     TRADE_ACTION_DEAL = 1
@@ -54,6 +57,9 @@ class FakePendingMT5:
         send_retcode=None,
         check_retcode=0,
         send_comment="AI_TRADE_V3",
+        check_returns_none=False,
+        send_returns_none=False,
+        last_error_value=(0, "no error"),
         # Permissive-by-default broker capability flags (spec section 7) —
         # real MQL5 ENUM_SYMBOL_TRADE_MODE/ORDER_MODE/EXPIRATION_MODE integer
         # values: trade_mode=4 (FULL), order_mode=63 (every order type
@@ -98,6 +104,9 @@ class FakePendingMT5:
         self._send_retcode = send_retcode if send_retcode is not None else self.TRADE_RETCODE_PLACED
         self._check_retcode = check_retcode
         self._send_comment = send_comment
+        self._check_returns_none = check_returns_none
+        self._send_returns_none = send_returns_none
+        self._last_error_value = last_error_value
 
     def initialize(self, path=None):
         return True
@@ -127,9 +136,13 @@ class FakePendingMT5:
         return SimpleNamespace(bid=self._tick_bid, ask=self._tick_ask)
 
     def order_check(self, request):
+        if self._check_returns_none:
+            return None
         return SimpleNamespace(retcode=self._check_retcode, comment="Done")
 
     def order_send(self, request):
+        if self._send_returns_none:
+            return None
         if request.get("action") == self.TRADE_ACTION_REMOVE:
             return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE)
         return SimpleNamespace(
@@ -160,7 +173,7 @@ class FakePendingMT5:
         return self._history_deals
 
     def last_error(self):
-        return (0, "no error")
+        return self._last_error_value
 
 
 def _gateway(monkeypatch, **kwargs):
@@ -302,6 +315,34 @@ def test_order_zero_and_no_matching_order_raises_not_confirmed(monkeypatch):
     # broader existing catch site continues to work.
     with pytest.raises(MT5ReconciliationError):
         gateway.execute_pending_order(_pending_request(fake))
+
+
+def test_synchronous_reconciliation_sleep_budget_is_fast_not_1750ms(monkeypatch):
+    # The actual perf regression fixed here: the synchronous confirmation
+    # pass used to sleep up to ~1.75s (0.0 + 0.25 + 0.5 + 1.0) inside the
+    # HTTP request before ever giving up and handing off to a background
+    # check. It must now stay within the "<=300-500ms beyond order_send()"
+    # budget — measured here as the REAL total requested sleep duration
+    # (not mocked away), so a future change that re-widens the delay
+    # schedule fails this test instead of silently reintroducing the slow
+    # button click.
+    monkeypatch.setenv("MT5_ALLOWED_DEMO_LOGIN", "123")
+    monkeypatch.setenv("MT5_ALLOWED_DEMO_SERVER", "Demo-Server")
+    monkeypatch.setenv("MT5_EXECUTION_MODE", "demo")
+    slept_seconds: list[float] = []
+    monkeypatch.setattr(adapter_module.time, "sleep", lambda seconds: slept_seconds.append(seconds))
+    fake = FakePendingMT5(send_order_ticket=0, orders_after_send=[])
+    gateway = DemoExecutionGateway(MT5Adapter(fake))
+    monkeypatch.setattr(
+        "mt5.session_status.evaluate_symbol_session",
+        lambda adapter, symbol, stale_seconds: SimpleNamespace(
+            market_status="OPEN", data_status="LIVE"
+        ),
+    )
+    with pytest.raises(MT5PendingOrderNotConfirmedError):
+        gateway.execute_pending_order(_pending_request(fake))
+    assert sum(slept_seconds) <= 0.3
+    assert sum(slept_seconds) < 1.75  # the old blocking budget this replaces
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +791,59 @@ def test_not_confirmed_carries_full_diagnostics_on_the_exception(monkeypatch):
     assert "request" in diagnostics and "order_check" in diagnostics
 
 
+def test_send_retcode_zero_unconfirmed_is_labeled_nonstandard_not_unknown(monkeypatch):
+    # The literal bug scenario reported live: order_send() itself returns a
+    # real (non-None) result with retcode=0, a real request_id, but NO
+    # confirming evidence anywhere (orders_get/positions_get/history all
+    # empty). retcode 0 is never a documented MT5 TRADE_RETCODE_* constant
+    # (the enum starts at 10004) and, unlike execute_market_order (see
+    # test_mt5_execution_reconciliation.py), there is no empirical evidence
+    # it ever means "placed" for a PENDING order — so the diagnostics must
+    # say so explicitly, never label it "UNKNOWN_RETCODE_0" (which reads
+    # like a formatted real MT5 constant name).
+    gateway, fake = _gateway(
+        monkeypatch,
+        send_retcode=0,
+        send_order_ticket=0,
+        orders_after_send=[],
+        positions_after_send=[],
+        history_orders=[],
+        history_deals=[],
+    )
+    with pytest.raises(MT5PendingOrderNotConfirmedError) as exc_info:
+        gateway.execute_pending_order(_pending_request(fake))
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics is not None
+    assert diagnostics["order_send"]["retcode"] == 0
+    assert diagnostics["order_send"]["retcode_name"] == "BROKER_NONSTANDARD_RETCODE_ZERO"
+    assert diagnostics["order_send"]["retcode_name"] != "UNKNOWN_RETCODE_0"
+    assert diagnostics["order_send"]["retcode_is_broker_nonstandard_zero"] is True
+    # The broker's own comment text must still be preserved verbatim — it is
+    # the actual discriminator between a genuine "Done" and a real
+    # rejection when retcode alone (0) is ambiguous.
+    assert diagnostics["order_send"]["comment"] == fake._send_comment
+
+
+@pytest.mark.parametrize(
+    "retcode,name",
+    [
+        (10016, "TRADE_RETCODE_INVALID_STOPS"),
+        (10030, "TRADE_RETCODE_INVALID_FILL"),
+    ],
+)
+def test_documented_rejection_retcodes_pass_through_exactly(monkeypatch, retcode, name):
+    # A real, documented MT5 rejection code must reach the exception's
+    # diagnostics completely unchanged — never renamed, never renumbered,
+    # never replaced by 0/None.
+    gateway, fake = _gateway(monkeypatch, send_retcode=retcode)
+    with pytest.raises(MT5DemoSafetyError) as exc_info:
+        gateway.execute_pending_order(_pending_request(fake))
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics is not None
+    assert diagnostics["order_send"]["retcode"] == retcode
+    assert diagnostics["order_send"]["retcode_name"] == name
+
+
 def test_order_check_rejection_carries_diagnostics_with_margin_fields(monkeypatch):
     gateway, fake = _gateway(monkeypatch, check_retcode=10013)
     with pytest.raises(MT5DemoSafetyError) as exc_info:
@@ -758,6 +852,61 @@ def test_order_check_rejection_carries_diagnostics_with_margin_fields(monkeypatc
     assert diagnostics is not None
     assert diagnostics["order_check"]["retcode"] == 10013
     assert "margin" in diagnostics["order_check"]
+
+
+# ---------------------------------------------------------------------------
+# order_send()/order_check() returning None (spec sections 2/5/9): an
+# infrastructure/IPC failure, with no MqlTradeResult at all — must raise a
+# distinct exception type, never be converted into a fake retcode-0 result,
+# and must preserve mt5.last_error() split into code/message.
+# ---------------------------------------------------------------------------
+
+
+def test_order_send_returns_none_raises_distinct_error_not_fake_retcode_zero(monkeypatch):
+    gateway, fake = _gateway(
+        monkeypatch, send_returns_none=True, last_error_value=(10004, "No connection")
+    )
+    with pytest.raises(MT5OrderSendReturnedNoneError) as exc_info:
+        gateway.execute_pending_order(_pending_request(fake))
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics is not None
+    # No order_send key at all — never a synthesized {"retcode": 0, ...}.
+    assert "order_send" not in diagnostics
+    assert diagnostics["last_error_code"] == 10004
+    assert diagnostics["last_error_message"] == "No connection"
+    # order_check DID run and pass, so it is still captured for context.
+    assert diagnostics["order_check"]["retcode"] == 0
+
+
+def test_order_check_returns_none_raises_distinct_error_before_order_send(monkeypatch):
+    gateway, fake = _gateway(
+        monkeypatch, check_returns_none=True, last_error_value=(1, "Terminal not connected")
+    )
+    with pytest.raises(MT5OrderSendReturnedNoneError) as exc_info:
+        gateway.execute_pending_order(_pending_request(fake))
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics is not None
+    assert "order_check" not in diagnostics
+    assert "order_send" not in diagnostics
+    assert diagnostics["last_error_code"] == 1
+    assert diagnostics["last_error_message"] == "Terminal not connected"
+
+
+def test_order_send_returns_none_router_maps_to_distinct_code_and_status():
+    from routers.mt5 import _pending_order_error
+
+    exc = MT5OrderSendReturnedNoneError(
+        "MT5 order_send returned no result before any trade-server response",
+        diagnostics={
+            "request": {},
+            "last_error_code": 10004,
+            "last_error_message": "No connection",
+        },
+    )
+    http_exc = _pending_order_error(exc)
+    assert http_exc.status_code == 503
+    assert http_exc.detail["error"] == "MT5_ORDER_SEND_RETURNED_NONE"
+    assert http_exc.detail["diagnostics"]["last_error_code"] == 10004
 
 
 # ---------------------------------------------------------------------------

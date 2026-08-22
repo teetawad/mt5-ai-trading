@@ -23,6 +23,7 @@ function clearReadableCookie(name: string) {
 
 export function useAuth() {
   const { apiFetch } = useApi();
+  const { setToken, clearToken } = useTokenStorage();
   const user = useState<AuthUser | null>('auth:user', () => null);
   const checked = useState<boolean>('auth:checked', () => false);
 
@@ -48,6 +49,7 @@ export function useAuth() {
     });
     user.value = response.user;
     checked.value = true;
+    await setToken(response.sessionToken);
     return response.user;
   }
 
@@ -58,6 +60,7 @@ export function useAuth() {
       user.value = null;
       checked.value = true;
       clearReadableCookie('csrf_token');
+      await clearToken();
       await navigateTo('/login');
     }
   }

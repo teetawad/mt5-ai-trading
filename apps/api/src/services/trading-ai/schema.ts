@@ -94,8 +94,16 @@ export const tradeAIPlanSchema = z
     }
 
     if (plan.entry_type === 'PULLBACK') {
-      if (plan.entry_zone_low === null || plan.entry_zone_high === null) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'entry_zone_low/entry_zone_high are required for PULLBACK', path: ['entry_zone_low'] });
+      // entry_zone_low/entry_zone_high are a display/reasoning aid, not
+      // execution-critical: every downstream consumer (referenceEntryForRisk
+      // in trading-ai-service.ts, opportunity-scan.ts's entry price fallback
+      // chain) already treats entry_price as the primary value and only
+      // falls back to the zone when entry_price itself is missing. Requiring
+      // BOTH regardless of entry_price contradicted that and rejected
+      // otherwise-valid plans over an optional field — only require the zone
+      // when entry_price wasn't given at all.
+      if (plan.entry_price === null && (plan.entry_zone_low === null || plan.entry_zone_high === null)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'entry_price, or both entry_zone_low and entry_zone_high, is required for PULLBACK', path: ['entry_price'] });
       }
       if (plan.pending_order_type !== 'BUY_LIMIT' && plan.pending_order_type !== 'SELL_LIMIT') {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'PULLBACK must map to BUY_LIMIT or SELL_LIMIT', path: ['pending_order_type'] });
@@ -127,7 +135,11 @@ export const tradeAIPlanSchema = z
     // reported current_price: a BUY_LIMIT/SELL_STOP entry that already sits
     // on the wrong side of the market is not a pullback/breakout at all, and
     // must be rejected here rather than silently collapsing into WATCH
-    // downstream (spec: "INVALID_PENDING_PLAN").
+    // downstream (spec: "INVALID_PENDING_PLAN"). Deliberately strict (no
+    // tolerance): an entry exactly AT current price is not a valid
+    // pullback/breakout either, and broker-precision rounding is handled
+    // separately, downstream, once symbol_info (digits/point) is actually
+    // available (see checkBrokerStopDistance) — this module never sees that.
     if (plan.current_price !== null && (plan.entry_type === 'PULLBACK' || plan.entry_type === 'BREAKOUT')) {
       const anchor = plan.entry_type === 'BREAKOUT'
         ? plan.trigger_price

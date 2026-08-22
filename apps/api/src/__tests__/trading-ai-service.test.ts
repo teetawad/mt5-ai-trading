@@ -224,25 +224,133 @@ describe.skipIf(SKIP)('Trading AI plan execution', () => {
     expect(row.rows[0].mt5_request_id).toBe('7');
   });
 
-  it('an engine-side PENDING_ORDER_NOT_CONFIRMED (order=0, reconciliation found nothing) blocks the plan immediately with that reason', async () => {
+  // Perf fix: the trading engine's own synchronous check is now short, so
+  // PENDING_ORDER_NOT_CONFIRMED from it is no longer a definite failure —
+  // it means "not found within the fast pass", and the plan is resolved a
+  // few seconds later by a bounded, non-blocking background pass instead
+  // (see scheduleBackgroundPendingOrderReconciliation), never a second
+  // order_send.
+  it('an engine-side PENDING_ORDER_NOT_CONFIRMED (order=0, fast reconciliation found nothing) returns PENDING_CONFIRMATION immediately, never blocking the request', async () => {
     mockHappyPath();
     vi.mocked(mt5Client.sendMt5PendingOrder).mockRejectedValue(
-      new TradingEngineError('Trading engine MT5 error: 409 PENDING_ORDER_NOT_CONFIRMED: no matching order found', 409, 'PENDING_ORDER_NOT_CONFIRMED'),
+      new TradingEngineError('Trading engine MT5 error: 409 PENDING_ORDER_NOT_CONFIRMED: no matching order found', 409, 'PENDING_ORDER_NOT_CONFIRMED', undefined),
     );
     const plan = await insertPlan(pool, {
       symbol: 'TESTNOTCONFIRMED', entry_type: 'PULLBACK', pending_order_type: 'BUY_LIMIT',
       entry_price: null, entry_zone_low: 1880, entry_zone_high: 1890,
     });
     const outcome = await approveAndPlaceAiTradePlan(pool, String(plan.id), ACTOR);
-    expect(outcome.allowed).toBe(false);
-    // The full descriptive engine message (safe to show — no secrets), not
-    // just the bare code, so the UI can show a meaningful "broker message".
-    expect(outcome.reason).toContain('no matching order found');
+    expect(outcome.allowed).toBe(true);
+    expect(outcome.code).toBe('PENDING_CONFIRMATION');
     const row = await pool.query('SELECT status, blocked_reason, execution_key FROM ai_trade_plans WHERE id=$1', [plan.id]);
-    expect(row.rows[0].status).toBe('EXECUTION_FAILED');
-    expect(row.rows[0].blocked_reason).toBe('PENDING_ORDER_NOT_CONFIRMED');
-    // Immediately resolved — never left dangling for the watcher's grace period.
-    expect(row.rows[0].execution_key).toBeNull();
+    // Not yet resolved — the background pass is still in flight; never a
+    // second order_send while this is true (execution_key still locked).
+    expect(row.rows[0].status).toBe('PENDING_ORDER_SUBMITTING');
+    expect(row.rows[0].blocked_reason).toBeNull();
+    expect(row.rows[0].execution_key).not.toBeNull();
+    expect(mt5Client.sendMt5PendingOrder).toHaveBeenCalledTimes(1);
+  });
+
+  // These three use REAL, short delays (env override) rather than
+  // vi.useFakeTimers() — faking global timers while real pg I/O (which uses
+  // its own internal timers/microtasks) is in flight is a known source of
+  // flaky async races, and the whole point here is exercising the real,
+  // unmocked setTimeout-chained background pass end to end.
+  const REAL_DELAYS_MS = '15,15,15,15'; // cumulative ~60ms — plenty for a local test DB
+  function waitPastBackgroundWindow(extraMs = 150) {
+    return new Promise((resolve) => setTimeout(resolve, extraMs));
+  }
+
+  it('background reconciliation resolves a PENDING_CONFIRMATION plan to EXECUTION_FAILED/PENDING_ORDER_NOT_CONFIRMED after the full bounded window finds nothing, without ever resending order_send', async () => {
+    process.env.AI_TRADE_BACKGROUND_RECONCILE_DELAYS_MS = REAL_DELAYS_MS;
+    try {
+      mockHappyPath();
+      vi.mocked(mt5Client.sendMt5PendingOrder).mockRejectedValue(
+        new TradingEngineError('Trading engine MT5 error: 409 PENDING_ORDER_NOT_CONFIRMED: no matching order found', 409, 'PENDING_ORDER_NOT_CONFIRMED', undefined),
+      );
+      const plan = await insertPlan(pool, {
+        symbol: 'TESTBGNOTCONFIRMED', entry_type: 'PULLBACK', pending_order_type: 'BUY_LIMIT',
+        entry_price: null, entry_zone_low: 1880, entry_zone_high: 1890,
+      });
+      const outcome = await approveAndPlaceAiTradePlan(pool, String(plan.id), ACTOR);
+      expect(outcome.code).toBe('PENDING_CONFIRMATION');
+
+      // mockHappyPath already mocks listMt5PendingOrders/listMt5Positions/
+      // getMt5HistoryOrders/getMt5HistoryDeals as empty — the background
+      // pass finds nothing at every one of its bounded checks.
+      await waitPastBackgroundWindow();
+
+      const row = await pool.query('SELECT status, blocked_reason, execution_key FROM ai_trade_plans WHERE id=$1', [plan.id]);
+      expect(row.rows[0].status).toBe('EXECUTION_FAILED');
+      expect(row.rows[0].blocked_reason).toBe('PENDING_ORDER_NOT_CONFIRMED');
+      expect(row.rows[0].execution_key).toBeNull();
+      // The one and only order_send call ever made for this plan.
+      expect(mt5Client.sendMt5PendingOrder).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.AI_TRADE_BACKGROUND_RECONCILE_DELAYS_MS;
+    }
+  });
+
+  it('background reconciliation resolves a PENDING_CONFIRMATION plan to PENDING_ORDER_PLACED once the broker registers the order a moment later', async () => {
+    process.env.AI_TRADE_BACKGROUND_RECONCILE_DELAYS_MS = REAL_DELAYS_MS;
+    try {
+      mockHappyPath();
+      vi.mocked(mt5Client.sendMt5PendingOrder).mockRejectedValue(
+        new TradingEngineError('Trading engine MT5 error: 409 PENDING_ORDER_NOT_CONFIRMED: no matching order found', 409, 'PENDING_ORDER_NOT_CONFIRMED', undefined),
+      );
+      const plan = await insertPlan(pool, {
+        symbol: 'TESTBGLATEORDER', entry_type: 'PULLBACK', pending_order_type: 'BUY_LIMIT',
+        entry_price: null, entry_zone_low: 1880, entry_zone_high: 1890,
+      });
+      const outcome = await approveAndPlaceAiTradePlan(pool, String(plan.id), ACTOR);
+      expect(outcome.code).toBe('PENDING_CONFIRMATION');
+
+      // The broker only registers the pending order a little while after
+      // order_send returned — simulated by the live listing mock starting
+      // to report it partway through the background pass.
+      vi.mocked(mt5Client.listMt5PendingOrders).mockResolvedValue([
+        { ticket: 888222, symbol: 'TESTBGLATEORDER', comment: planComment(String(plan.id)) } as never,
+      ]);
+
+      await waitPastBackgroundWindow();
+
+      const row = await pool.query('SELECT status, mt5_order_ticket, execution_key FROM ai_trade_plans WHERE id=$1', [plan.id]);
+      expect(row.rows[0].status).toBe('PENDING_ORDER_PLACED');
+      expect(row.rows[0].mt5_order_ticket).toBe('888222');
+      expect(row.rows[0].execution_key).toBeNull();
+      expect(mt5Client.sendMt5PendingOrder).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.AI_TRADE_BACKGROUND_RECONCILE_DELAYS_MS;
+    }
+  });
+
+  it('a second approve click while PENDING_CONFIRMATION is still resolving never sends a second order_send', async () => {
+    process.env.AI_TRADE_BACKGROUND_RECONCILE_DELAYS_MS = REAL_DELAYS_MS;
+    try {
+      mockHappyPath();
+      vi.mocked(mt5Client.sendMt5PendingOrder).mockRejectedValue(
+        new TradingEngineError('Trading engine MT5 error: 409 PENDING_ORDER_NOT_CONFIRMED: no matching order found', 409, 'PENDING_ORDER_NOT_CONFIRMED', undefined),
+      );
+      const plan = await insertPlan(pool, {
+        symbol: 'TESTBGDOUBLECLICK', entry_type: 'PULLBACK', pending_order_type: 'BUY_LIMIT',
+        entry_price: null, entry_zone_low: 1880, entry_zone_high: 1890,
+      });
+      const first = await approveAndPlaceAiTradePlan(pool, String(plan.id), ACTOR);
+      expect(first.code).toBe('PENDING_CONFIRMATION');
+
+      // A second click while the background pass is still in flight — the
+      // plan is still PENDING_ORDER_SUBMITTING, so it can never be
+      // re-claimed via WAITING_FOR_APPROVAL, and no evidence exists yet for
+      // checkAlreadyPlacedOnConflict to report ALREADY_PLACED either.
+      const second = await approveAndPlaceAiTradePlan(pool, String(plan.id), ACTOR);
+      expect(second.allowed).toBe(false);
+      expect(second.code).toBe('NOT_CLAIMABLE_PENDING_ORDER_SUBMITTING');
+
+      await waitPastBackgroundWindow();
+      expect(mt5Client.sendMt5PendingOrder).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.AI_TRADE_BACKGROUND_RECONCILE_DELAYS_MS;
+    }
   });
 
   it('an engine-side PENDING_ORDER_CONFIRMATION_AMBIGUOUS blocks the plan and never guesses a ticket', async () => {
@@ -317,7 +425,7 @@ describe.skipIf(SKIP)('Trading AI plan execution', () => {
         {
           request: { action: 5, symbol: 'TESTDIAGNOTCONFIRMED', type: 2 },
           order_check: { retcode: 0, comment: 'Done' },
-          order_send: { retcode: 0, retcode_name: 'UNKNOWN_RETCODE_0', order: 0, deal: 0, request_id: 7, comment: 'Done', last_error: '(1, "no error")' },
+          order_send: { retcode: 0, retcode_name: 'BROKER_NONSTANDARD_RETCODE_ZERO', order: 0, deal: 0, request_id: 7, comment: 'Done', last_error: '(1, "no error")', retcode_is_broker_nonstandard_zero: true },
         },
       ),
     );

@@ -63,6 +63,17 @@ class MT5PendingOrderCancelledError(MT5ReconciliationError):
     evidence anywhere", not "we found evidence it did not go through"."""
 
 
+class MT5OrderSendReturnedNoneError(MT5DemoSafetyError):
+    """order_check() or order_send() returned None — the MetaTrader5 Python
+    library/terminal IPC failed before any trade-server MqlTradeResult ever
+    came back. This is an infrastructure failure, never a trade-server
+    rejection: there is no retcode/order/deal/request_id to report, only
+    mt5.last_error() (a completely different error namespace — spec section
+    9). Must never be presented to a caller as retcode 0, since 0 is not
+    "no result" — it is this specific broker's own undocumented but real
+    trade-server code (see _order_send_ok_retcodes)."""
+
+
 def _load_mt5() -> Any:
     try:
         import MetaTrader5  # type: ignore[import-not-found]
@@ -89,7 +100,19 @@ def _retcode_name(mt5: Any, code: int) -> str:
     """Reverse-looks-up the real MT5 TRADE_RETCODE_* constant name for a
     numeric code (spec section 4: "do not treat every accepted-looking
     result identically" — the name is what actually gets persisted/reported,
-    never just the bare integer)."""
+    never just the bare integer).
+
+    0 is handled as its own case, never falling into the generic
+    "UNKNOWN_RETCODE_N" bucket: the real MT5 TRADE_RETCODE_* enum starts at
+    10004, so 0 can NEVER be a documented trade-server code — this is
+    specifically this broker/account's own non-standard value (see
+    _order_check_ok_retcodes/_order_send_ok_retcodes), and "UNKNOWN_RETCODE_0"
+    reads exactly like a formatted, real MT5 constant name, which has caused
+    it to be mistaken for a genuine/synthetic result. Labeled distinctly so
+    it is never confused with either a real documented code or a fabricated
+    placeholder."""
+    if code == 0:
+        return "BROKER_NONSTANDARD_RETCODE_ZERO"
     for name in dir(mt5):
         if name.startswith("TRADE_RETCODE_") and getattr(mt5, name, None) == code:
             return name
@@ -406,6 +429,20 @@ class DemoExecutionGateway:
         except Exception:  # pragma: no cover - defensive only
             return "unavailable"
 
+    def _last_error_parts(self) -> dict[str, Any]:
+        """Splits mt5.last_error() into its own code/message fields (spec
+        section 1: "last_error_code, last_error_message") instead of only
+        the combined string form — this is the Python MT5 library/IPC error
+        channel, never the trade-server retcode channel (spec section 9),
+        so it is always reported under its own distinct keys."""
+        try:
+            raw = self.adapter.mt5.last_error()
+        except Exception:  # pragma: no cover - defensive only
+            return {"code": None, "message": "unavailable"}
+        if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+            return {"code": raw[0], "message": raw[1]}
+        return {"code": None, "message": str(raw) if raw is not None else None}
+
     def _resolve_filling_mode(self, symbol: str) -> int:
         """Determines the broker/symbol-supported order filling mode instead
         of hardcoding one. A filling mode the broker does not support is a
@@ -562,10 +599,23 @@ class DemoExecutionGateway:
                 time.sleep(0.25)
         return None
 
-    # Bounded polling schedule for order==0 recovery (spec: immediate, then
-    # roughly 250ms/500ms/1000ms — a short, predictable total wait, never an
-    # unbounded retry loop).
-    _RECONCILE_DELAYS_SECONDS: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0)
+    # Bounded, FAST synchronous polling schedule for order==0 recovery —
+    # immediate check, then one retry ~150ms later (spec: "the browser
+    # request must not be blocked for multiple seconds" / "total synchronous
+    # confirmation target <= 300-500ms beyond order_send()"). This used to be
+    # (0.0, 0.25, 0.5, 1.0) — ~1.75s of blocking sleep inside the HTTP
+    # request — which was the actual root cause of "PLACE ... IN MT5 DEMO"
+    # feeling slow. A broker that needs more real wall-clock time than this
+    # short window to register the order is NEVER given up on: the caller
+    # (Node's placePendingOrder) treats "not found within this fast pass" as
+    # "still confirming" and continues checking in a bounded, non-blocking
+    # background pass (500ms/1s/2s/3s — see
+    # scheduleBackgroundPendingOrderReconciliation) instead of holding this
+    # request open or declaring failure prematurely. Total patience given to
+    # the broker is therefore GREATER than before (~300ms + ~3s background
+    # vs. the old ~1.75s all spent synchronously), just relocated off the
+    # blocking HTTP path.
+    _RECONCILE_DELAYS_SECONDS: tuple[float, ...] = (0.0, 0.15)
 
     def _price_tolerance(self, symbol: str) -> float:
         info = _obj(self.adapter.symbol_info(symbol))
@@ -1026,23 +1076,70 @@ class DemoExecutionGateway:
         # 6/7) — a broker-side incompatibility or a stale price must produce
         # an explicit, specific error here, before order_check/order_send
         # ever run, never a mysterious accepted-but-unconfirmed result.
-        self._verify_pending_order_broker_support(symbol, resolved)
+        symbol_capabilities = self._verify_pending_order_broker_support(symbol, resolved)
         self._verify_pending_price_against_latest_tick(symbol, resolved)
 
-        logger.info(
-            "mt5 pending order_check request symbol=%s type=%s price=%s volume=%s comment=%s",
+        # Development diagnostics (spec: "Before order_send also inspect
+        # mt5.version(), terminal_info(), account_info(), symbol_info(symbol)
+        # ... trade_mode, order_mode, filling_mode, expiration_mode,
+        # trade_stops_level, trade_freeze_level") — logged once per attempt,
+        # right before order_check, using the SAME symbol_info() call
+        # _verify_pending_order_broker_support already made (never a second
+        # redundant MT5 call just for logging). Never guessed/assumed —
+        # exactly what MT5 reports for THIS symbol right now.
+        try:
+            mt5_version = mt5.version()
+        except Exception:  # pragma: no cover - defensive only
+            mt5_version = None
+        logger.debug("MT5 VERSION: %r", mt5_version)
+        logger.debug(
+            "SYMBOL_INFO CAPABILITIES symbol=%s trade_mode=%s order_mode=%s filling_mode=%s "
+            "expiration_mode=%s trade_stops_level=%s trade_freeze_level=%s digits=%s point=%s",
             symbol,
-            resolved.get("type"),
-            resolved.get("price"),
-            resolved.get("volume"),
-            comment,
+            symbol_capabilities.get("trade_mode"),
+            symbol_capabilities.get("order_mode"),
+            symbol_capabilities.get("filling_mode"),
+            symbol_capabilities.get("expiration_mode"),
+            symbol_capabilities.get("trade_stops_level"),
+            symbol_capabilities.get("trade_freeze_level"),
+            symbol_capabilities.get("digits"),
+            symbol_capabilities.get("point"),
         )
 
+        # The EXACT request about to reach order_check/order_send (spec:
+        # "print action, symbol, volume, type, price, sl, tp, stoplimit,
+        # deviation, magic, comment, type_time, expiration, type_filling") —
+        # request_diagnostics already covers exactly this field set
+        # (_REQUEST_DIAGNOSTIC_FIELDS), logged verbatim, never guessed.
+        logger.info("MT5 PENDING ORDER REQUEST: %s", request_diagnostics)
+
+        # Perf timing (spec: "Add timing diagnostics in development ...
+        # order_check_ms, order_send_ms, initial_confirmation_ms ... do not
+        # guess where the delay is") — never guessed, always measured around
+        # the exact calls that can be slow.
+        timing_ms: dict[str, float] = {}
+        _t0 = time.perf_counter()
         check_raw = self.adapter.order_check(resolved)
+        timing_ms["order_check_ms"] = round((time.perf_counter() - _t0) * 1000, 1)
+        # RAW order_check result, before any interpretation (spec: "print
+        # check.retcode, check.comment" / "do not replace missing values
+        # with 0") — logged exactly as the MetaTrader5 package returned it.
+        logger.debug(
+            "RAW ORDER_CHECK RESULT: %r | ASDICT: %s",
+            check_raw,
+            _obj(check_raw) if check_raw is not None else None,
+        )
         if check_raw is None:
-            raise MT5DemoSafetyError(
-                f"MT5 order_check returned no result (terminal error: {self._last_error()})",
-                diagnostics={"request": request_diagnostics, "last_error": self._last_error()},
+            last_error_parts = self._last_error_parts()
+            raise MT5OrderSendReturnedNoneError(
+                f"MT5 order_check returned no result before any trade-server response — "
+                f"terminal/IPC error: {last_error_parts}",
+                diagnostics={
+                    "request": request_diagnostics,
+                    "last_error_code": last_error_parts["code"],
+                    "last_error_message": last_error_parts["message"],
+                    "last_error": self._last_error(),
+                },
             )
         check = _obj(check_raw)
         check_retcode = int(check.get("retcode", -1) if check.get("retcode") is not None else -1)
@@ -1070,17 +1167,42 @@ class DemoExecutionGateway:
                 diagnostics={"request": request_diagnostics, "order_check": check_diagnostics},
             )
 
+        _t0 = time.perf_counter()
         send_raw = self.adapter.order_send(resolved)
+        timing_ms["order_send_ms"] = round((time.perf_counter() - _t0) * 1000, 1)
         # mt5.last_error() is only ever meaningful immediately after the call
         # that might have set it (spec section 1) — captured here, right
         # after order_send, not reused from an earlier point.
         last_error_after_send = self._last_error()
+        # RAW result, before any interpretation (spec: "Do not transform
+        # retcode=0 into a documented MT5 success code" / "capture repr(result),
+        # result._asdict(), and result.request._asdict() when available") —
+        # development diagnostics only, logged exactly as the MetaTrader5
+        # package returned it, never credentials (a trade result never
+        # carries any).
+        logger.debug(
+            "RAW ORDER_SEND RESULT: %r | ASDICT: %s | REQUEST_ASDICT: %s | LAST_ERROR: %s",
+            send_raw,
+            _obj(send_raw) if send_raw is not None else None,
+            _obj(getattr(send_raw, "request", None)) if send_raw is not None else None,
+            last_error_after_send,
+        )
         if send_raw is None:
-            raise MT5DemoSafetyError(
-                f"MT5 order_send returned no result (terminal error: {last_error_after_send})",
+            # No MqlTradeResult ever came back from the trade server — there is
+            # no retcode/order/deal/request_id to report. Never constructed as
+            # a fake retcode-0 result (spec section 2/5): raised as its own
+            # distinct exception type so the router/Node/frontend can show
+            # "MT5 ORDER SEND FAILED BEFORE TRADE-SERVER RESULT", never
+            # "0 — UNKNOWN_RETCODE_0".
+            last_error_parts_after_send = self._last_error_parts()
+            raise MT5OrderSendReturnedNoneError(
+                f"MT5 order_send returned no result before any trade-server response — "
+                f"terminal/IPC error: {last_error_parts_after_send}",
                 diagnostics={
                     "request": request_diagnostics,
                     "order_check": check_diagnostics,
+                    "last_error_code": last_error_parts_after_send["code"],
+                    "last_error_message": last_error_parts_after_send["message"],
                     "last_error": last_error_after_send,
                 },
             )
@@ -1115,6 +1237,7 @@ class DemoExecutionGateway:
         result["retcode_name"] = send_retcode_name
         result["last_error"] = last_error_after_send
         result["request_diagnostics"] = request_diagnostics
+        result["retcode_is_broker_nonstandard_zero"] = send_retcode == 0
 
         # Explicit, narrow membership test against real MT5 retcode
         # constants (spec section 2) — never a range check, a truthy check,
@@ -1149,6 +1272,7 @@ class DemoExecutionGateway:
                     "request": request_diagnostics,
                     "order_check": check_diagnostics,
                     "order_send": send_diagnostics,
+                    "timing_ms": timing_ms,
                 },
             )
         if send_retcode == 0:
@@ -1160,17 +1284,31 @@ class DemoExecutionGateway:
                 comment,
             )
 
+        # Marks explicitly, for the router/Node/frontend, that this send_retcode
+        # is this broker's own non-standard 0 (never a documented MT5 code) —
+        # unlike a real TRADE_RETCODE_* value, there is no independent proof
+        # anywhere (market-order tests only) that 0 ever means "placed" for a
+        # PENDING order specifically. If reconciliation below still finds no
+        # evidence, this flag is what lets the failure be reported as
+        # genuinely indeterminate rather than "a real retcode was returned but
+        # unconfirmed" (spec: never present retcode 0 as if it behaves like a
+        # normal documented result).
+        send_diagnostics["retcode_is_broker_nonstandard_zero"] = send_retcode == 0
+
         diagnostics = {
             "request": request_diagnostics,
             "order_check": check_diagnostics,
             "order_send": send_diagnostics,
+            "timing_ms": timing_ms,
         }
 
+        _t0 = time.perf_counter()
         order_ticket = result.get("order") or 0
         reconciliation: PendingOrderReconciliation | None = None
         if order_ticket:
             # Preferred path (spec section 2): a real ticket plus an
-            # independent orders_get() confirmation of it.
+            # independent orders_get() confirmation of it. Fast — a single
+            # orders_get() call, no sleep.
             ticket_order = self._confirm_pending_order_by_ticket(symbol, order_ticket)
             if ticket_order is not None:
                 reconciliation = PendingOrderReconciliation(state="PENDING", order=ticket_order)
@@ -1179,18 +1317,34 @@ class DemoExecutionGateway:
             # Either order_send reported no ticket at all (result.order == 0,
             # observed on this broker/environment even on genuine success —
             # spec section 3), or it gave a ticket that never shows up.
-            # Neither is immediately treated as failure: bounded
-            # reconciliation across every MT5 source identifies the exact
-            # outcome, if any, before this ever returns success or failure.
+            # Neither is immediately treated as failure: a SHORT, bounded,
+            # synchronous reconciliation pass (spec: "<=300-500ms beyond
+            # order_send()" — see _RECONCILE_DELAYS_SECONDS) across every MT5
+            # source identifies the exact outcome, if any, before this ever
+            # returns success or failure. If the broker genuinely needs more
+            # real wall-clock time than this short pass allows, the caller
+            # (Node) continues checking in a bounded, non-blocking background
+            # pass instead of this call ever blocking longer or guessing.
             try:
                 reconciliation = self._reconcile_pending_order(symbol, resolved, comment)
             except MT5DemoSafetyError as exc:
+                timing_ms["initial_confirmation_ms"] = round((time.perf_counter() - _t0) * 1000, 1)
                 exc.diagnostics = diagnostics
                 raise
+        timing_ms["initial_confirmation_ms"] = round((time.perf_counter() - _t0) * 1000, 1)
+        logger.info(
+            "mt5 pending order timing symbol=%s order_check_ms=%s order_send_ms=%s "
+            "initial_confirmation_ms=%s",
+            symbol,
+            timing_ms.get("order_check_ms"),
+            timing_ms.get("order_send_ms"),
+            timing_ms.get("initial_confirmation_ms"),
+        )
 
         result["checked_request"] = check
         result["resolved_type_filling"] = resolved.get("type_filling")
         result["executed_at"] = datetime.now(tz=UTC).isoformat()
+        result["timing_ms"] = timing_ms
         result["execution_state"] = reconciliation.state
         result["confirmed_order"] = reconciliation.order
         result["confirmed_position"] = reconciliation.position

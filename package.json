@@ -9,8 +9,9 @@
   "scripts": {
     "dev:api": "npm run dev --workspace=apps/api",
     "dev:web": "npm run dev --workspace=apps/web",
+    "dev:web:lan": "npm run dev:lan --workspace=apps/web",
     "test:api": "npm run test --workspace=apps/api",
-    "test:web": "echo 'No web unit tests in Phase 1'",
+    "test:web": "npm run test --workspace=apps/web",
     "test": "npm run test:api && npm run test:web",
     "lint:api": "npm run lint --workspace=apps/api",
     "lint:web": "npm run lint --workspace=apps/web",
@@ -18,6 +19,11 @@
     "typecheck:api": "npm run typecheck --workspace=apps/api",
     "typecheck:web": "npm run typecheck --workspace=apps/web",
     "typecheck": "npm run typecheck:api && npm run typecheck:web",
-    "format:api": "npm run format --workspace=apps/api"
+    "format:api": "npm run format --workspace=apps/api",
+    "build:mobile": "npm run build:mobile --workspace=apps/web",
+    "mobile:audit": "npm run mobile:audit --workspace=apps/web",
+    "ios:sync": "npm run ios:sync --workspace=apps/web",
+    "ios:open": "npm run ios:open --workspace=apps/web",
+    "ios:ci-check": "npm run ios:ci-check --workspace=apps/web"
   }
 }

@@ -155,13 +155,19 @@ export function evaluateMt5Risk(input: Mt5RiskInput): Mt5RiskResult {
     if (volume.lte(0) && lossPerLot.gt(0)) {
       // rawVolumeBeforeNormalize > 0 but still floored to 0 by volumeMin
       // means even the smallest tradeable size already risks more than the
-      // configured budget — a distinct, specific reason from "no valid
-      // size could be computed at all".
+      // %-of-equity risk budget. Rather than blindly block, check whether
+      // the broker minimum lot's REAL loss at SL still fits inside the
+      // configured absolute per-trade cap (mt5_max_loss_per_trade) — a
+      // small-equity account's % budget can be tighter than that cap (e.g.
+      // DEMO Fast Learning: $3.00 absolute cap vs. 0.5% of a small balance),
+      // and there is nothing unsafe about a trade whose worst-case loss is
+      // already within the owner's own configured dollar ceiling. Never
+      // forces the minimum lot when it would lose MORE than that ceiling.
       const minLotLoss = volumeMin.mul(lossPerLot);
-      if (minLotLoss.gt(riskBudget)) {
-        sizingFailed.push('MINIMUM_VOLUME_EXCEEDS_RISK');
+      if (minLotLoss.lte(maxLoss)) {
+        volume = volumeMin;
       } else {
-        sizingFailed.push('POSITION_SIZE_INVALID');
+        sizingFailed.push('MINIMUM_VOLUME_EXCEEDS_RISK');
       }
     } else if (volume.lte(0)) {
       sizingFailed.push('POSITION_SIZE_INVALID');
@@ -205,8 +211,14 @@ export function evaluateMt5Risk(input: Mt5RiskInput): Mt5RiskResult {
   failed.push(...sizingFailed);
 
   const freeMarginAfterEntry = freeMargin.minus(marginRequired);
+  // Plain "required vs. free vs. shortfall" for the UI (spec section 5's
+  // Required/Free/Shortfall example) — deliberately against raw freeMargin,
+  // not the buffer-adjusted marginAllowance, since that is the intuitive
+  // number an owner reads as "how much more margin would this need".
+  const marginShortfall = marginRequired.gt(freeMargin) ? marginRequired.minus(freeMargin) : new Decimal(0);
   const riskPctOfEquity = equity.gt(0) ? expectedLossAtSl.div(equity).mul(100) : new Decimal(0);
   const dailyTradesRemaining = Math.max(0, maxTrades - input.tradesToday);
+  const availablePositionSlots = Math.max(0, maxPositions - input.openPositions);
 
   const snapshot = {
     authority: 'SERVER_SIDE_MT5_RISK_ENGINE',
@@ -220,10 +232,13 @@ export function evaluateMt5Risk(input: Mt5RiskInput): Mt5RiskResult {
     marginRequired: marginRequired.toFixed(8),
     freeMargin: freeMargin.toFixed(8),
     freeMarginAfterEntry: freeMarginAfterEntry.toFixed(8),
+    marginShortfall: marginShortfall.toFixed(8),
     riskPctOfEquity: riskPctOfEquity.toFixed(8),
     maxRiskPct: maxRiskPct.toFixed(8),
     maxLossPerTrade: maxLoss.toFixed(8),
     openPositions: input.openPositions,
+    maxSimultaneousPositions: maxPositions,
+    availablePositionSlots,
     dailyConfirmedTrades: input.tradesToday,
     dailyTradeLimit: maxTrades,
     dailyTradesRemaining,

@@ -209,6 +209,21 @@ describe('Trading AI plan schema', () => {
       expect(() => parseTradeAIPlan(pullbackBuy({ entry_price: 90 }))).toThrow(AiPlanValidationError);
     });
 
+    // Regression fix: entry_zone_low/entry_zone_high are a display/reasoning
+    // aid, not execution-critical (referenceEntryForRisk and the scan's own
+    // entry-price fallback chain already treat entry_price as primary and
+    // only fall back to the zone) — a PULLBACK plan with a valid entry_price
+    // but no zone must not be technically blocked over an optional field.
+    it('accepts a PULLBACK plan with a valid entry_price and no entry zone at all (optional field)', () => {
+      expect(() => parseTradeAIPlan(pullbackBuy({ entry_price: 96, entry_zone_low: null, entry_zone_high: null }))).not.toThrow();
+    });
+    it('accepts a PULLBACK SELL plan with a valid entry_price and no entry zone at all', () => {
+      expect(() => parseTradeAIPlan(pullbackSell({ entry_price: 103, entry_zone_low: null, entry_zone_high: null }))).not.toThrow();
+    });
+    it('still rejects PULLBACK when BOTH entry_price and entry_zone are missing (no execution-critical price at all)', () => {
+      expect(() => parseTradeAIPlan(pullbackBuy({ entry_price: null, entry_zone_low: null, entry_zone_high: null }))).toThrow(AiPlanValidationError);
+    });
+
     it('rejects BREAKOUT missing trigger_price even when current_price is present', () => {
       expect(() => parseTradeAIPlan(breakoutBuy({ trigger_price: null }))).toThrow(AiPlanValidationError);
     });

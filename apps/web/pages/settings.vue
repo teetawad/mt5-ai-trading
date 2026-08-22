@@ -55,8 +55,8 @@
       </div>
     </UiCard>
 
-    <div v-if="showAutoConfirm" class="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4">
-      <section class="w-full max-w-xl rounded-lg border border-amber-400/40 bg-slate-900 p-5 shadow-2xl">
+    <div v-if="showAutoConfirm" class="modal-safe-area fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 p-0 sm:items-center sm:p-4">
+      <section class="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-t-2xl border border-amber-400/40 bg-slate-900 p-5 shadow-2xl sm:rounded-lg">
         <p class="text-xs font-bold uppercase tracking-widest text-amber-200">Explicit confirmation required</p>
         <h2 class="mt-2 text-xl font-semibold text-white">Enable AUTO-DEMO?</h2>
         <p class="mt-3 text-sm leading-6 text-slate-300">

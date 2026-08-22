@@ -9,7 +9,7 @@ import {
   Mt5DecisionDTO,
 } from './mt5-client';
 import { evaluateMt5Risk, toRiskSymbolInfo } from './mt5-risk-engine';
-import { loadMt5RiskSettings } from '../config/mt5-risk-settings';
+import { effectiveMt5RiskSettings } from '../config/mt5-risk-settings';
 import {
   buildEntryPlan,
   computeEntryStatus,
@@ -32,9 +32,12 @@ export interface InstrumentFilter {
 
 const THAILAND_TIME_ZONE = 'Asia/Bangkok';
 
-async function settings(pool: Pool): Promise<Record<string, unknown>> {
+// demoVerified gates the Fast Learning DEMO risk profile (spec section 1):
+// its loosened position/loss defaults only ever apply once MT5 demo
+// verification has actually succeeded — see effectiveMt5RiskSettings.
+async function settings(pool: Pool, demoVerified: boolean): Promise<Record<string, unknown>> {
   void pool;
-  return { ...loadMt5RiskSettings() };
+  return { ...effectiveMt5RiskSettings(demoVerified) };
 }
 
 function beginnerEntryLabel(strategy?: string): string {
@@ -196,7 +199,12 @@ function money(value: unknown): number {
 // persisted, so a genuine breakeven close can land a hair off exact zero.
 const BREAKEVEN_TOLERANCE = 0.005;
 
-function resultType(value: unknown, exitReason?: unknown): 'WIN' | 'LOSS' | 'BREAKEVEN' | 'OPEN' | 'EXECUTION_FAILED' {
+// Exported so real-demo-learning.ts (the Fast Learning dashboard's REAL_DEMO
+// data source) can classify trade_outcomes rows exactly the same way History
+// does — a real trade's WIN/LOSS/BREAKEVEN/EXECUTION_FAILED status must never
+// diverge between the two, since History stays the single source of truth
+// for actual MT5 DEMO performance and Fast Learning only ever references it.
+export function resultType(value: unknown, exitReason?: unknown): 'WIN' | 'LOSS' | 'BREAKEVEN' | 'OPEN' | 'EXECUTION_FAILED' {
   if (exitReason === 'RECONCILIATION_FAILED') return 'EXECUTION_FAILED';
   if (value === null || value === undefined) return 'OPEN';
   const pnl = Number(value);
@@ -232,6 +240,11 @@ function beginnerRiskReason(value: string, snapshot?: Record<string, unknown> | 
     const limit = snapshot.dailyTradeLimit ?? '?';
     return `Daily demo trade limit reached: ${used}/${limit} confirmed trades today.`;
   }
+  if (value === 'MAX_SIMULTANEOUS_POSITIONS' && snapshot) {
+    const open = snapshot.openPositions ?? '?';
+    const limit = snapshot.maxSimultaneousPositions ?? '?';
+    return `Too many demo trades are already open: ${open}/${limit} positions.`;
+  }
   if (value === 'MINIMUM_VOLUME_EXCEEDS_RISK' && snapshot) {
     const loss = snapshot.lossPerLot;
     return `Even the broker's minimum lot size for this symbol would lose more than your configured risk${Number.isFinite(Number(loss)) ? ` (~$${Number(loss).toFixed(2)} per 0.01 lot)` : ''}.`;
@@ -239,7 +252,13 @@ function beginnerRiskReason(value: string, snapshot?: Record<string, unknown> | 
   if (value === 'INSUFFICIENT_MARGIN' && snapshot) {
     const required = snapshot.marginRequired;
     const free = snapshot.freeMargin;
-    return `Required margin${Number.isFinite(Number(required)) ? ` ($${Number(required).toFixed(2)})` : ''} is too high for your free margin${Number.isFinite(Number(free)) ? ` ($${Number(free).toFixed(2)})` : ''}.`;
+    const shortfall = snapshot.marginShortfall;
+    const parts = [
+      Number.isFinite(Number(required)) ? `Required $${Number(required).toFixed(2)}` : null,
+      Number.isFinite(Number(free)) ? `Free $${Number(free).toFixed(2)}` : null,
+      Number.isFinite(Number(shortfall)) && Number(shortfall) > 0 ? `Shortfall $${Number(shortfall).toFixed(2)}` : null,
+    ].filter(Boolean);
+    return parts.length ? parts.join(' · ') : 'The required margin for this trade is too high for your free margin.';
   }
   const map: Record<string, string> = {
     SAFETY_SWITCH_ON: 'Demo safety switch is on, so new trades are blocked.',
@@ -385,8 +404,8 @@ export async function setMt5WatchlistSymbols(pool: Pool, symbols: string[], enab
 }
 
 export async function scannerSnapshot(pool: Pool, actor: Mt5Actor, persist = false) {
-  const cfg = await settings(pool);
   const status = await getMt5Status(actor.requestId ?? undefined);
+  const cfg = await settings(pool, status.demo_verified);
   const watchlist = await pool.query(
     `SELECT i.symbol, i.asset_class
      FROM watchlists w JOIN instruments i ON i.symbol = w.symbol
@@ -503,8 +522,8 @@ export async function persistDecision(pool: Pool, decision: Awaited<ReturnType<t
 }
 
 export async function runAssistedAnalysis(pool: Pool, symbol: string, actor: Mt5Actor) {
-  const cfg = await settings(pool);
   const status = await getMt5Status(actor.requestId ?? undefined);
+  const cfg = await settings(pool, status.demo_verified);
   const instrument = await pool.query('SELECT asset_class FROM instruments WHERE symbol = $1', [symbol]);
   const decision = await analyzeMt5Symbol(symbol, actor.requestId ?? undefined);
   const saved = await persistDecision(pool, decision, instrument.rows[0]?.asset_class ?? 'OTHER');
@@ -547,13 +566,13 @@ export async function runAssistedAnalysis(pool: Pool, symbol: string, actor: Mt5
 }
 
 export async function getMt5AnalysisDetail(pool: Pool, symbol: string, actor: Mt5Actor, persist = false) {
-  const cfg = await settings(pool);
   const [status, instrumentResult, mt5Positions, symbolInfoRaw] = await Promise.all([
     getMt5Status(actor.requestId ?? undefined),
     pool.query('SELECT asset_class, description FROM instruments WHERE symbol = $1', [symbol]),
     listMt5Positions(actor.requestId ?? undefined).catch(() => []),
     getMt5SymbolInfo(symbol, actor.requestId ?? undefined).catch(() => null),
   ]);
+  const cfg = await settings(pool, status.demo_verified);
   const decision = await analyzeMt5Symbol(symbol, actor.requestId ?? undefined);
   const assetClassValue = instrumentResult.rows[0]?.asset_class ?? decision.market?.asset_class ?? 'OTHER';
   const tradesToday = await countTradesToday(pool);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadMt5RiskSettings, mt5RiskSettingsRows, parseEnvBoolean } from '../config/mt5-risk-settings';
+import { effectiveMt5RiskSettings, loadMt5RiskSettings, mt5RiskSettingsRows, parseEnvBoolean } from '../config/mt5-risk-settings';
 
 describe('MT5 risk settings', () => {
   it('parses boolean strings explicitly', () => {
@@ -53,5 +53,56 @@ describe('MT5 risk settings', () => {
     expect(byKey.mt5_kill_switch_enabled).toBe(false);
     expect(byKey.mt5_max_loss_per_trade).toBe('2.00');
     expect(byKey.mt5_max_daily_loss).toBe('10.00');
+  });
+
+  describe('DEMO Fast Learning risk profile', () => {
+    it('defaults to the conservative limits when FAST_LEARNING_RISK_PROFILE is unset', () => {
+      const settings = loadMt5RiskSettings({});
+      expect(settings.fast_learning_risk_profile_enabled).toBe(false);
+      expect(settings.mt5_max_simultaneous_positions).toBe(3);
+      expect(settings.mt5_max_trades_per_day).toBe(6);
+      expect(settings.mt5_max_risk_per_trade_pct).toBe('0.50');
+      expect(settings.mt5_max_loss_per_trade).toBe('100.00');
+    });
+
+    it('loosens the defaults to 10/30/1.0/3.00 when FAST_LEARNING_RISK_PROFILE=true', () => {
+      const settings = loadMt5RiskSettings({ FAST_LEARNING_RISK_PROFILE: 'true' });
+      expect(settings.fast_learning_risk_profile_enabled).toBe(true);
+      expect(settings.mt5_max_simultaneous_positions).toBe(10);
+      expect(settings.mt5_max_trades_per_day).toBe(30);
+      expect(settings.mt5_max_risk_per_trade_pct).toBe('1.0');
+      expect(settings.mt5_max_loss_per_trade).toBe('3.00');
+    });
+
+    it('an explicit MT5_MAX_* env value always wins over either default set', () => {
+      const off = loadMt5RiskSettings({ MT5_MAX_SIMULTANEOUS_POSITIONS: '7' });
+      expect(off.mt5_max_simultaneous_positions).toBe(7);
+      const on = loadMt5RiskSettings({ FAST_LEARNING_RISK_PROFILE: 'true', MT5_MAX_SIMULTANEOUS_POSITIONS: '7' });
+      expect(on.mt5_max_simultaneous_positions).toBe(7);
+    });
+
+    it('effectiveMt5RiskSettings forces the strict limits back when the profile is on but DEMO is not verified', () => {
+      const loose = loadMt5RiskSettings({ FAST_LEARNING_RISK_PROFILE: 'true' });
+      const guarded = effectiveMt5RiskSettings(false, loose);
+      expect(guarded.mt5_max_simultaneous_positions).toBe(3);
+      expect(guarded.mt5_max_trades_per_day).toBe(6);
+      expect(guarded.mt5_max_risk_per_trade_pct).toBe('0.50');
+      expect(guarded.mt5_max_loss_per_trade).toBe('100.00');
+    });
+
+    it('effectiveMt5RiskSettings passes the loosened limits through once DEMO is verified', () => {
+      const loose = loadMt5RiskSettings({ FAST_LEARNING_RISK_PROFILE: 'true' });
+      const verified = effectiveMt5RiskSettings(true, loose);
+      expect(verified.mt5_max_simultaneous_positions).toBe(10);
+      expect(verified.mt5_max_trades_per_day).toBe(30);
+      expect(verified.mt5_max_risk_per_trade_pct).toBe('1.0');
+      expect(verified.mt5_max_loss_per_trade).toBe('3.00');
+    });
+
+    it('effectiveMt5RiskSettings is a no-op when the profile is off, verified or not', () => {
+      const strict = loadMt5RiskSettings({});
+      expect(effectiveMt5RiskSettings(false, strict)).toEqual(strict);
+      expect(effectiveMt5RiskSettings(true, strict)).toEqual(strict);
+    });
   });
 });

@@ -74,6 +74,11 @@
             </div>
           </NuxtLink>
         </div>
+        <EmptyState
+          v-else-if="aiOpportunitiesError"
+          title="AI opportunities are temporarily unavailable"
+          :message="aiOpportunitiesErrorMessage"
+        />
         <EmptyState v-else title="No AI opportunities yet" message="Run FIND BEST TRADES on the AI Trade page to see ranked ideas here." />
       </UiCard>
     </section>
@@ -140,13 +145,23 @@ const assetFilter = ref('ALL');
 
 const { data: dashboard, refresh: refreshDashboard } = await useAsyncData<Record<string, any>>('mt5-dashboard', () => apiFetch('/mt5/dashboard'), { lazy: true });
 const { data: instrumentData, refresh: refreshInstruments } = await useAsyncData<{ instruments: InstrumentRow[] }>('dashboard-instruments', () => apiFetch('/mt5/instruments'), { lazy: true });
-const { data: aiOpportunities, refresh: refreshAiOpportunities } = await useAsyncData<{ opportunities: AiOpportunityRow[] }>('dashboard-ai-opportunities', () => apiFetch('/mt5/ai-trade/top-opportunities'), { lazy: true });
+const { data: aiOpportunities, error: aiOpportunitiesError, refresh: refreshAiOpportunities } = await useAsyncData<{ opportunities: AiOpportunityRow[] }>('dashboard-ai-opportunities', () => apiFetch('/mt5/ai-trade/top-opportunities'), { lazy: true });
 useAutoRefresh(refreshDashboard, 7000);
 
 const account = computed(() => dashboard.value?.account ?? {});
 const stats = computed(() => dashboard.value?.statistics ?? { openTrades: 0, winRate: 0, totalClosedTrades: 0, totalWins: 0, totalLosses: 0 });
 const marketSummary = computed(() => dashboard.value?.marketSummary ?? {});
 const aiTopOpportunities = computed<AiOpportunityRow[]>(() => aiOpportunities.value?.opportunities ?? []);
+// AI Top Opportunities degrades gracefully (spec: Home must never throw
+// during setup just because this one widget's upstream is temporarily
+// down) — a fetch failure here shows its own "temporarily unavailable"
+// message instead of the misleading generic "no opportunities yet" empty
+// state, using only the already-normalized, plain-language ApiError.message
+// (useApi.ts's apiFetch never throws a raw Error/Response/FetchError).
+const aiOpportunitiesErrorMessage = computed(() => {
+  const err = aiOpportunitiesError.value as { message?: string } | null;
+  return err?.message || 'AI opportunities are temporarily unavailable. Please try again shortly.';
+});
 const portfolio = computed(() => dashboard.value?.portfolioBySymbol ?? []);
 const demoReady = computed(() => Boolean(dashboard.value?.status?.connected && dashboard.value?.status?.demo_verified));
 const nextMarketLabel = computed(() => marketSummary.value.nextMarketOpenSymbol ? `${marketSummary.value.nextMarketOpenSymbol} ${formatDate(marketSummary.value.nextMarketOpen)}` : 'Not available');

@@ -1,9 +1,11 @@
 import { buildTradingAiPrompt } from './prompt';
+import { classifyRateLimitResponseBody, rateLimitRetryDelayMs, RATE_LIMIT_BASE_DELAY_MS, RATE_LIMIT_MAX_DELAY_MS, RATE_LIMIT_MAX_RETRIES, sleep } from './provider-http';
 import { parseTradeAIPlan } from './schema';
 import { tradePlanJsonSchemaObject } from './trade-plan-json-schema';
 import {
   AiProviderAuthError,
   AiProviderBillingError,
+  AiProviderRateLimitError,
   AiRequestTimeoutError,
   AiResponseInvalidError,
   ChartRef,
@@ -77,31 +79,54 @@ export class OpenAITradingAIProvider implements TradingAIProvider {
       },
     };
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(OPENAI_API_URL, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') throw new AiRequestTimeoutError();
-      throw new Error(`Trading AI provider request failed: ${(err as Error).message}`);
-    } finally {
-      clearTimeout(timeout);
+    let response: Response | null = null;
+    let rateLimitMessage = '';
+    for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        response = await fetch(OPENAI_API_URL, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') throw new AiRequestTimeoutError();
+        throw new Error(`Trading AI provider request failed: ${(err as Error).message}`);
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (response.status !== 429) break;
+
+      // 429 covers two very different situations: real quota/billing
+      // exhaustion (retrying never helps) vs. a genuinely transient
+      // "too many requests right now" rate limit — a burst scan across many
+      // shortlisted symbols (e.g. "FIND BEST TRADES") can trip the latter on
+      // a fully funded account. Only the latter is ever retried, and only up
+      // to RATE_LIMIT_MAX_RETRIES times.
+      const bodyText = await response.text().catch(() => '');
+      const classification = classifyRateLimitResponseBody(bodyText);
+      rateLimitMessage = classification.message;
+      if (!classification.retryable) {
+        throw new AiProviderBillingError(`OPENAI API BILLING/QUOTA ERROR: ${classification.message}`);
+      }
+      if (attempt === RATE_LIMIT_MAX_RETRIES) {
+        throw new AiProviderRateLimitError(`OPENAI API RATE LIMITED after ${RATE_LIMIT_MAX_RETRIES + 1} attempts: ${rateLimitMessage}`);
+      }
+      await sleep(rateLimitRetryDelayMs(response, attempt, RATE_LIMIT_BASE_DELAY_MS, RATE_LIMIT_MAX_DELAY_MS));
     }
+    // The loop above always either `break`s with a 2xx/4xx/5xx response,
+    // throws, or exhausts retries (which also throws) — response is always
+    // assigned by the time execution reaches here.
+    response = response as Response;
 
     if (response.status === 401) {
       throw new AiProviderAuthError('OPENAI AUTHENTICATION FAILED');
-    }
-    if (response.status === 429) {
-      throw new AiProviderBillingError('OPENAI API BILLING/QUOTA ERROR');
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');

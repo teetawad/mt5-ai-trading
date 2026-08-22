@@ -17,7 +17,10 @@
     "db:reset": "tsx src/db/reset-cli.ts",
     "bootstrap:owner": "tsx src/bootstrap/owner-cli.ts",
     "validate:phase17": "tsx src/validation/phase17-paper-validation.ts",
-    "validate:phase21": "tsx src/validation/phase21-paper-operations.ts"
+    "validate:phase21": "tsx src/validation/phase21-paper-operations.ts",
+    "ai:m5-cycle": "tsx src/cli/m5-cycle-cli.ts",
+    "ai:shadow-status": "tsx src/cli/shadow-status-cli.ts",
+    "ai:shadow-evaluate": "tsx src/cli/shadow-evaluate-cli.ts"
   },
   "dependencies": {
     "argon2": "^0.45.1",

@@ -223,6 +223,24 @@ export class AiRequestTimeoutError extends Error {
   }
 }
 
+// A genuinely transient "too many requests right now" 429 — distinct from
+// AiProviderBillingError (real quota/billing exhaustion, where retrying
+// never helps). Raised only after the provider's own retry-with-backoff
+// attempts (see provider-http.ts) are exhausted, so a burst scan across many
+// symbols (e.g. "FIND BEST TRADES" over 20 shortlisted symbols) hitting a
+// modest per-minute rate limit is not silently misreported as a billing
+// problem — see the regression this fixes: every one of 20 shortlisted
+// symbols failing with "OPENAI API BILLING/QUOTA ERROR" turned out to be
+// rate limiting, not exhausted quota.
+export class AiProviderRateLimitError extends Error {
+  code = 'AI_PROVIDER_RATE_LIMIT_ERROR' as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiProviderRateLimitError';
+  }
+}
+
 export interface TradingAIProvider {
   readonly providerName: string;
   readonly model: string;

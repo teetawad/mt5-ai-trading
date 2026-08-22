@@ -36,6 +36,16 @@ async function main() {
   const { isAiProviderConfigured } = await import('./services/trading-ai/provider');
   console.log(`[api] AiTradePlanWatcher started — real MT5 pending orders from the Trading AI are reconciled independently of the browser`);
   console.log(`[api] Trading AI provider: ${isAiProviderConfigured() ? `${process.env.TRADING_AI_PROVIDER}/${process.env.TRADING_AI_MODEL}` : 'AI PROVIDER NOT CONFIGURED'}`);
+
+  const { loadFastLearningSettings } = await import('./config/fast-learning-settings');
+  const { startM5CycleScheduler } = await import('./services/trading-ai/m5-cycle-scheduler');
+  const { startShadowTradeWatcher } = await import('./services/trading-ai/shadow-trade-watcher');
+  // Always started, but both self-gate on FAST_LEARNING_MODE every tick (same
+  // pattern as the kill switch) — never a separate conditional boot path, so
+  // the flag stays togglable without a server restart.
+  startM5CycleScheduler(getPoolForScheduler());
+  startShadowTradeWatcher(getPoolForScheduler());
+  console.log(`[api] M5 Fast Learning Mode: ${loadFastLearningSettings().fast_learning_mode_enabled ? 'ON' : 'OFF'} (FAST_LEARNING_MODE) — shadow trades never call order_send`);
 }
 
 main().catch((error) => {

@@ -1,3 +1,5 @@
+import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,6 +10,23 @@ from fastapi import FastAPI
 _ROOT_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 if _ROOT_ENV_PATH.exists():
     load_dotenv(_ROOT_ENV_PATH)
+
+# CRITICAL: without this, Python's logging module has NO configured handler
+# anywhere in this app — every logger.info()/logger.debug() call in
+# mt5/adapter.py and routers/mt5.py (order_check/order_send diagnostics,
+# raw MqlTradeResult dumps, reconciliation timing) was being silently
+# discarded before it ever reached the console. This was the actual reason
+# none of the "development diagnostics" added to mt5/adapter.py were ever
+# visible during manual DEMO testing — not a missing log statement, a
+# missing handler. MT5_LOG_LEVEL (default INFO) covers the whole app; the
+# mt5.* namespace is always at least DEBUG so the raw order_send/order_check
+# dumps (spec: "print in development") are never filtered out even if
+# MT5_LOG_LEVEL is set coarser for the rest of the app.
+logging.basicConfig(
+    level=getattr(logging, os.environ.get("MT5_LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logging.getLogger("mt5").setLevel(logging.DEBUG)
 
 from market_data.registry import init_provider  # noqa: E402
 from routers.health import router as health_router  # noqa: E402

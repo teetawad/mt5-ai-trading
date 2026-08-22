@@ -52,4 +52,30 @@
   .notice-warn {
     @apply rounded-lg border border-amber-300/40 bg-amber-400/10 p-4 text-sm text-amber-100;
   }
+
+  /* iOS safe-area helpers (notch / Dynamic Island / home indicator). Tailwind
+     has no built-in env() utility, so these are hand-rolled. Harmless no-ops
+     on desktop browsers (env() resolves to 0 there). */
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .mobile-bottom-nav {
+    padding-bottom: calc(0.5rem + env(safe-area-inset-bottom));
+  }
+
+  /* Space reserved at the bottom of scrollable page content on small screens
+     so the fixed mobile-bottom-nav never overlaps the last row of content. */
+  .mobile-nav-spacer {
+    height: calc(4rem + env(safe-area-inset-bottom));
+  }
+
+  .modal-safe-area {
+    padding-top: max(1rem, env(safe-area-inset-top));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
 }

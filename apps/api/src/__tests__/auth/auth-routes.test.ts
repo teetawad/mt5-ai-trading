@@ -35,7 +35,11 @@ describe('POST /auth/login', () => {
 
   afterAll(async () => {
     if (pool) {
-      await pool.query('DELETE FROM users WHERE email = $1', [TEST_EMAIL]);
+      // Never DELETE the seeded test user here: audit_logs rows created by
+      // this file's own login/logout tests reference it via actor_id, and
+      // audit_logs is intentionally immutable (no DELETE/UPDATE allowed) —
+      // the FK makes that delete fail every time after the first login. The
+      // row is reused (ON CONFLICT DO UPDATE) by the next run instead.
       await pool.end();
     }
   });
@@ -147,7 +151,11 @@ describe('POST /auth/logout', () => {
 
   afterAll(async () => {
     if (pool) {
-      await pool.query('DELETE FROM users WHERE email = $1', [TEST_EMAIL]);
+      // Never DELETE the seeded test user here: audit_logs rows created by
+      // this file's own login/logout tests reference it via actor_id, and
+      // audit_logs is intentionally immutable (no DELETE/UPDATE allowed) —
+      // the FK makes that delete fail every time after the first login. The
+      // row is reused (ON CONFLICT DO UPDATE) by the next run instead.
       await pool.end();
     }
   });

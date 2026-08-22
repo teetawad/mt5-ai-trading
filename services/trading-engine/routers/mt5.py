@@ -15,6 +15,7 @@ from mt5.adapter import (
     DemoExecutionGateway,
     MT5Adapter,
     MT5DemoSafetyError,
+    MT5OrderSendReturnedNoneError,
     MT5PendingOrderCancelledError,
     MT5PendingOrderConfirmationAmbiguousError,
     MT5PendingOrderNotConfirmedError,
@@ -399,6 +400,22 @@ def _pending_order_error(exc: MT5DemoSafetyError) -> HTTPException:
     the gateway attached to the exception — so the caller (and the DB row it
     persists) always has the exact MqlTradeResult, never just free text."""
     diagnostics = getattr(exc, "diagnostics", None)
+    if isinstance(exc, MT5OrderSendReturnedNoneError):
+        # No MqlTradeResult ever came back from the trade server (spec
+        # section 2/5/11) — this is an infrastructure/IPC failure, never a
+        # trade-server rejection, so it gets its own distinct code/status
+        # (503, not 403/409) rather than being folded into the generic
+        # PENDING_ORDER_REJECTED branch below, which would let the frontend
+        # mistakenly display order_check's retcode as if it were the
+        # (nonexistent) order_send result.
+        return HTTPException(
+            status_code=503,
+            detail={
+                "error": "MT5_ORDER_SEND_RETURNED_NONE",
+                "message": str(exc),
+                "diagnostics": diagnostics,
+            },
+        )
     if isinstance(exc, MT5PendingOrderConfirmationAmbiguousError):
         return HTTPException(
             status_code=409,

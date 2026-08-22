@@ -1,7 +1,9 @@
+import crypto from 'crypto';
 import Decimal from 'decimal.js';
 import { Pool } from 'pg';
 import { createAuditLog } from '../../db/repositories/audit-logs';
-import { loadMt5RiskSettings } from '../../config/mt5-risk-settings';
+import { effectiveMt5RiskSettings, loadMt5RiskSettings } from '../../config/mt5-risk-settings';
+import { loadFastLearningSettings } from '../../config/fast-learning-settings';
 import {
   cancelMt5PendingOrder,
   checkMt5Order,
@@ -67,6 +69,7 @@ function safeExecutionSnapshot(source: Record<string, unknown> | null | undefine
     execution_state: source.execution_state ?? null,
     last_error: source.last_error ?? null,
     request: source.request_diagnostics ?? null,
+    retcode_is_broker_nonstandard_zero: source.retcode_is_broker_nonstandard_zero ?? false,
   };
 }
 
@@ -101,6 +104,97 @@ function referenceEntryForRisk(plan: TradeAIPlan, bid: number | null, ask: numbe
     return plan.entry_price ?? plan.trigger_price;
   }
   return null;
+}
+
+// order_check() retcodes that mean "the request itself is well-formed and
+// affordable" — 10008/10009 are MT5's own "would be placed/done" preview
+// codes for a check call that never actually sends anything. Shared by the
+// real execution path (placeMarketOrder/placePendingOrder) and the FIND BEST
+// TRADES broker preflight (runBrokerPreflight) below, so "would this order
+// pass?" always means the exact same thing whether asked before ranking or
+// immediately before order_send.
+export const ACCEPTED_ORDER_CHECK_RETCODES = [0, 10008, 10009];
+
+export interface BrokerPreflightInput {
+  symbol: string;
+  decision: 'BUY' | 'SELL';
+  entryType: string | null;
+  pendingOrderType: string | null;
+  referenceEntry: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  planExpiry: string | null;
+  volume: number | null;
+}
+
+export interface BrokerPreflightResult {
+  brokerPreflightPass: boolean;
+  reason: string | null;
+}
+
+/**
+ * "TOP 10 EXECUTABLE" broker preflight (FIND BEST TRADES fix, spec section
+ * 7): runs the SAME MT5 order_check() this app uses immediately before a
+ * real order_send (checkMt5Order for MARKET_NOW, checkMt5PendingOrder for a
+ * pending BUY_LIMIT/SELL_LIMIT/BUY_STOP/SELL_STOP) against the exact request
+ * a card's own entry/SL/TP/volume would produce — never a second, weaker
+ * heuristic. Never calls order_send/sendMt5PendingOrder — a preview only.
+ * Only a candidate whose order_check confidently PASSes (the same
+ * ACCEPTED_ORDER_CHECK_RETCODES the real execution path accepts) is safe to
+ * present as "READY" — this is what stops a card from looking ready and then
+ * failing with PENDING_ORDER_NOT_CONFIRMED/BROKER_NONSTANDARD_RETCODE_ZERO
+ * the moment the owner actually clicks it.
+ */
+export async function runBrokerPreflight(input: BrokerPreflightInput, requestId?: string): Promise<BrokerPreflightResult> {
+  if (input.volume === null || !Number.isFinite(input.volume) || input.volume <= 0) {
+    return { brokerPreflightPass: false, reason: 'POSITION_SIZE_INVALID' };
+  }
+  if (input.stopLoss === null || input.takeProfit === null) {
+    return { brokerPreflightPass: false, reason: 'MISSING_SL_TP' };
+  }
+  // Never a real execution_key — this request is never sent to order_send,
+  // so uniqueness/idempotency semantics do not apply, only shape validity.
+  const preflightKey = `preflight:${crypto.randomUUID()}`;
+  try {
+    if (input.entryType === 'MARKET_NOW') {
+      const check = await checkMt5Order({
+        idempotency_key: preflightKey,
+        symbol: input.symbol,
+        side: input.decision,
+        volume: input.volume,
+        stop_loss: input.stopLoss,
+        take_profit: input.takeProfit,
+        deviation: loadMt5RiskSettings().mt5_allowed_deviation_points,
+      }, requestId);
+      const retcode = Number(check.retcode ?? -1);
+      return ACCEPTED_ORDER_CHECK_RETCODES.includes(retcode)
+        ? { brokerPreflightPass: true, reason: null }
+        : { brokerPreflightPass: false, reason: `MT5_RETCODE_${retcode}` };
+    }
+    const pendingType = input.pendingOrderType as Mt5PendingOrderRequestDTO['order_type'] | 'NONE' | null;
+    if (!pendingType || pendingType === 'NONE') {
+      return { brokerPreflightPass: false, reason: 'UNSUPPORTED_ORDER_TYPE' };
+    }
+    if (input.referenceEntry === null || !Number.isFinite(input.referenceEntry)) {
+      return { brokerPreflightPass: false, reason: 'INVALID_PENDING_PRICE' };
+    }
+    const check = await checkMt5PendingOrder({
+      idempotency_key: preflightKey,
+      symbol: input.symbol,
+      order_type: pendingType,
+      price: input.referenceEntry,
+      volume: input.volume,
+      stop_loss: input.stopLoss,
+      take_profit: input.takeProfit,
+      expiration: input.planExpiry ? new Date(input.planExpiry).toISOString() : null,
+    }, requestId);
+    const retcode = Number(check.retcode ?? -1);
+    return ACCEPTED_ORDER_CHECK_RETCODES.includes(retcode)
+      ? { brokerPreflightPass: true, reason: null }
+      : { brokerPreflightPass: false, reason: `MT5_RETCODE_${retcode}` };
+  } catch (err) {
+    return { brokerPreflightPass: false, reason: `BROKER_PREFLIGHT_UNAVAILABLE: ${(err as Error).message}` };
+  }
 }
 
 export interface AiTradePlanDetail {
@@ -144,7 +238,27 @@ export interface AiTradePlanDetail {
   debug?: { rawConfidence: unknown; normalizedConfidencePct: number };
 }
 
-export async function analyzeSymbolWithAI(pool: Pool, symbol: string, actor: Mt5Actor): Promise<AiTradePlanDetail | { aiConfigured: false; message: string }> {
+// Attributes an analysis to whichever cadence produced it (spec section 13,
+// 15: "collect every AI decision" and count "M5 decisions today" precisely).
+// Defaults preserve every existing call site (manual single-symbol analyze,
+// the unmodified runOpportunityScan) exactly as-is.
+export interface AnalyzeSymbolOptions {
+  triggerSource?: 'MANUAL' | 'M5_CYCLE';
+  m5CandleTimestamp?: string;
+  // Fallback plan expiry (minutes) used only when the AI's own
+  // plan_expiry_minutes is missing/non-finite/non-positive — the AI's
+  // judgement is otherwise never overridden (spec section 4).
+  fallbackPlanExpiryMinutes?: number;
+}
+
+export async function analyzeSymbolWithAI(
+  pool: Pool,
+  symbol: string,
+  actor: Mt5Actor,
+  options: AnalyzeSymbolOptions = {},
+): Promise<AiTradePlanDetail | { aiConfigured: false; message: string }> {
+  const triggerSource = options.triggerSource ?? 'MANUAL';
+  const m5CandleTimestamp = options.m5CandleTimestamp ?? null;
   let provider;
   try {
     provider = getTradingAIProvider();
@@ -175,12 +289,12 @@ export async function analyzeSymbolWithAI(pool: Pool, symbol: string, actor: Mt5
     else providerError = (err as Error).message;
     await pool.query(
       `INSERT INTO ai_analysis_runs(symbol, asset_class, ai_provider, ai_model, ai_prompt_version, latency_ms,
-        market_analysis_package, chart_refs, raw_ai_response, validation_error, provider_error)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        market_analysis_package, chart_refs, raw_ai_response, validation_error, provider_error, trigger_source, m5_candle_timestamp)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         symbol, assetClass, provider.providerName, provider.model, PROMPT_VERSION, Date.now() - startedAt,
         JSON.stringify(pkg), JSON.stringify(charts.map((c) => ({ timeframe: c.timeframe, mediaType: c.mediaType }))),
-        null, validationError, providerError,
+        null, validationError, providerError, triggerSource, m5CandleTimestamp,
       ],
     );
     throw err;
@@ -205,15 +319,15 @@ export async function analyzeSymbolWithAI(pool: Pool, symbol: string, actor: Mt5
   const runRow = await pool.query(
     `INSERT INTO ai_analysis_runs(symbol, asset_class, ai_provider, ai_model, ai_prompt_version, latency_ms,
       market_analysis_package, chart_refs, raw_ai_response, decision, confidence_pct, tradeability_pct, profitability_score, trade_score, trade_rating, score_breakdown,
-      action, action_reason)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      action, action_reason, trigger_source, m5_candle_timestamp)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
      RETURNING id`,
     [
       symbol, assetClass, provider.providerName, provider.model, PROMPT_VERSION, Date.now() - startedAt,
       JSON.stringify(pkg), JSON.stringify(charts.map((c) => ({ timeframe: c.timeframe, mediaType: c.mediaType }))),
       JSON.stringify(raw), plan.decision, plan.confidence_pct, tradeability.tradeabilityPct, profitability.profitabilityScore,
       tradeScore?.tradeScore ?? null, tradeScore?.tradeRating ?? null, tradeScore ? JSON.stringify(tradeScore.breakdown) : null,
-      waitAction?.action ?? null, waitAction?.reason ?? null,
+      waitAction?.action ?? null, waitAction?.reason ?? null, triggerSource, m5CandleTimestamp,
     ],
   );
   const analysisRunId = runRow.rows[0].id as string;
@@ -246,7 +360,7 @@ export async function analyzeSymbolWithAI(pool: Pool, symbol: string, actor: Mt5
     // for the decision policy's ENTER_NOW "market OPEN"/"LIVE quote" gate.
     getMt5MarketStatus(symbol, actor.requestId ?? undefined).catch(() => null),
   ]);
-  const cfg = loadMt5RiskSettings() as unknown as Record<string, unknown>;
+  const cfg = effectiveMt5RiskSettings(status.demo_verified) as unknown as Record<string, unknown>;
   const tradesToday = await countTradesToday(pool);
   const referenceEntry = referenceEntryForRisk(plan, pkg.quote.bid, pkg.quote.ask);
 
@@ -292,7 +406,10 @@ export async function analyzeSymbolWithAI(pool: Pool, symbol: string, actor: Mt5
   });
   await pool.query('UPDATE ai_analysis_runs SET action=$2, action_reason=$3 WHERE id=$1', [analysisRunId, action.action, action.reason]);
 
-  const planExpiry = new Date(Date.now() + plan.plan_expiry_minutes * 60_000).toISOString();
+  const planExpiryMinutes = Number.isFinite(plan.plan_expiry_minutes) && plan.plan_expiry_minutes > 0
+    ? plan.plan_expiry_minutes
+    : (options.fallbackPlanExpiryMinutes ?? plan.plan_expiry_minutes);
+  const planExpiry = new Date(Date.now() + planExpiryMinutes * 60_000).toISOString();
   const status0 = riskResult === 'PASS' ? 'WAITING_FOR_APPROVAL' : 'RISK_BLOCKED';
 
   const saved = await pool.query(
@@ -659,12 +776,12 @@ export async function approveAndPlaceAiTradePlan(pool: Pool, planId: string, act
   }
 
   try {
-    const cfg = loadMt5RiskSettings() as unknown as Record<string, unknown>;
+    const riskSettings = loadMt5RiskSettings();
     if (new Date(String(claimed.plan_expiry)).getTime() <= Date.now()) {
       await pool.query(`UPDATE ai_trade_plans SET status='PLAN_EXPIRED', expired_at=now(), execution_key=NULL, updated_at=now() WHERE id=$1`, [planId]);
       return { allowed: false, code: 'PLAN_EXPIRED', reason: 'The AI plan expired before it could be approved', plan: { ...claimed, status: 'PLAN_EXPIRED' } };
     }
-    if (cfg.mt5_kill_switch_enabled === true) {
+    if (riskSettings.mt5_kill_switch_enabled === true) {
       return await blockPlan(pool, claimed, 'RISK_BLOCKED', 'KILL_SWITCH');
     }
 
@@ -672,8 +789,33 @@ export async function approveAndPlaceAiTradePlan(pool: Pool, planId: string, act
     if (!status || !status.demo_verified) {
       return await blockPlan(pool, claimed, 'RISK_BLOCKED', status?.blocked_reason ?? 'DEMO_VERIFICATION_FAILED');
     }
+    // demo_verified is confirmed true above — a no-op here, kept for the
+    // same defense-in-depth guarantee as every other evaluateMt5Risk call
+    // site (effectiveMt5RiskSettings never applies the loosened Fast
+    // Learning DEMO profile without a verified DEMO account).
+    const cfg = effectiveMt5RiskSettings(status.demo_verified, riskSettings) as unknown as Record<string, unknown>;
 
     const symbol = String(claimed.symbol);
+
+    // Spec section 12: "one active real DEMO plan/order per symbol" — this
+    // is distinct from the live-MT5 POSITION_EXISTS/PENDING_ORDER checks
+    // below (which only see what MT5 already confirmed): a second local
+    // ai_trade_plans row for the same symbol can be mid-flight toward MT5
+    // (PENDING_ORDER_SUBMITTING) without a broker-side position/order
+    // existing yet, which those checks alone would miss.
+    if (loadFastLearningSettings().mt5_one_active_plan_per_symbol) {
+      const activeOther = await pool.query(
+        `SELECT id FROM ai_trade_plans
+         WHERE symbol = $1 AND id != $2
+           AND status IN ('PENDING_ORDER_SUBMITTING','PENDING_ORDER_PLACED','PENDING_ORDER_TRIGGERED','POSITION_OPEN')
+         LIMIT 1`,
+        [symbol, planId],
+      );
+      if (activeOther.rows.length) {
+        return await blockPlan(pool, claimed, 'EXECUTION_FAILED', 'ANOTHER_PLAN_ACTIVE_FOR_SYMBOL');
+      }
+    }
+
     const side = String(claimed.decision) as 'BUY' | 'SELL';
     const [tick, market, symbolInfo, positions, pendingOrders] = await Promise.all([
       getMt5Tick(symbol, actor.requestId ?? undefined).catch(() => null),
@@ -784,7 +926,7 @@ async function placeMarketOrder(pool: Pool, plan: Record<string, unknown>, actor
   } catch (err) {
     return await blockPlan(pool, plan, 'EXECUTION_FAILED', `ORDER_CHECK_FAILED: ${(err as Error).message}`);
   }
-  if (![0, 10008, 10009].includes(Number(check.retcode ?? -1))) {
+  if (!ACCEPTED_ORDER_CHECK_RETCODES.includes(Number(check.retcode ?? -1))) {
     return await blockPlan(pool, plan, 'EXECUTION_FAILED', `MT5_RETCODE_${check.retcode}`);
   }
 
@@ -838,6 +980,153 @@ async function placeMarketOrder(pool: Pool, plan: Record<string, unknown>, actor
   return { allowed: true, code: null, plan: { ...plan, status: 'POSITION_OPEN', order_ticket: orderTicket, deal_ticket: dealTicket, actual_entry: confirmedEntry, final_volume: confirmedVolume } };
 }
 
+// ---------------------------------------------------------------------
+// Background pending-order confirmation (perf fix — "make DEMO pending-order
+// submission feel fast" without ever weakening confirmation discipline).
+//
+// The trading engine's own synchronous check is now short (spec: <=300-500ms
+// beyond order_send()). When it still finds nothing, this continues checking
+// on a bounded, non-blocking schedule (500ms/1s/2s/3s — matching what the
+// user's spec calls "PART E") using the SAME MT5 read-only evidence lookups
+// the stuck-submission watcher and manual-retry paths already use
+// (findMt5EvidenceForPlan by execution-key comment — never symbol alone).
+// NEVER calls order_send again. If nothing is found anywhere after the full
+// bounded window, the plan is resolved to the same EXECUTION_FAILED/
+// PENDING_ORDER_NOT_CONFIRMED terminal state the synchronous path used to
+// produce immediately — just reached a few seconds later, off the blocking
+// HTTP path, giving the broker strictly more real wall-clock time than the
+// old ~1.75s single synchronous attempt this replaces. The existing 120s
+// reconcileStuckSubmissions watcher is untouched and remains the ultimate
+// crash-recovery safety net (e.g. the API process itself restarting
+// mid-background-check).
+// ---------------------------------------------------------------------
+// Overridable (like AI_TRADE_PLAN_WATCHER_INTERVAL_MS) so tests can use real,
+// short delays instead of the production schedule — deliberately real
+// setTimeout, never vi.useFakeTimers(), since faking global timers alongside
+// real pg I/O (which uses its own internal timers) is a known source of
+// flaky races.
+function backgroundReconcileDelaysMs(): number[] {
+  const override = process.env.AI_TRADE_BACKGROUND_RECONCILE_DELAYS_MS;
+  if (override) {
+    const parsed = override.split(',').map((v) => Number(v.trim())).filter((v) => Number.isFinite(v));
+    if (parsed.length) return parsed;
+  }
+  return [500, 500, 1000, 1000]; // cumulative marks: 500ms, 1s, 2s, 3s
+}
+
+async function finalizePlanFromLiveEvidence(
+  pool: Pool,
+  row: Record<string, unknown>,
+  matchedOrder: Record<string, unknown> | null,
+  matchedPosition: Record<string, unknown> | null,
+): Promise<boolean> {
+  if (matchedOrder) {
+    await pool.query(
+      `UPDATE ai_trade_plans SET status='PENDING_ORDER_PLACED', placed_at=now(), mt5_order_ticket=$2, execution_key=NULL, updated_at=now()
+       WHERE id=$1 AND status='PENDING_ORDER_SUBMITTING'`,
+      [row.id, String(matchedOrder.ticket ?? '')],
+    );
+    return true;
+  }
+  if (matchedPosition) {
+    await pool.query(
+      `UPDATE ai_trade_plans SET status='POSITION_OPEN', triggered_at=now(), actual_entry=$2, mt5_position_ticket=$3, execution_key=NULL, updated_at=now()
+       WHERE id=$1 AND status='PENDING_ORDER_SUBMITTING'`,
+      [row.id, numberOrNull(matchedPosition.price_open) ?? row.entry_price, String(matchedPosition.ticket ?? '')],
+    );
+    return true;
+  }
+  return false;
+}
+
+function scheduleBackgroundPendingOrderReconciliation(
+  pool: Pool,
+  plan: Record<string, unknown>,
+  actor: Mt5Actor,
+  snapshot: Record<string, unknown> | null,
+): void {
+  const planId = String(plan.id);
+  const symbol = String(plan.symbol);
+  const startedAt = Date.now();
+  const delays = backgroundReconcileDelaysMs();
+
+  const tick = async (attemptIndex: number): Promise<void> => {
+    const current = await pool.query(`SELECT * FROM ai_trade_plans WHERE id=$1`, [planId]);
+    const row = current.rows[0] as Record<string, unknown> | undefined;
+    // Another path (an owner retry click, the 120s stuck-submission
+    // watcher, or a previous tick) already resolved this plan — nothing
+    // left for this background pass to do.
+    if (!row || row.status !== 'PENDING_ORDER_SUBMITTING') return;
+
+    const [pendingOrders, positions] = await Promise.all([
+      listMt5PendingOrders(actor.requestId ?? undefined).catch(() => []),
+      listMt5Positions(actor.requestId ?? undefined).catch(() => []),
+    ]);
+    const { matchedOrder, matchedPosition } = findMt5EvidenceForPlan(row, pendingOrders, positions);
+    if (await finalizePlanFromLiveEvidence(pool, row, matchedOrder, matchedPosition)) {
+      console.log(`[background-reconcile] plan ${planId} confirmed after ${Date.now() - startedAt}ms (attempt ${attemptIndex})`);
+      return;
+    }
+
+    if (attemptIndex < delays.length) {
+      // Expression-body arrow so the returned promise chain is what the
+      // setTimeout callback resolves to — needed both for correctness and
+      // so test suites using vi.advanceTimersByTimeAsync can actually await
+      // this tick's real DB/MT5 I/O instead of racing past it.
+      setTimeout(() => tick(attemptIndex + 1).catch((err) => console.error('[background-reconcile] tick failed:', (err as Error).message)), delays[attemptIndex]);
+      return;
+    }
+
+    // Final attempt: also sweep order/deal HISTORY (a fast fill-and-close,
+    // or the broker settling just after the live endpoints were checked,
+    // can outrun orders_get()/positions_get() entirely) before ever
+    // concluding PENDING_ORDER_NOT_CONFIRMED — the same evidence sources
+    // reconcileInconclusiveExecution already checks for a manual retry.
+    const [historyOrders, historyDeals] = await Promise.all([
+      getMt5HistoryOrders(symbol, 1, actor.requestId ?? undefined).catch(() => []),
+      getMt5HistoryDeals(symbol, 1, actor.requestId ?? undefined).catch(() => []),
+    ]);
+    const comment = planComment(row.id);
+    const matchedHistoryOrder = historyOrders.find((o) => String(o.symbol) === symbol && String(o.comment ?? '') === comment);
+    if (matchedHistoryOrder && Number(matchedHistoryOrder.state) === MT5_ORDER_STATE_FILLED) {
+      await pool.query(
+        `UPDATE ai_trade_plans SET status='POSITION_OPEN', triggered_at=now(), actual_entry=$2, mt5_order_ticket=$3, execution_key=NULL, updated_at=now()
+         WHERE id=$1 AND status='PENDING_ORDER_SUBMITTING'`,
+        [planId, numberOrNull(matchedHistoryOrder.price_open) ?? row.entry_price, String(matchedHistoryOrder.ticket ?? '')],
+      );
+      console.log(`[background-reconcile] plan ${planId} confirmed via order history after ${Date.now() - startedAt}ms`);
+      return;
+    }
+    const matchedHistoryDeal = historyDeals.find((d) => String(d.symbol) === symbol && String(d.comment ?? '') === comment && Number(d.entry) === MT5_DEAL_ENTRY_IN);
+    if (matchedHistoryDeal) {
+      const positionTicket = matchedHistoryDeal.position_id ?? matchedHistoryDeal.order ?? null;
+      await pool.query(
+        `UPDATE ai_trade_plans SET status='POSITION_OPEN', triggered_at=now(), actual_entry=$2, mt5_position_ticket=$3, execution_key=NULL, updated_at=now()
+         WHERE id=$1 AND status='PENDING_ORDER_SUBMITTING'`,
+        [planId, numberOrNull(matchedHistoryDeal.price) ?? row.entry_price, positionTicket !== null ? String(positionTicket) : null],
+      );
+      console.log(`[background-reconcile] plan ${planId} confirmed via deal history after ${Date.now() - startedAt}ms`);
+      return;
+    }
+
+    // Genuinely no evidence anywhere after the full bounded window —
+    // terminal PENDING_ORDER_NOT_CONFIRMED, the same state/diagnostics
+    // shape the synchronous path used to produce immediately. Never a
+    // second order_send: an owner retry click still goes through
+    // reconcileInconclusiveExecution's own fresh MT5 check first.
+    await pool.query(
+      `UPDATE ai_trade_plans
+       SET status='EXECUTION_FAILED', blocked_reason='PENDING_ORDER_NOT_CONFIRMED', execution_key=NULL, updated_at=now(),
+           execution_snapshot = COALESCE($2::jsonb, execution_snapshot)
+       WHERE id=$1 AND status='PENDING_ORDER_SUBMITTING'`,
+      [planId, snapshot ? JSON.stringify(snapshot) : null],
+    );
+    console.log(`[background-reconcile] plan ${planId} unconfirmed after ${Date.now() - startedAt}ms (background_confirmation_ms)`);
+  };
+
+  setTimeout(() => tick(1).catch((err) => console.error('[background-reconcile] initial tick failed:', (err as Error).message)), delays[0]);
+}
+
 async function placePendingOrder(pool: Pool, plan: Record<string, unknown>, actor: Mt5Actor, volume: number, side: 'BUY' | 'SELL', price: number | null): Promise<AiPlanExecutionOutcome> {
   if (price === null || !Number.isFinite(price)) return await blockPlan(pool, plan, 'EXECUTION_FAILED', 'INVALID_PENDING_PRICE');
   const pendingType = String(plan.pending_order_type) as Mt5PendingOrderRequestDTO['order_type'];
@@ -863,7 +1152,7 @@ async function placePendingOrder(pool: Pool, plan: Record<string, unknown>, acto
   // never execution. Its diagnostics (retcode/comment/margin*) are
   // persisted under their own key even on rejection, never conflated with
   // an order_send result.
-  if (![0, 10008, 10009].includes(Number(check.retcode ?? -1))) {
+  if (!ACCEPTED_ORDER_CHECK_RETCODES.includes(Number(check.retcode ?? -1))) {
     return await blockPlan(pool, plan, 'EXECUTION_FAILED', `MT5_RETCODE_${check.retcode}`, undefined, {
       order_check: {
         retcode: check.retcode ?? null,
@@ -903,6 +1192,30 @@ async function placePendingOrder(pool: Pool, plan: Record<string, unknown>, acto
         // EXECUTION_FAILED (which would make a future retry attempt think
         // the outcome is still unknown rather than settled).
         return await blockPlan(pool, plan, 'ORDER_CANCELLED', code, pendingOrderErrorReason(err), engineDiagnostics);
+      }
+      if (code === 'PENDING_ORDER_NOT_CONFIRMED') {
+        // The trading engine's own synchronous check is now intentionally
+        // SHORT (perf fix: "make DEMO pending-order submission feel fast" —
+        // see mt5/adapter.py's _RECONCILE_DELAYS_SECONDS). Reaching this
+        // only means the broker had not registered the order within that
+        // short window — never a definite failure. Never resend order_send;
+        // instead give the broker more real wall-clock time in a bounded,
+        // non-blocking background pass while returning to the owner
+        // immediately, rather than holding this HTTP request open or
+        // declaring failure prematurely (strictly MORE total patience than
+        // the old single ~1.75s synchronous attempt this replaces).
+        await pool.query(
+          `UPDATE ai_trade_plans SET execution_snapshot = COALESCE($2::jsonb, execution_snapshot), updated_at=now()
+           WHERE id=$1 AND status='PENDING_ORDER_SUBMITTING'`,
+          [plan.id, engineDiagnostics ? JSON.stringify(engineDiagnostics) : null],
+        );
+        scheduleBackgroundPendingOrderReconciliation(pool, plan, actor, engineDiagnostics);
+        return {
+          allowed: true,
+          code: 'PENDING_CONFIRMATION',
+          reason: 'Request was sent to MT5. Confirming the real order/position in the background.',
+          plan: { ...plan, status: 'PENDING_ORDER_SUBMITTING', execution_snapshot: engineDiagnostics },
+        };
       }
       return await blockPlan(pool, plan, 'EXECUTION_FAILED', code, pendingOrderErrorReason(err), engineDiagnostics);
     }
@@ -1019,6 +1332,50 @@ export async function cancelAiTradePlanOrder(pool: Pool, planId: string, actor: 
     requestId: actor.requestId ?? null,
   });
   return { allowed: true, code: null, plan: updated.rows[0] ?? row };
+}
+
+// Terminal/negative states — mirrors blockPlan's own status vocabulary plus
+// the plan lifecycle's other definite-stop states, so polling this derives
+// exactly the same allowed/code shape the approve endpoint itself returns.
+const NEGATIVE_PLAN_STATUSES = new Set([
+  'RISK_BLOCKED',
+  'EXECUTION_FAILED',
+  'ORDER_CANCELLED',
+  'PLAN_EXPIRED',
+]);
+
+/**
+ * GET-friendly status lookup for a single plan (spec: "Frontend polls a
+ * status endpoint ... GET /mt5/executions/:executionId ... reuse an existing
+ * execution-status endpoint"). Derives the exact same {allowed, code, reason,
+ * plan} shape approveAndPlaceAiTradePlan itself returns, so the frontend's
+ * existing success/failure/confirming rendering logic (all keyed off
+ * approveOutcome.plan.status/.blocked_reason/.execution_snapshot) works
+ * unchanged whether the outcome came from the original POST or from polling
+ * this GET while a background reconciliation is still in flight.
+ */
+export async function getAiTradePlanStatus(pool: Pool, planId: string): Promise<AiPlanExecutionOutcome> {
+  const result = await pool.query('SELECT * FROM ai_trade_plans WHERE id=$1', [planId]);
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  if (!row) return { allowed: false, code: 'PLAN_NOT_FOUND', reason: 'AI trade plan not found', plan: null };
+
+  if (row.status === 'PENDING_ORDER_SUBMITTING') {
+    return {
+      allowed: true,
+      code: 'PENDING_CONFIRMATION',
+      reason: 'Request was sent to MT5. Confirming the real order/position in the background.',
+      plan: row,
+    };
+  }
+  if (NEGATIVE_PLAN_STATUSES.has(String(row.status))) {
+    return { allowed: false, code: String(row.status), reason: (row.blocked_reason as string | null) ?? String(row.status), plan: row };
+  }
+  // WAITING_FOR_APPROVAL/AI_PLAN_CREATED/PENDING_ORDER_PLACED/
+  // PENDING_ORDER_TRIGGERED/POSITION_OPEN/POSITION_CLOSED are all
+  // non-negative outcomes as far as this endpoint's shape is concerned —
+  // the frontend's own computeds (isPendingOrderSuccess etc.) key off the
+  // real plan.status value, not this allowed/code pair.
+  return { allowed: true, code: null, plan: row };
 }
 
 export { planComment };

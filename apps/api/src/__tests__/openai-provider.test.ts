@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenAITradingAIProvider } from '../services/trading-ai/openai-provider';
-import { AiProviderAuthError, AiProviderBillingError, AiRequestTimeoutError, AiResponseInvalidError } from '../services/trading-ai/types';
+import { AiProviderAuthError, AiProviderBillingError, AiProviderRateLimitError, AiRequestTimeoutError, AiResponseInvalidError } from '../services/trading-ai/types';
 import { AiPlanValidationError } from '../services/trading-ai/types';
 import { MarketAnalysisPackage } from '../services/trading-ai/types';
 
@@ -241,11 +241,68 @@ describe('OpenAITradingAIProvider', () => {
     await expect(provider.analyze({ pkg: pkg(), charts: [], promptVersion: 'TEST' })).rejects.toThrow('OPENAI AUTHENTICATION FAILED');
   });
 
-  it('maps a 429 response to OPENAI API BILLING/QUOTA ERROR', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(429, { error: { message: 'You exceeded your current quota' } }));
+  it('maps a 429 with an insufficient_quota error type to OPENAI API BILLING/QUOTA ERROR, never retried', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(429, { error: { message: 'You exceeded your current quota', type: 'insufficient_quota', code: 'insufficient_quota' } }));
     const provider = new OpenAITradingAIProvider('sk-test', 'gpt-5.6-terra');
     await expect(provider.analyze({ pkg: pkg(), charts: [], promptVersion: 'TEST' })).rejects.toThrow(AiProviderBillingError);
-    await expect(provider.analyze({ pkg: pkg(), charts: [], promptVersion: 'TEST' })).rejects.toThrow('OPENAI API BILLING/QUOTA ERROR');
+    expect(fetchMock).toHaveBeenCalledTimes(1); // real quota exhaustion — retrying would never help
+  });
+
+  it('maps a 429 with no recognizable error type to OPENAI API BILLING/QUOTA ERROR (safer default: never spin-retry an unrecognized 429 shape)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(429, { error: { message: 'Too many requests' } }));
+    const provider = new OpenAITradingAIProvider('sk-test', 'gpt-5.6-terra');
+    await expect(provider.analyze({ pkg: pkg(), charts: [], promptVersion: 'TEST' })).rejects.toThrow(AiProviderBillingError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression test (owner report: "FIND BEST TRADES" scan across 20
+  // shortlisted symbols came back with Valid trade plans: 0, all 20 showing
+  // "Technical blocked" — the real ai_analysis_runs rows all recorded
+  // provider_error='OPENAI API BILLING/QUOTA ERROR' for a 429 response, even
+  // though the account was not actually out of quota; it was rate-limited by
+  // the burst of concurrent requests. A rate_limit_exceeded 429 must be
+  // retried, not immediately treated as billing exhaustion.
+  it('retries a transient rate_limit_exceeded 429 with backoff and succeeds once the provider stops rate-limiting', async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(429, { error: { message: 'Rate limit reached for requests', type: 'rate_limit_error', code: 'rate_limit_exceeded' } }))
+      .mockResolvedValueOnce(jsonResponse(200, responsesApiBody(buyPlanJson())));
+    const provider = new OpenAITradingAIProvider('sk-test', 'gpt-5.6-terra');
+    const promise = provider.analyze({ pkg: pkg(), charts: [], promptVersion: 'TEST' });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+    expect(result.plan.decision).toBe('BUY');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up after exhausting rate-limit retries and throws AiProviderRateLimitError, distinct from billing exhaustion', async () => {
+    vi.useFakeTimers();
+    // A fresh Response per call (mockImplementation), not a single shared
+    // instance (mockResolvedValue) — a real fetch() response body can only
+    // ever be read once, and this test's code reads the body on every retry
+    // attempt to classify the 429.
+    fetchMock.mockImplementation(async () => jsonResponse(429, { error: { message: 'Rate limit reached for requests', type: 'rate_limit_error', code: 'rate_limit_exceeded' } }));
+    const provider = new OpenAITradingAIProvider('sk-test', 'gpt-5.6-terra');
+    const promise = provider.analyze({ pkg: pkg(), charts: [], promptVersion: 'TEST' });
+    const assertion = expect(promise).rejects.toThrow(AiProviderRateLimitError);
+    await vi.advanceTimersByTimeAsync(5000);
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(3); // initial attempt + 2 retries
+  });
+
+  it('respects a Retry-After header on a retryable 429 instead of the default backoff delay', async () => {
+    vi.useFakeTimers();
+    const rateLimited = new Response(JSON.stringify({ error: { message: 'slow down', type: 'rate_limit_error' } }), {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'retry-after': '2' },
+    });
+    fetchMock.mockResolvedValueOnce(rateLimited).mockResolvedValueOnce(jsonResponse(200, responsesApiBody(buyPlanJson())));
+    const provider = new OpenAITradingAIProvider('sk-test', 'gpt-5.6-terra');
+    const promise = provider.analyze({ pkg: pkg(), charts: [], promptVersion: 'TEST' });
+    await vi.advanceTimersByTimeAsync(2100);
+    const result = await promise;
+    expect(result.plan.decision).toBe('BUY');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('never leaks the API key into a thrown error message on auth failure', async () => {

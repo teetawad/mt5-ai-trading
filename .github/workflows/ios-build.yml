@@ -1,0 +1,188 @@
+name: iOS Build
+
+# Proves the Capacitor iOS project actually compiles, on a macOS runner the
+# owner (Windows-only, no personal Mac) doesn't need to own. See
+# docs/MOBILE_IOS.md Workflow C. Every step below is a plain npm script or a
+# standard xcodebuild invocation - nothing here is tied to GitHub Actions
+# specifically, so the same steps work unmodified on Codemagic or any other
+# macOS CI provider (see docs/MOBILE_IOS.md "CI provider neutrality").
+#
+# Two separate jobs, deliberately:
+#   - validate: unsigned compile-for-simulator check. Always runs, never
+#     needs Apple credentials, never fails just because signing isn't set up.
+#   - signed-distribution: an archive + .ipa export, gated behind both a
+#     manual trigger AND the signing secrets actually being present. Never
+#     uploads anywhere (no TestFlight/App Store step) - it only produces a
+#     downloadable build artifact for a human to inspect and upload manually.
+#
+# Required secrets for the signed job (values only - never commit them):
+#   IOS_DIST_CERTIFICATE_P12       - base64-encoded .p12 distribution certificate
+#   IOS_DIST_CERTIFICATE_PASSWORD  - password for the .p12 above
+#   IOS_PROVISIONING_PROFILE       - base64-encoded .mobileprovision file
+#   IOS_TEAM_ID                    - Apple Developer Team ID
+# Optional, only needed for a future automated TestFlight upload (not done
+# by this workflow):
+#   APP_STORE_CONNECT_API_KEY_ID
+#   APP_STORE_CONNECT_API_ISSUER_ID
+#   APP_STORE_CONNECT_API_KEY_P8   - base64-encoded .p8 key
+#
+# Optional repository variable:
+#   MOBILE_API_URL - the NUXT_PUBLIC_API_URL baked into the CI build. Must be
+#   an https:// URL (apps/web/nuxt.config.ts enforces this for any Capacitor
+#   build). Defaults to a placeholder - fine for compile validation, but set
+#   a real value before treating the signed-distribution artifact as anything
+#   other than a build check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - '.github/workflows/ios-build.yml'
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - '.github/workflows/ios-build.yml'
+  workflow_dispatch:
+    inputs:
+      run_signed_build:
+        description: 'Also run the signed distribution build (requires signing secrets)'
+        type: boolean
+        default: false
+
+env:
+  NUXT_PUBLIC_API_URL: ${{ vars.MOBILE_API_URL || 'https://api.example.invalid' }}
+
+jobs:
+  validate:
+    name: iOS compile validation (unsigned)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build mobile bundle + sync Capacitor iOS (fails on any bundled secret)
+        run: npm run ios:ci-check
+
+      - name: Compile for iOS Simulator (no signing required)
+        working-directory: apps/web/ios/App
+        run: |
+          xcodebuild build \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+
+  signed-distribution:
+    name: Signed iOS distribution build (optional)
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.run_signed_build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Check required signing secrets are configured
+        id: secrets_check
+        run: |
+          if [ -z "${{ secrets.IOS_DIST_CERTIFICATE_P12 }}" ] || \
+             [ -z "${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}" ] || \
+             [ -z "${{ secrets.IOS_PROVISIONING_PROFILE }}" ] || \
+             [ -z "${{ secrets.IOS_TEAM_ID }}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signed build requested but one or more of IOS_DIST_CERTIFICATE_P12, IOS_DIST_CERTIFICATE_PASSWORD, IOS_PROVISIONING_PROFILE, IOS_TEAM_ID is not set. Skipping - this is expected until Apple signing is configured."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.secrets_check.outputs.configured == 'true'
+        run: npm ci
+
+      - name: Build mobile bundle + sync Capacitor iOS
+        if: steps.secrets_check.outputs.configured == 'true'
+        run: npm run ios:ci-check
+
+      - name: Import signing certificate and provisioning profile
+        if: steps.secrets_check.outputs.configured == 'true'
+        env:
+          CERT_P12: ${{ secrets.IOS_DIST_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/ios-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          CERT_PATH="$RUNNER_TEMP/dist_cert.p12"
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+
+          echo -n "$CERT_P12" | base64 --decode -o "$CERT_PATH"
+          echo -n "$PROVISIONING_PROFILE" | base64 --decode -o "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Archive
+        if: steps.secrets_check.outputs.configured == 'true'
+        working-directory: apps/web/ios/App
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          xcodebuild archive \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            DEVELOPMENT_TEAM="$IOS_TEAM_ID"
+
+      - name: Export IPA
+        if: steps.secrets_check.outputs.configured == 'true'
+        working-directory: apps/web/ios/App
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+      # Uploaded as a downloadable CI artifact ONLY. No TestFlight/App Store
+      # upload step exists here on purpose - that stays a deliberate, manual,
+      # separate action.
+      - name: Upload IPA artifact
+        if: steps.secrets_check.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-app-ipa
+          path: ${{ runner.temp }}/export/*.ipa
+          retention-days: 14

@@ -20,10 +20,15 @@ import { getMt5Status, listMt5PendingOrders } from '../services/mt5-client';
 import { loadMt5RiskSettings, mt5RiskSettingsRows } from '../config/mt5-risk-settings';
 import { aiScannerSettingsRows, loadAiScannerSettings } from '../config/ai-scanner-settings';
 import { describeTradingAIProvider } from '../services/trading-ai/provider';
-import { analyzeSymbolWithAI, approveAndPlaceAiTradePlan, cancelAiTradePlanOrder } from '../services/trading-ai/trading-ai-service';
+import { analyzeSymbolWithAI, approveAndPlaceAiTradePlan, cancelAiTradePlanOrder, getAiTradePlanStatus } from '../services/trading-ai/trading-ai-service';
 import { getTopOpportunities, listScanCandidates, runOpportunityScan } from '../services/trading-ai/opportunity-scan';
 import { getTradeScoreEvaluation } from '../services/trading-ai/score-evaluation';
 import { getAiActionStats } from '../services/trading-ai/action-stats';
+import { getM5CycleStatus } from '../services/trading-ai/m5-cycle-scheduler';
+import { getLatestM5Opportunities } from '../services/trading-ai/m5-opportunity-scan';
+import { listShadowTrades } from '../services/trading-ai/shadow-trade-service';
+import { getFastLearningAllTimeSummary, getFastLearningDailySummary, getFastLearningScoreBuckets, getFinalQualityBuckets, getMlDataReadiness, getRankPerformance } from '../services/trading-ai/fast-learning-dashboard';
+import { listRealDemoLearningOutcomes } from '../services/trading-ai/real-demo-learning';
 import {
   AiPlanValidationError,
   AiProviderAuthError,
@@ -377,6 +382,19 @@ mt5Router.get('/ai-trade/plans', requireOwner, async (_req: Request, res: Respon
   }
 });
 
+// Status-polling endpoint for a single in-flight plan (perf fix: "make DEMO
+// pending-order submission feel fast" — the frontend polls this while a
+// background reconciliation is confirming the real MT5 order/position,
+// instead of the original POST /approve request being held open).
+mt5Router.get('/ai-trade/plans/:id/status', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const outcome = await getAiTradePlanStatus(getPool(), req.params.id);
+    res.status(outcome.code === 'PENDING_CONFIRMATION' ? 202 : 200).json(outcome);
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
 mt5Router.get('/ai-trade/pending-orders', requireOwner, async (req: Request, res: Response) => {
   try {
     const [orders, plans] = await Promise.all([
@@ -411,11 +429,22 @@ mt5Router.post('/ai-trade/scan', requireOwner, async (req: Request, res: Respons
 
 // Home page "AI TOP OPPORTUNITIES": passive read of the most recent
 // persisted analysis per watchlist symbol — never triggers a new AI call.
+// This endpoint's only real dependency is Postgres (no MT5/AI-provider
+// call), so a failure here must never be reported as the generic
+// mt5Error()'s "MT5_BACKEND_ERROR" — that mislabels a database/query issue
+// as an MT5 connectivity problem. Degrades gracefully: the Home page always
+// gets a well-formed `opportunities` array (empty on failure) alongside a
+// precise error code/message it can choose to surface.
 mt5Router.get('/ai-trade/top-opportunities', requireOwner, async (_req: Request, res: Response) => {
   try {
     res.json({ opportunities: await getTopOpportunities(getPool()) });
   } catch (err) {
-    mt5Error(res, err);
+    console.error('[top-opportunities] failed to load AI Top Opportunities (Home page degrades gracefully):', (err as Error).message);
+    res.status(503).json({
+      error: 'TOP_OPPORTUNITIES_UNAVAILABLE',
+      message: 'AI opportunities are temporarily unavailable.',
+      opportunities: [],
+    });
   }
 });
 
@@ -446,10 +475,99 @@ mt5Router.get('/ai-trade/action-stats', requireOwner, async (_req: Request, res:
   }
 });
 
+// M5 Fast Learning Mode (spec sections 1-21): the automatic, M5-candle-
+// triggered sibling of the manual "FIND BEST TRADES" flow above. Read-only
+// status/listing routes only — the cycle itself is driven by
+// m5-cycle-scheduler.ts's own interval, never by a client request.
+mt5Router.get('/ai-trade/m5/status', requireOwner, (_req: Request, res: Response) => {
+  res.json(getM5CycleStatus());
+});
+
+mt5Router.get('/ai-trade/m5/shadow-trades', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim().toUpperCase() : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const offset = req.query.offset ? Number(req.query.offset) : undefined;
+    res.json(await listShadowTrades(getPool(), { status, symbol, limit, offset }));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+// Spec section 11 ("FAST DEMO CANDIDATES") and section 18 ("FAST FIND BEST
+// TRADES") share the same underlying latest-cycle ranking — see
+// getLatestM5Opportunities's own doc comment for why one read serves both.
+// Split into TOP N REAL DEMO CANDIDATES vs SHADOW LEARNING ONLY (spec
+// sections 17, 20) — real_demo_eligible was already decided and persisted at
+// scan time (m5-opportunity-scan.ts), never recomputed here.
+mt5Router.get('/ai-trade/m5/fast-demo-candidates', requireOwner, async (_req: Request, res: Response) => {
+  try {
+    const candidates = await getLatestM5Opportunities(getPool());
+    const realDemoCandidates = candidates.filter((c) => c.real_demo_eligible === true);
+    const shadowLearningOnly = candidates.filter((c) => c.real_demo_eligible !== true);
+    res.json({ candidates, realDemoCandidates, shadowLearningOnly });
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/ai-trade/m5/top-opportunities', requireOwner, async (_req: Request, res: Response) => {
+  try {
+    res.json({ opportunities: await getLatestM5Opportunities(getPool()) });
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/ai-trade/m5/dashboard', requireOwner, async (_req: Request, res: Response) => {
+  try {
+    const [today, allTime, profitabilityBuckets, tradeabilityBuckets, finalQualityBuckets, rankPerformance] = await Promise.all([
+      getFastLearningDailySummary(getPool()),
+      getFastLearningAllTimeSummary(getPool()),
+      getFastLearningScoreBuckets(getPool(), 'profitability_score'),
+      getFastLearningScoreBuckets(getPool(), 'tradeability_pct'),
+      getFinalQualityBuckets(getPool()),
+      getRankPerformance(getPool()),
+    ]);
+    res.json({ today, allTime, profitabilityBuckets, tradeabilityBuckets, finalQualityBuckets, rankPerformance });
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+mt5Router.get('/ai-trade/m5/ml-readiness', requireOwner, async (_req: Request, res: Response) => {
+  try {
+    res.json(await getMlDataReadiness(getPool()));
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
+// REAL_DEMO half of the Fast Learning dataset (spec section 2/5): actual
+// MT5-confirmed completed trades, referenced read-only from trade_outcomes —
+// never a Shadow Trade, never mixed into the shadow-trades listing above.
+// History remains the source of truth for these same rows; this exists only
+// so the Fast Learning page can show them clearly labeled alongside Shadow
+// data for AI evaluation.
+mt5Router.get('/ai-trade/m5/real-demo-outcomes', requireOwner, async (req: Request, res: Response) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    res.json({ outcomes: await listRealDemoLearningOutcomes(getPool(), { limit }) });
+  } catch (err) {
+    mt5Error(res, err);
+  }
+});
+
 mt5Router.post('/ai-trade/plans/:id/approve', requireOwner, async (req: Request, res: Response) => {
+  // http_total_ms (spec: "Add timing diagnostics in development ... do not
+  // guess where the delay is") — the full round trip of this request, now
+  // that long reconciliation no longer blocks it.
+  const _requestStart = Date.now();
   try {
     const outcome = await approveAndPlaceAiTradePlan(getPool(), req.params.id, actor(req));
-    res.status(outcome.allowed ? 201 : 200).json(outcome);
+    console.log(`[ai-trade approve] plan=${req.params.id} code=${outcome.code} http_total_ms=${Date.now() - _requestStart}`);
+    res.status(outcome.code === 'PENDING_CONFIRMATION' ? 202 : outcome.allowed ? 201 : 200).json(outcome);
   } catch (err) {
     res.status(422).json({ allowed: false, code: 'UNEXPECTED_ERROR', message: (err as Error).message });
   }
