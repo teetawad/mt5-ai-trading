@@ -49,6 +49,7 @@ on:
     inputs:
       run_signed_build:
         description: 'Also run the signed distribution build (requires signing secrets)'
+        required: false
         type: boolean
         default: false
 
